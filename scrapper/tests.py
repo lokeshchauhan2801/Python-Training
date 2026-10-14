@@ -9,6 +9,7 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework.test import APIClient
 
 from company.models import Company
 
@@ -83,3 +84,43 @@ class ScrapeServiceRunTests(TestCase):
         result = ScrapeService().run(job)
         self.assertEqual(result.status, ScrapeJob.Status.ERROR)
         self.assertEqual(result.error, "URL not allowed")
+
+
+class ScrapeJobApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(email="alice@example.com", password="x")
+        self.bob = User.objects.create_user(email="bob@example.com", password="x")
+        self.alice_co = Company.objects.create(owner=self.alice, name="AC", slug="ac")
+        self.bob_co = Company.objects.create(owner=self.bob, name="BC", slug="bc")
+
+    def test_create_defaults_company_and_status_pending(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.post(
+            "/api/v1/scrapper/scrape-job/",
+            {"url": "https://example.com/"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(str(resp.data["company"]), str(self.alice_co.id))
+        self.assertEqual(resp.data["status"], ScrapeJob.Status.PENDING)
+
+    def test_cannot_attach_another_owners_company(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.post(
+            "/api/v1/scrapper/scrape-job/",
+            {"url": "https://example.com/", "company": str(self.bob_co.id)},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("company", resp.data)
+
+    def test_run_action_records_error_for_blocked_url(self):
+        self.client.force_authenticate(self.alice)
+        job = ScrapeJob.objects.create(
+            company=self.alice_co, url="file:///etc/passwd"
+        )
+        resp = self.client.post(f"/api/v1/scrapper/scrape-job/{job.id}/run/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["status"], ScrapeJob.Status.ERROR)
+        self.assertEqual(resp.data["error"], "URL not allowed")
