@@ -24,9 +24,9 @@ import json
 
 from django.contrib import admin
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
-from django.urls import path, reverse
+from django.urls import path
 
 from basics.admin import BaseModelAdmin
 from basics.llm import LLMBackendError, LLMConfigurationError
@@ -325,6 +325,8 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
     # --- Chat UI: create a new session under a scoped company --------------
     def new_session_view(self, request):
+        # Always answer with JSON (never a redirect) so the AJAX client can
+        # create a session strictly in-place with no full-page navigation.
         if request.method not in ("GET", "POST"):
             return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -333,11 +335,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
         allowed = self._allowed_companies(request)
         if not allowed.exists():
-            if request.method == "POST":
-                return JsonResponse(
-                    {"error": "No company available."}, status=400
-                )
-            return redirect(reverse("admin:chat_conversation_sessions"))
+            return JsonResponse({"error": "No company available."}, status=400)
 
         if company_id:
             # Re-validate ownership server-side; out-of-scope => 404 (no leak).
@@ -350,16 +348,14 @@ class ConversationSessionAdmin(BaseModelAdmin):
         )
         session.save(actor=request.user)
 
-        if request.method == "POST":
-            return JsonResponse(
-                {
-                    "id": str(session.id),
-                    "session_id": session.session_id,
-                    "title": session.title,
-                },
-                status=201,
-            )
-        return redirect(reverse("admin:chat_conversation_sessions"))
+        return JsonResponse(
+            {
+                "id": str(session.id),
+                "session_id": session.session_id,
+                "title": session.title,
+            },
+            status=201,
+        )
 
     # --- Chat UI: send a message (POST, CSRF-validated like summarize) -----
     def send_message_view(self, request, pk):

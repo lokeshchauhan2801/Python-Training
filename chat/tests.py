@@ -243,6 +243,33 @@ class AdminChatUITests(TestCase):
         self.assertIn('id="chat-company"', body)
         self.assertIn('id="chat-input"', body)
 
+    def test_chat_page_extends_admin_base_with_sidebar(self):
+        """The page uses the Unfold admin chrome (left nav sidebar present)."""
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("admin:chat_conversation_sessions"))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        # base_site -> base.html renders the Unfold navigation sidebar.
+        self.assertIn('id="nav-sidebar"', body)
+
+    def test_chat_page_company_control_in_header_region(self):
+        """The company selector + New chat sit in the top header row, above
+        the session-list / conversation panel (not stacked in the body top)."""
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("admin:chat_conversation_sessions"))
+        body = resp.content.decode()
+        header_pos = body.find('id="chat-company"')
+        new_pos = body.find('id="chat-new"')
+        list_pos = body.find('id="chat-session-list"')
+        self.assertNotEqual(header_pos, -1)
+        self.assertNotEqual(new_pos, -1)
+        self.assertNotEqual(list_pos, -1)
+        # Company selector and New chat come before the session list / panel.
+        self.assertLess(header_pos, list_pos)
+        self.assertLess(new_pos, list_pos)
+        # The message input is still present.
+        self.assertIn('id="chat-input"', body)
+
     def test_chat_page_anonymous_redirected(self):
         resp = self.client.get(reverse("admin:chat_conversation_sessions"))
         self.assertEqual(resp.status_code, 302)
@@ -311,6 +338,8 @@ class AdminChatUITests(TestCase):
 
         resp = self.client.post(url, {"company": str(self.alice_co.id)})
         self.assertEqual(resp.status_code, 201)
+        # Success is strictly JSON, never a redirect (zero full-page nav).
+        self.assertEqual(resp["Content-Type"], "application/json")
         self.assertIn("session_id", resp.json())
         created = ConversationSession.objects.filter(
             user=self.alice, company=self.alice_co, title="New chat"
@@ -323,6 +352,33 @@ class AdminChatUITests(TestCase):
         self.assertEqual(resp.status_code, 404)
         after = ConversationSession.objects.filter(company=self.bob_co).count()
         self.assertEqual(before, after)
+
+    def test_new_session_returns_json_never_redirects(self):
+        """new_session_view always returns JSON, never an HTTP redirect.
+
+        A GET (previously the redirecting branch) and the no-company failure
+        case must both be JSON with no 3xx navigation.
+        """
+        url = reverse("admin:chat_conversation_new")
+
+        # Success via GET: JSON 201, not a redirect.
+        self.client.force_login(self.alice)
+        resp = self.client.get(url, {"company": str(self.alice_co.id)})
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp["Content-Type"], "application/json")
+        self.assertNotIn("Location", resp)
+        self.assertIn("session_id", resp.json())
+
+        # Failure (user owns no company): JSON 400 error, not a redirect.
+        no_co_user = User.objects.create_user(
+            email="nocompany@example.com", password="pw", is_staff=True
+        )
+        self.client.force_login(no_co_user)
+        resp = self.client.post(url, {})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp["Content-Type"], "application/json")
+        self.assertNotIn("Location", resp)
+        self.assertIn("error", resp.json())
 
     # --- send-message ------------------------------------------------------
     def test_send_message_persists_turn(self):

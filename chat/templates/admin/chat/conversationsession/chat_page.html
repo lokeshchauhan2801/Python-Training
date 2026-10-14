@@ -2,10 +2,21 @@
 {% comment %}
 App-local template (APP_DIRS=True, no central DIRS).
 
-In-admin chat page: a three-area layout (TOP company switcher, LEFT session
-list, CENTER message panel) wired entirely with AJAX — no page refresh. All
-server data is rendered with textContent / createElement / appendChild, NEVER
-innerHTML, so content can never execute. POSTs carry the CSRF token.
+In-admin chat page wired entirely with AJAX — no page refresh. The Unfold LEFT
+sidebar (admin navigation) comes from base_site.html and is left untouched.
+
+Layout:
+  - a page header row (title left, company selector + "New chat" right) that sits
+    at the top of the content area, matching where change-list object-tools sit;
+  - a LEFT session-list column;
+  - a CENTER conversation panel with the composer pinned at the bottom.
+
+Styling uses Unfold/Tailwind theme-aware utility classes (base-*, primary-*,
+font-* tokens with dark: variants) so it matches the surrounding admin chrome in
+both light and dark themes — no ad-hoc inline hex colors.
+
+All server data is rendered with textContent / createElement / appendChild,
+NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
 {% endcomment %}
 {% load i18n %}
 
@@ -19,32 +30,51 @@ innerHTML, so content can never execute. POSTs carry the CSRF token.
        data-new-url="{% url 'admin:chat_conversation_new' %}"
        data-base-url="{% url 'admin:chat_conversation_sessions' %}">
 
-    <div style="margin-bottom:1rem;">
-      <label for="chat-company">{% translate "Company" %}:</label>
-      <select id="chat-company"></select>
-      <p id="chat-empty" style="display:none;color:#b91c1c;">
-        {% translate "No companies available. You cannot start a chat yet." %}
-      </p>
-    </div>
+    {# --- page header row: title left, company control + New chat right --- #}
+    <div class="flex flex-col gap-4 mb-6 md:flex-row md:items-center md:justify-between">
+      <h1 class="font-semibold text-xl text-font-important-light tracking-tight dark:text-font-important-dark">
+        {{ title }}
+      </h1>
 
-    <div style="display:flex;gap:1rem;align-items:flex-start;">
-      <div style="flex:0 0 260px;border-right:1px solid #e5e7eb;padding-right:1rem;">
-        <button type="button" class="button" id="chat-new">
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+        <div class="flex items-center gap-2">
+          <label for="chat-company"
+                 class="font-semibold text-sm text-font-important-light dark:text-font-important-dark">
+            {% translate "Company" %}
+          </label>
+          <select id="chat-company"
+                  class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark sm:w-auto"></select>
+        </div>
+        <button type="button" id="chat-new"
+                class="border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-2 rounded-default text-sm text-white whitespace-nowrap hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
           {% translate "New chat" %}
         </button>
-        <ul id="chat-session-list" style="list-style:none;padding:0;margin-top:1rem;"></ul>
+      </div>
+    </div>
+
+    <p id="chat-empty"
+       class="hidden mb-4 text-red-600 text-sm dark:text-red-400">
+      {% translate "No companies available. You cannot start a chat yet." %}
+    </p>
+
+    {# --- main area: LEFT session list + CENTER conversation panel --- #}
+    <div class="flex flex-col gap-4 md:flex-row md:items-stretch">
+      <div class="flex-none border border-base-200 rounded-default p-3 w-full md:w-64 dark:border-base-700">
+        <ul id="chat-session-list" class="list-none m-0 p-0"></ul>
       </div>
 
-      <div style="flex:1;min-width:0;">
-        <div id="chat-turns" style="min-height:200px;"></div>
-        <div id="chat-composer" style="margin-top:1rem;">
-          <textarea id="chat-input" rows="3" style="width:100%;"
+      <div class="flex flex-1 flex-col min-w-0 border border-base-200 rounded-default p-3 dark:border-base-700">
+        <div id="chat-turns" class="flex-1 min-h-[16rem] overflow-y-auto"></div>
+        <div id="chat-composer" class="mt-4 border-t border-base-200 pt-4 dark:border-base-700">
+          <textarea id="chat-input" rows="3"
+                    class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
                     placeholder="{% translate 'Type a message...' %}"></textarea>
-          <div style="margin-top:0.5rem;">
-            <button type="button" class="button" id="chat-send">
+          <div class="flex items-center gap-3 mt-2">
+            <button type="button" id="chat-send"
+                    class="border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-2 rounded-default text-sm text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
               {% translate "Send" %}
             </button>
-            <span id="chat-status" style="margin-left:0.5rem;"></span>
+            <span id="chat-status" class="text-font-subtle-light text-sm dark:text-font-subtle-dark"></span>
           </div>
         </div>
       </div>
@@ -102,7 +132,7 @@ innerHTML, so content can never execute. POSTs carry the CSRF token.
 
     function renderTurn(turn) {
       const wrap = document.createElement("div");
-      wrap.style.marginBottom = "0.75rem";
+      wrap.className = "mb-3";
 
       const q = document.createElement("div");
       const qLabel = document.createElement("strong");
@@ -150,20 +180,20 @@ innerHTML, so content can never execute. POSTs carry the CSRF token.
       clear(sessionListEl);
       (sessions || []).forEach(function (session) {
         const li = document.createElement("li");
-        li.style.marginBottom = "0.5rem";
+        li.className = "mb-2";
 
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "button";
-        btn.style.width = "100%";
-        btn.style.textAlign = "left";
+        btn.className = "block border border-base-200 bg-white cursor-pointer px-3 py-2 rounded-default text-left text-font-default-light text-sm w-full hover:bg-base-100 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800";
 
         const title = document.createElement("div");
+        title.className = "font-medium truncate";
         title.textContent = session.title || session.session_id;
         btn.appendChild(title);
 
         if (session.hint) {
           const hint = document.createElement("small");
+          hint.className = "block text-font-subtle-light truncate dark:text-font-subtle-dark";
           hint.textContent = session.hint;
           btn.appendChild(hint);
         }
@@ -203,7 +233,7 @@ innerHTML, so content can never execute. POSTs carry the CSRF token.
           const companies = data.companies || [];
           clear(companySel);
           if (companies.length === 0) {
-            emptyEl.style.display = "";
+            emptyEl.classList.remove("hidden");
             companySel.style.display = "none";
             setComposerEnabled(false);
             newBtn.disabled = true;
