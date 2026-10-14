@@ -152,23 +152,91 @@ REST_FRAMEWORK = {
     ],
 }
 
-# django-unfold configuration. The SIDEBAR navigation adds a "Chat" group with
-# links to the in-admin chat page and the new-session route. reverse_lazy keeps
-# importing settings free of URL resolution (import-safe check/migrate).
+# django-unfold configuration. Branding (SITE_TITLE/SITE_HEADER/SITE_SYMBOL),
+# sidebar search, and a grouped, collapsible, icon'd navigation give the admin
+# the full Unfold look instead of the plain Django-admin fallback. Every link
+# uses reverse_lazy and points ONLY at routes/models that exist in this project,
+# so importing settings never resolves URLs (import-safe check/migrate) and the
+# admin never 500s on a missing reverse. Material Symbols names supply the icons.
 UNFOLD = {
+    "SITE_TITLE": "Agentic Demo",
+    "SITE_HEADER": "Agentic Demo",
+    "SITE_URL": "/",
+    "SITE_SYMBOL": "dashboard",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": True,
+    "ENVIRONMENT": os.getenv("DJANGO_ENVIRONMENT", "Development"),
     "SIDEBAR": {
-        "show_search": False,
+        "show_search": True,
+        "show_all_applications": True,
         "navigation": [
             {
-                "title": "Chat",
+                "title": "Dashboard",
+                "collapsible": True,
                 "items": [
                     {
+                        "title": "Home",
+                        "icon": "home",
+                        "link": reverse_lazy("admin:index"),
+                    },
+                    {
                         "title": "Chat",
+                        "icon": "chat",
                         "link": reverse_lazy("admin:chat_conversation_sessions"),
                     },
                     {
                         "title": "New chat",
+                        "icon": "add_comment",
                         "link": reverse_lazy("admin:chat_conversation_new"),
+                    },
+                ],
+            },
+            {
+                "title": "Company",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Companies",
+                        "icon": "business",
+                        "link": reverse_lazy("admin:company_company_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Auth",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Users",
+                        "icon": "person",
+                        "link": reverse_lazy("admin:accounts_user_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Scrapper",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Scrape jobs",
+                        "icon": "travel_explore",
+                        "link": reverse_lazy("admin:scrapper_scrapejob_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Chat",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Conversation sessions",
+                        "icon": "forum",
+                        "link": reverse_lazy("admin:chat_conversationsession_changelist"),
+                    },
+                    {
+                        "title": "Conversations",
+                        "icon": "chat_bubble",
+                        "link": reverse_lazy("admin:chat_conversation_changelist"),
                     },
                 ],
             },
