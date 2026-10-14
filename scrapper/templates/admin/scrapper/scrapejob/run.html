@@ -1,0 +1,23 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+App-local template (APP_DIRS=True, no central DIRS). This project DELIBERATELY
+diverges from the sibling django-unfold project's central templates/ tree
+(NIT 4): each app ships its own templates under <app>/templates/admin/<app>/.
+CSRF-protected confirmation form for running a scrape job.
+{% endcomment %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>{% blocktranslate with url=job.url %}You are about to run a scrape against: <strong>{{ url }}</strong>{% endblocktranslate %}</p>
+  <p>{% translate "Current status" %}: <strong>{{ job.get_status_display }}</strong></p>
+
+  <form method="post" action="">
+    {% csrf_token %}
+    <div class="submit-row">
+      <input type="submit" value="{% translate 'Run scrape' %}" class="default">
+      <a href="{{ change_url }}" class="button cancel-link">{% translate "Cancel" %}</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

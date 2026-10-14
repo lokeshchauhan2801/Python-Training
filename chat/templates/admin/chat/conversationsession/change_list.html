@@ -1,0 +1,18 @@
+{% extends "admin/change_list.html" %}
+{% comment %}
+App-local template (APP_DIRS=True, no central DIRS). This DELIBERATELY diverges
+from the sibling django-unfold project's central templates/ tree (NIT 4): every
+app here ships its own templates under <app>/templates/admin/<app>/<model>/.
+
+Goal 1 (changelist override): adds a "Learning map" button to the object tools.
+{% endcomment %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:chat_conversationsession_learning' %}" class="unfold-button">
+      {% translate "Learning map" %}
+    </a>
+  </li>
+  {{ block.super }}
+{% endblock %}

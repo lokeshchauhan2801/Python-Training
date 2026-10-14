@@ -1,0 +1,23 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+App-local template (APP_DIRS=True, no central DIRS). This DELIBERATELY diverges
+from the sibling django-unfold project's central templates/ tree (NIT 4).
+
+Goal 3 (custom learning view via TemplateResponse): a standalone admin page that
+maps the five Unfold learning goals this admin demonstrates.
+{% endcomment %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <h1>{{ title }}</h1>
+  <p>{% translate "This admin demonstrates five Unfold learning goals:" %}</p>
+  <ol>
+    <li>{% translate "Overriding changelist and change-form templates (app-local)." %}</li>
+    <li>{% translate "Custom get_urls() AJAX endpoints: detail-json (GET JSON) and summarize (POST, CSRF-protected)." %}</li>
+    <li>{% translate "A custom admin page rendered via TemplateResponse (this page)." %}</li>
+    <li>{% translate "Full admin config: list_display, filters, search, fieldsets, inline turns, display methods." %}</li>
+    <li>{% translate "Unfold row/detail buttons, bulk soft-delete/restore, and AJAX rendering without a full page refresh." %}</li>
+  </ol>
+</div>
+{% endblock %}
