@@ -9,6 +9,7 @@ key present (LLMClient is lazy and never built at import time).
 import os
 from pathlib import Path
 
+from django.urls import reverse_lazy
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -149,4 +150,28 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+}
+
+# django-unfold configuration. The SIDEBAR navigation adds a "Chat" group with
+# links to the in-admin chat page and the new-session route. reverse_lazy keeps
+# importing settings free of URL resolution (import-safe check/migrate).
+UNFOLD = {
+    "SIDEBAR": {
+        "show_search": False,
+        "navigation": [
+            {
+                "title": "Chat",
+                "items": [
+                    {
+                        "title": "Chat",
+                        "link": reverse_lazy("admin:chat_conversation_sessions"),
+                    },
+                    {
+                        "title": "New chat",
+                        "link": reverse_lazy("admin:chat_conversation_new"),
+                    },
+                ],
+            },
+        ],
+    },
 }

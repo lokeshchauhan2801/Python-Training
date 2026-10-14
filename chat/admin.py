@@ -20,14 +20,18 @@ server data with ``textContent`` / ``createElement`` / ``appendChild`` (NEVER
 WITHOUT a full refresh.
 """
 
+import json
+
 from django.contrib import admin
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
-from django.urls import path
+from django.urls import path, reverse
 
 from basics.admin import BaseModelAdmin
-from basics.llm import LLMConfigurationError
+from basics.llm import LLMBackendError, LLMConfigurationError
+
+from company.models import Company
 
 from .models import Conversation, ConversationSession
 from .services import ChatService
@@ -104,9 +108,71 @@ class ConversationSessionAdmin(BaseModelAdmin):
             return "-"
         return (obj.summary[:80] + "...") if len(obj.summary) > 80 else obj.summary
 
+    # --- LLM-client seam so tests can inject a fake client -----------------
+    def _chat_service(self):
+        """Build the chat service (default real, lazy, no key at construct).
+
+        A single seam the HTTP-layer tests patch to inject a fake LLM client.
+        """
+        return ChatService()
+
+    # --- scope helpers (re-derive scope server-side, never trust client) ---
+    def _allowed_companies(self, request):
+        """Companies the requesting user may use (non-deleted only)."""
+        if request.user.is_superuser:
+            return Company.objects.all()
+        return Company.objects.filter(owner=request.user)
+
+    def _scoped_sessions(self, request):
+        """Non-deleted sessions owned by / visible to the requesting user.
+
+        Uses the non-deleted ``objects`` manager (user-facing list), NOT the
+        changelist's soft-delete-inclusive queryset. Superusers see all
+        non-deleted sessions; everyone else only their own, limited to
+        companies they own.
+        """
+        qs = ConversationSession.objects.all()
+        if not request.user.is_superuser:
+            qs = qs.filter(
+                user=request.user,
+                company__in=self._allowed_companies(request),
+            )
+        return qs.order_by("-created_at")
+
     # --- Goal 2: custom URLs (BEFORE super().get_urls()) -------------------
     def get_urls(self):
+        admin_view = self.admin_site.admin_view
         custom = [
+            path(
+                "chat/",
+                admin_view(self.chat_page_view),
+                name="chat_conversation_sessions",
+            ),
+            path(
+                "chat/new/",
+                admin_view(self.new_session_view),
+                name="chat_conversation_new",
+            ),
+            path(
+                "chat/companies-json/",
+                admin_view(self.companies_json_view),
+                name="chat_conversation_companies_json",
+            ),
+            path(
+                "chat/sessions-json/",
+                admin_view(self.sessions_json_view),
+                name="chat_conversation_sessions_json",
+            ),
+            path(
+                "chat/<uuid:pk>/turns-json/",
+                admin_view(self.session_turns_json_view),
+                name="chat_conversation_turns_json",
+            ),
+            path(
+                "chat/<uuid:pk>/send/",
+                admin_view(self.send_message_view),
+                name="chat_conversation_send",
+            ),
             path(
                 "<uuid:pk>/detail-json/",
                 self.admin_site.admin_view(self.detail_json_view),
@@ -158,7 +224,9 @@ class ConversationSessionAdmin(BaseModelAdmin):
             return JsonResponse({"error": "Method not allowed"}, status=405)
         session = get_object_or_404(self.get_queryset(request), pk=pk)
         try:
-            summary = ChatService().summarize(session=session, actor=request.user)
+            summary = self._chat_service().summarize(
+                session=session, actor=request.user
+            )
         except LLMConfigurationError:
             return JsonResponse({"error": "LLM not configured"}, status=503)
         return JsonResponse({"summary": summary})
@@ -172,6 +240,164 @@ class ConversationSessionAdmin(BaseModelAdmin):
         }
         return TemplateResponse(
             request, "admin/chat/conversationsession/learning_view.html", context
+        )
+
+    # --- Chat UI: page view (TemplateResponse) -----------------------------
+    def chat_page_view(self, request):
+        """The three-area chat page. No server data embedded; JS fetches it."""
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Chat",
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(
+            request, "admin/chat/conversationsession/chat_page.html", context
+        )
+
+    # --- Chat UI: companies-list JSON (scoped) -----------------------------
+    def companies_json_view(self, request):
+        if request.method != "GET":
+            return JsonResponse({"error": "Method not allowed"}, status=405)
+        companies = [
+            {"id": str(company.id), "name": company.name}
+            for company in self._allowed_companies(request).order_by("name")
+        ]
+        return JsonResponse({"companies": companies})
+
+    # --- Chat UI: sessions-list JSON (scoped, filterable by company) -------
+    def sessions_json_view(self, request):
+        if request.method != "GET":
+            return JsonResponse({"error": "Method not allowed"}, status=405)
+        sessions = self._scoped_sessions(request)
+
+        company_id = request.GET.get("company")
+        if company_id:
+            # Re-validate the client-supplied company against scope; an
+            # out-of-scope id yields an empty list (never leaks other data).
+            allowed = self._allowed_companies(request).filter(pk=company_id)
+            if not allowed.exists():
+                return JsonResponse({"sessions": []})
+            sessions = sessions.filter(company_id=company_id)
+
+        payload = []
+        for session in sessions:
+            hint = session.summary or ""
+            if not hint:
+                last = session.turns.order_by("-created_at").first()
+                if last is not None:
+                    hint = last.question
+            if len(hint) > 80:
+                hint = hint[:80] + "..."
+            payload.append(
+                {
+                    "id": str(session.id),
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "hint": hint,
+                }
+            )
+        return JsonResponse({"sessions": payload})
+
+    # --- Chat UI: session-turns JSON (scoped, 404 outside scope) -----------
+    def session_turns_json_view(self, request, pk):
+        if request.method != "GET":
+            return JsonResponse({"error": "Method not allowed"}, status=405)
+        session = get_object_or_404(self._scoped_sessions(request), pk=pk)
+        turns = [
+            {
+                "id": str(turn.id),
+                "question": turn.question,
+                "response": turn.response,
+                "model_name": turn.model_name,
+                "created_at": turn.created_at.isoformat(),
+            }
+            for turn in session.turns.order_by("created_at")
+        ]
+        return JsonResponse(
+            {
+                "id": str(session.id),
+                "session_id": session.session_id,
+                "title": session.title,
+                "company_id": str(session.company_id),
+                "turns": turns,
+            }
+        )
+
+    # --- Chat UI: create a new session under a scoped company --------------
+    def new_session_view(self, request):
+        if request.method not in ("GET", "POST"):
+            return JsonResponse({"error": "Method not allowed"}, status=405)
+
+        source = request.POST if request.method == "POST" else request.GET
+        company_id = source.get("company")
+
+        allowed = self._allowed_companies(request)
+        if not allowed.exists():
+            if request.method == "POST":
+                return JsonResponse(
+                    {"error": "No company available."}, status=400
+                )
+            return redirect(reverse("admin:chat_conversation_sessions"))
+
+        if company_id:
+            # Re-validate ownership server-side; out-of-scope => 404 (no leak).
+            company = get_object_or_404(allowed, pk=company_id)
+        else:
+            company = allowed.order_by("name").first()
+
+        session = ConversationSession(
+            company=company, user=request.user, title="New chat"
+        )
+        session.save(actor=request.user)
+
+        if request.method == "POST":
+            return JsonResponse(
+                {
+                    "id": str(session.id),
+                    "session_id": session.session_id,
+                    "title": session.title,
+                },
+                status=201,
+            )
+        return redirect(reverse("admin:chat_conversation_sessions"))
+
+    # --- Chat UI: send a message (POST, CSRF-validated like summarize) -----
+    def send_message_view(self, request, pk):
+        if request.method != "POST":
+            return JsonResponse({"error": "Method not allowed"}, status=405)
+        session = get_object_or_404(self._scoped_sessions(request), pk=pk)
+
+        question = request.POST.get("question")
+        if question is None and request.body:
+            # Support a JSON body as well as form-encoded.
+            try:
+                question = (json.loads(request.body) or {}).get("question")
+            except (ValueError, TypeError):
+                question = None
+        question = (question or "").strip()
+        if not question:
+            return JsonResponse({"error": "Question is required."}, status=400)
+
+        try:
+            turn = self._chat_service().ask(
+                session=session, user=request.user, question=question
+            )
+        except LLMConfigurationError:
+            return JsonResponse({"error": "LLM not configured"}, status=503)
+        except LLMBackendError:
+            return JsonResponse({"error": "LLM request failed"}, status=502)
+
+        return JsonResponse(
+            {
+                "turn": {
+                    "id": str(turn.id),
+                    "question": turn.question,
+                    "response": turn.response,
+                    "model_name": turn.model_name,
+                    "created_at": turn.created_at.isoformat(),
+                }
+            },
+            status=201,
         )
 
 

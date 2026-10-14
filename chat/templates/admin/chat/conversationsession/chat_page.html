@@ -1,0 +1,306 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+App-local template (APP_DIRS=True, no central DIRS).
+
+In-admin chat page: a three-area layout (TOP company switcher, LEFT session
+list, CENTER message panel) wired entirely with AJAX — no page refresh. All
+server data is rendered with textContent / createElement / appendChild, NEVER
+innerHTML, so content can never execute. POSTs carry the CSRF token.
+{% endcomment %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  {% csrf_token %}
+
+  <div id="chat-root"
+       data-companies-url="{% url 'admin:chat_conversation_companies_json' %}"
+       data-sessions-url="{% url 'admin:chat_conversation_sessions_json' %}"
+       data-new-url="{% url 'admin:chat_conversation_new' %}"
+       data-base-url="{% url 'admin:chat_conversation_sessions' %}">
+
+    <div style="margin-bottom:1rem;">
+      <label for="chat-company">{% translate "Company" %}:</label>
+      <select id="chat-company"></select>
+      <p id="chat-empty" style="display:none;color:#b91c1c;">
+        {% translate "No companies available. You cannot start a chat yet." %}
+      </p>
+    </div>
+
+    <div style="display:flex;gap:1rem;align-items:flex-start;">
+      <div style="flex:0 0 260px;border-right:1px solid #e5e7eb;padding-right:1rem;">
+        <button type="button" class="button" id="chat-new">
+          {% translate "New chat" %}
+        </button>
+        <ul id="chat-session-list" style="list-style:none;padding:0;margin-top:1rem;"></ul>
+      </div>
+
+      <div style="flex:1;min-width:0;">
+        <div id="chat-turns" style="min-height:200px;"></div>
+        <div id="chat-composer" style="margin-top:1rem;">
+          <textarea id="chat-input" rows="3" style="width:100%;"
+                    placeholder="{% translate 'Type a message...' %}"></textarea>
+          <div style="margin-top:0.5rem;">
+            <button type="button" class="button" id="chat-send">
+              {% translate "Send" %}
+            </button>
+            <span id="chat-status" style="margin-left:0.5rem;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    function getCookie(name) {
+      const match = document.cookie.match("(^|;)\\s*" + name + "\\s*=\\s*([^;]+)");
+      return match ? match.pop() : "";
+    }
+
+    const root = document.getElementById("chat-root");
+    const companiesUrl = root.dataset.companiesUrl;
+    const sessionsUrl = root.dataset.sessionsUrl;
+    const newUrl = root.dataset.newUrl;
+    const baseUrl = root.dataset.baseUrl; // ".../admin/chat/chat/"
+
+    const companySel = document.getElementById("chat-company");
+    const emptyEl = document.getElementById("chat-empty");
+    const sessionListEl = document.getElementById("chat-session-list");
+    const newBtn = document.getElementById("chat-new");
+    const turnsEl = document.getElementById("chat-turns");
+    const composerEl = document.getElementById("chat-composer");
+    const inputEl = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("chat-send");
+    const statusEl = document.getElementById("chat-status");
+
+    let currentSessionId = null;
+
+    function clear(el) {
+      while (el.firstChild) {
+        el.removeChild(el.firstChild);
+      }
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    // Per-session URLs are built from the base chat page prefix, never hardcoded.
+    function turnsUrlFor(id) {
+      return baseUrl + id + "/turns-json/";
+    }
+    function sendUrlFor(id) {
+      return baseUrl + id + "/send/";
+    }
+
+    function setComposerEnabled(enabled) {
+      composerEl.style.display = enabled ? "" : "none";
+    }
+
+    function renderTurn(turn) {
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "0.75rem";
+
+      const q = document.createElement("div");
+      const qLabel = document.createElement("strong");
+      qLabel.textContent = "You: ";
+      q.appendChild(qLabel);
+      q.appendChild(document.createTextNode(turn.question));
+      wrap.appendChild(q);
+
+      const r = document.createElement("div");
+      const rLabel = document.createElement("strong");
+      rLabel.textContent = "Assistant: ";
+      r.appendChild(rLabel);
+      r.appendChild(document.createTextNode(turn.response || "(no response)"));
+      wrap.appendChild(r);
+
+      turnsEl.appendChild(wrap);
+    }
+
+    function renderTurns(turns) {
+      clear(turnsEl);
+      (turns || []).forEach(renderTurn);
+    }
+
+    function loadSession(id) {
+      currentSessionId = id;
+      setStatus("Loading...");
+      fetch(turnsUrlFor(id), {
+        method: "GET",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        credentials: "same-origin"
+      })
+        .then(function (resp) {
+          if (!resp.ok) { throw new Error("not ok"); }
+          return resp.json();
+        })
+        .then(function (data) {
+          renderTurns(data.turns);
+          setStatus("");
+          setComposerEnabled(true);
+        })
+        .catch(function () { setStatus("Could not load session."); });
+    }
+
+    function renderSessions(sessions) {
+      clear(sessionListEl);
+      (sessions || []).forEach(function (session) {
+        const li = document.createElement("li");
+        li.style.marginBottom = "0.5rem";
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "button";
+        btn.style.width = "100%";
+        btn.style.textAlign = "left";
+
+        const title = document.createElement("div");
+        title.textContent = session.title || session.session_id;
+        btn.appendChild(title);
+
+        if (session.hint) {
+          const hint = document.createElement("small");
+          hint.textContent = session.hint;
+          btn.appendChild(hint);
+        }
+
+        btn.addEventListener("click", function () {
+          loadSession(session.id);
+        });
+
+        li.appendChild(btn);
+        sessionListEl.appendChild(li);
+      });
+    }
+
+    function loadSessions() {
+      const companyId = companySel.value;
+      const url = companyId
+        ? sessionsUrl + "?company=" + encodeURIComponent(companyId)
+        : sessionsUrl;
+      fetch(url, {
+        method: "GET",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        credentials: "same-origin"
+      })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) { renderSessions(data.sessions); })
+        .catch(function () { setStatus("Could not load sessions."); });
+    }
+
+    function loadCompanies() {
+      fetch(companiesUrl, {
+        method: "GET",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        credentials: "same-origin"
+      })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+          const companies = data.companies || [];
+          clear(companySel);
+          if (companies.length === 0) {
+            emptyEl.style.display = "";
+            companySel.style.display = "none";
+            setComposerEnabled(false);
+            newBtn.disabled = true;
+            return;
+          }
+          companies.forEach(function (company) {
+            const opt = document.createElement("option");
+            opt.value = company.id;
+            opt.textContent = company.name;
+            companySel.appendChild(opt);
+          });
+          loadSessions();
+        })
+        .catch(function () { setStatus("Could not load companies."); });
+    }
+
+    companySel.addEventListener("change", function () {
+      currentSessionId = null;
+      clear(turnsEl);
+      loadSessions();
+    });
+
+    newBtn.addEventListener("click", function () {
+      const companyId = companySel.value;
+      if (!companyId) { return; }
+      const body = new URLSearchParams();
+      body.append("company", companyId);
+      fetch(newUrl, {
+        method: "POST",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        credentials: "same-origin",
+        body: body.toString()
+      })
+        .then(function (resp) {
+          return resp.json().then(function (d) { return { ok: resp.ok, data: d }; });
+        })
+        .then(function (res) {
+          if (!res.ok || res.data.error) {
+            setStatus(res.data.error || "Could not create chat.");
+            return;
+          }
+          loadSessions();
+          loadSession(res.data.id);
+        })
+        .catch(function () { setStatus("Could not create chat."); });
+    });
+
+    sendBtn.addEventListener("click", function () {
+      const question = inputEl.value.trim();
+      if (!question) { return; }
+      if (!currentSessionId) {
+        setStatus("Select or start a chat first.");
+        return;
+      }
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      setStatus("Sending...");
+
+      const body = new URLSearchParams();
+      body.append("question", question);
+      fetch(sendUrlFor(currentSessionId), {
+        method: "POST",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        credentials: "same-origin",
+        body: body.toString()
+      })
+        .then(function (resp) {
+          return resp.json().then(function (d) { return { ok: resp.ok, data: d }; });
+        })
+        .then(function (res) {
+          if (!res.ok || res.data.error) {
+            // Clean inline error; do NOT corrupt the panel.
+            setStatus(res.data.error || "Send failed.");
+            return;
+          }
+          renderTurn(res.data.turn);
+          inputEl.value = "";
+          setStatus("");
+        })
+        .catch(function () { setStatus("Send failed."); })
+        .then(function () {
+          inputEl.disabled = false;
+          sendBtn.disabled = false;
+        });
+    });
+
+    // Initial load.
+    loadCompanies();
+  })();
+  </script>
+</div>
+{% endblock %}
