@@ -168,7 +168,7 @@ UNFOLD = {
     "ENVIRONMENT": os.getenv("DJANGO_ENVIRONMENT", "Development"),
     "SIDEBAR": {
         "show_search": True,
-        "show_all_applications": True,
+        "show_all_applications": False,
         "navigation": [
             {
                 "title": "Dashboard",
