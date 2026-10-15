@@ -223,11 +223,15 @@ class DocumentAdmin(BaseModelAdmin):
     @admin.display(description="Schedule")
     def schedule_column(self, obj):
         # Renders the in-row "Schedule" control: an "Action" button plus a
-        # hidden dropdown menu (the four processing options). Clicking "Action"
-        # toggles the dropdown open directly below the button; selecting an item
-        # POSTs to the AJAX dispatch endpoint (see schedule_dropdown.js) without
-        # navigating away. Only library documents can be processed, so non-
-        # library rows show a disabled hint instead of the control.
+        # hidden dropdown menu (the four processing options). The control is
+        # emitted for EVERY library row regardless of status (uploaded, queued,
+        # processing, ready, failed) so a Ready document can be re-dispatched
+        # (reprocess). Clicking "Action" toggles the dropdown open just below
+        # the button, pinned with position:fixed by schedule_dropdown.js so it
+        # is never clipped by the changelist's overflow container; selecting an
+        # item POSTs to the AJAX dispatch endpoint without navigating away.
+        # Only library documents can be processed, so non-library rows (e.g. a
+        # chat attachment) show a disabled hint ('—') instead of the control.
         #
         # The markup is a fixed template with ONLY server-controlled values
         # (pk, backend keys, static labels) interpolated via format_html's auto-
@@ -254,8 +258,16 @@ class DocumentAdmin(BaseModelAdmin):
                 for value, label in _SCHEDULE_CHOICES
             ),
         )
+        # The menu is NOT absolutely positioned inside the cell anymore: the
+        # changelist table lives in an overflow container that clipped an
+        # absolute/z-50 menu ("goes under the list line"). Positioning is now
+        # owned by schedule_dropdown.js, which on open pins the menu with
+        # position:fixed at the toggle button's viewport rect and a high
+        # z-index so it renders in a non-clipped layer. The markup therefore
+        # keeps only the look (width/border/shadow) and the 'hidden' toggle
+        # class; it carries NO 'absolute'/'z-50' / 'mt-1' positioning utilities.
         return format_html(
-            '<div class="schedule-cell relative inline-block text-left">'
+            '<div class="schedule-cell inline-block text-left">'
             '  <button type="button" '
             '          class="schedule-toggle inline-flex items-center gap-1 '
             'rounded-default border border-primary-600 bg-primary-600 '
@@ -267,7 +279,7 @@ class DocumentAdmin(BaseModelAdmin):
             '    <span class="material-symbols-outlined text-base '
             'leading-none">expand_more</span>'
             '  </button>'
-            '  <div class="schedule-menu hidden absolute z-50 mt-1 w-44 '
+            '  <div class="schedule-menu hidden w-44 '
             'origin-top-left rounded-default border border-base-200 '
             'dark:border-base-700 bg-white dark:bg-base-800 shadow-lg py-1" '
             '       role="menu" aria-orientation="vertical">{}</div>'

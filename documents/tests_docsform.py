@@ -293,3 +293,123 @@ class DocsAddFormTests(TestCase):
             data={"source_url": "https://example.com/f.csv"}, files={}
         )
         self.assertTrue(form.is_valid(), form.errors)
+
+
+# ---------------------------------------------------------------------------
+# PART B targeted tests: the in-row "Schedule" dropdown on the changelist.
+#
+# The Schedule control (an "Action" button + a hidden four-item dropdown) must
+# render for EVERY library row in ANY status — including Ready — so a processed
+# document can be re-dispatched (reprocess). A non-library (chat) row shows a
+# disabled "—" hint instead. The menu markup must NOT carry the absolute/z-50
+# positioning utilities that the changelist's overflow container clipped; the
+# fixed-at-rect positioning is owned by schedule_dropdown.js. The dispatch
+# endpoint behaviour (405/403/404/scoping/reprocess) is covered by
+# documents.tests_phase4.ScheduleAdminTests and is intentionally not duplicated
+# here. The reprocess reset path is asserted at the unit level below.
+# ---------------------------------------------------------------------------
+@override_settings(MEDIA_ROOT=_MEDIA)
+class ScheduleDropdownRenderTests(TestCase):
+    _CHANGELIST_URL = "/admin/documents/document/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            email="sched-owner@example.com", password="x", is_staff=True
+        )
+        cls.company = Company.objects.create(owner=cls.owner, name="SC", slug="sc")
+        cls.root = User.objects.create_superuser(
+            email="sched-root@example.com", password="x"
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def _make_library_doc(self, *, status, title="report.csv"):
+        return Document.objects.create(
+            company=self.company,
+            uploaded_by=self.owner,
+            source=Document.SOURCE_LIBRARY,
+            title=title,
+            file=SimpleUploadedFile(title, _csv_bytes()),
+            status=status,
+        )
+
+    def test_ready_library_row_renders_schedule_control(self):
+        # A status=ready library document STILL renders the Action button and
+        # the four-item dropdown so it can be reprocessed.
+        self.client.force_login(self.root)
+        doc = self._make_library_doc(status=Document.STATUS_READY)
+        resp = self.client.get(self._CHANGELIST_URL)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        self.assertIn("sidebar", body.lower())  # Unfold shell intact
+        self.assertIn("schedule-toggle", body)
+        self.assertIn("schedule-menu", body)
+        self.assertIn("Action", body)
+        self.assertIn(f'data-doc-id="{doc.pk}"', body)
+        for backend in ("now", "celery", "kafka", "temporal"):
+            self.assertIn(f'data-backend="{backend}"', body)
+
+    def test_every_status_renders_schedule_control(self):
+        # The control is status-agnostic for library rows: uploaded, queued,
+        # processing, ready and failed all render the toggle + the four items.
+        self.client.force_login(self.root)
+        for status in (
+            Document.STATUS_UPLOADED,
+            Document.STATUS_QUEUED,
+            Document.STATUS_PROCESSING,
+            Document.STATUS_READY,
+            Document.STATUS_FAILED,
+        ):
+            with self.subTest(status=status):
+                Document.all_objects.all().hard_delete()
+                doc = self._make_library_doc(status=status)
+                resp = self.client.get(self._CHANGELIST_URL)
+                body = resp.content.decode()
+                self.assertIn("schedule-toggle", body)
+                self.assertIn(f'data-doc-id="{doc.pk}"', body)
+                for backend in ("now", "celery", "kafka", "temporal"):
+                    self.assertIn(f'data-backend="{backend}"', body)
+
+    def test_chat_source_row_renders_disabled_hint_not_control(self):
+        # A chat-attachment row is not processable from the library, so it shows
+        # the "—" hint and NOT the Schedule control.
+        self.client.force_login(self.root)
+        Document.all_objects.all().hard_delete()
+        chat_doc = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.owner,
+            source=Document.SOURCE_CHAT,
+            title="chat-attachment.csv",
+            file=SimpleUploadedFile("chat-attachment.csv", _csv_bytes()),
+            status=Document.STATUS_READY,
+        )
+        resp = self.client.get(self._CHANGELIST_URL)
+        body = resp.content.decode()
+        self.assertIn("\u2014", body)  # em dash hint
+        self.assertNotIn(f'data-doc-id="{chat_doc.pk}"', body)
+
+    def test_menu_markup_has_no_clipping_positioning(self):
+        # The clipping fix: the .schedule-menu must NOT carry the absolute/z-50
+        # utilities that the overflow container clipped — positioning is owned
+        # by schedule_dropdown.js (position:fixed at the toggle rect). Isolate
+        # the schedule-menu element so unrelated page markup can't false-pass.
+        import re
+
+        self.client.force_login(self.root)
+        Document.all_objects.all().hard_delete()
+        self._make_library_doc(status=Document.STATUS_READY)
+        body = self.client.get(self._CHANGELIST_URL).content.decode()
+        match = re.search(
+            r'<div class="schedule-menu[^"]*"', body
+        )
+        self.assertIsNotNone(match, "schedule-menu element should render")
+        menu_classes = match.group(0)
+        self.assertNotIn("absolute", menu_classes)
+        self.assertNotIn("z-50", menu_classes)
+        # The 'hidden' toggle class and the look (width) are preserved.
+        self.assertIn("hidden", menu_classes)
+        self.assertIn("w-44", menu_classes)

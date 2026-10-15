@@ -5,7 +5,11 @@
  * menu (Process now / Celery / Kafka / Temporal — rendered server-side by the
  * schedule_column display method). This script:
  *   - toggles a single dropdown open/closed below its button (only one open at
- *     a time; clicking elsewhere closes it);
+ *     a time; clicking elsewhere closes it). The menu is pinned with
+ *     position:fixed at the toggle button's viewport rect (getBoundingClientRect)
+ *     with a high z-index so it renders in a layer the changelist's overflow
+ *     container cannot clip ("goes under the list line"); any scroll/resize
+ *     while open closes it so a stale fixed position never lingers;
  *   - on an item click, POSTs {backend} to the scoped AJAX dispatch endpoint
  *     with the CSRF token (no page navigation, no full reload);
  *   - updates that row's status cell from the JSON response.
@@ -42,11 +46,38 @@
     return "";
   }
 
+  var MENU_Z_INDEX = "9999";
+
+  // Pin the menu with position:fixed at the toggle button's viewport rect so
+  // it escapes the changelist's clipping overflow container. getBoundingClientRect
+  // returns viewport-relative coordinates, which is exactly what position:fixed
+  // uses, so no scroll offsets are added. The menu sits just below the button
+  // (top = rect.bottom + 4px gap), left-aligned to it.
+  function positionMenu(toggle, menu) {
+    var rect = toggle.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.top = rect.bottom + 4 + "px";
+    menu.style.left = rect.left + "px";
+    menu.style.zIndex = MENU_Z_INDEX;
+    menu.style.margin = "0";
+  }
+
+  // Hide a menu and strip the inline fixed-positioning so the next open starts
+  // clean and the resting markup carries no stale styles.
+  function hideMenu(menu) {
+    menu.classList.add("hidden");
+    menu.style.position = "";
+    menu.style.top = "";
+    menu.style.left = "";
+    menu.style.zIndex = "";
+    menu.style.margin = "";
+  }
+
   function closeAllMenus(except) {
     var menus = document.querySelectorAll(".schedule-menu");
     for (var i = 0; i < menus.length; i++) {
       if (menus[i] !== except) {
-        menus[i].classList.add("hidden");
+        hideMenu(menus[i]);
         var cell = menus[i].closest(".schedule-cell");
         if (cell) {
           var toggle = cell.querySelector(".schedule-toggle");
@@ -121,7 +152,7 @@
         /* transient error — the user can retry via the dropdown */
       });
     if (menu) {
-      menu.classList.add("hidden");
+      hideMenu(menu);
     }
     closeAllMenus();
   }
@@ -140,9 +171,10 @@
       closeAllMenus(isHidden ? menu : null);
       if (isHidden) {
         menu.classList.remove("hidden");
+        positionMenu(toggle, menu);
         toggle.setAttribute("aria-expanded", "true");
       } else {
-        menu.classList.add("hidden");
+        hideMenu(menu);
         toggle.setAttribute("aria-expanded", "false");
       }
       return;
@@ -161,6 +193,17 @@
     }
 
     // Click anywhere else closes any open menu.
+    closeAllMenus();
+  });
+
+  // A fixed-positioned menu is pinned to the toggle's rect at open time; once
+  // the page scrolls or the viewport resizes that rect moves, so close any
+  // open menu rather than let it float out of place. Capture-phase scroll
+  // catches scrolling inside the changelist's overflow container too.
+  window.addEventListener("scroll", function () {
+    closeAllMenus();
+  }, true);
+  window.addEventListener("resize", function () {
     closeAllMenus();
   });
 })();
