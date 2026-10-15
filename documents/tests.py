@@ -116,6 +116,99 @@ def _make_document(company, user, filename, data, source=Document.SOURCE_LIBRARY
     )
 
 
+# ---------------------------------------------------------------------------
+# Shared embedding/vector test harness.
+#
+# ANY test that runs process_document on a LIBRARY document (Phase 1 OR Phase 2)
+# now embeds + writes vectors, so it MUST use a FAKE embeddings client (no
+# network, no live key) AND a per-test tmp CHROMA_PATH (never the real
+# chroma_data). These helpers are defined up here so the Phase-1 process/admin/
+# API suites can reuse them too.
+# ---------------------------------------------------------------------------
+
+from unittest import mock  # noqa: E402
+
+from django.urls import reverse  # noqa: E402
+
+from basics.llm import LLMConfigurationError  # noqa: E402
+from basics.vectorstore import ChromaVectorStore  # noqa: E402
+
+from .services import VECTOR_COLLECTION, find_relevant_chunks  # noqa: E402
+
+
+class _FakeEmbeddings:
+    """Deterministic 8-dim embeddings keyed off the text hash (no network)."""
+
+    DIM = 8
+
+    def _vector(self, text):
+        seed = abs(hash(text))
+        return [((seed >> (i * 3)) % 97) / 97.0 for i in range(self.DIM)]
+
+    def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text):
+        return self._vector(text)
+
+
+class _FakeLLMClient:
+    """Stand-in for the LLM seam exposing only the embedding methods."""
+
+    def __init__(self, embeddings=None, *, raise_no_key=False):
+        self._embeddings = embeddings or _FakeEmbeddings()
+        self._raise_no_key = raise_no_key
+
+    def _check(self):
+        if self._raise_no_key:
+            raise LLMConfigurationError("LLM API key required to embed documents.")
+
+    def embed_documents(self, texts):
+        self._check()
+        return self._embeddings.embed_documents(texts)
+
+    def embed_query(self, text):
+        self._check()
+        return self._embeddings.embed_query(text)
+
+
+def _fake_client_factory(embeddings=None, *, raise_no_key=False):
+    client = _FakeLLMClient(embeddings, raise_no_key=raise_no_key)
+    return lambda: client
+
+
+class _TmpChromaMixin:
+    """Give each test an isolated tmp CHROMA_PATH, removed on tearDown."""
+
+    def setUp(self):
+        super().setUp()
+        self._chroma_dir = tempfile.mkdtemp(prefix="documents-chroma-")
+        self._chroma_override = override_settings(CHROMA_PATH=self._chroma_dir)
+        self._chroma_override.enable()
+
+    def tearDown(self):
+        self._chroma_override.disable()
+        shutil.rmtree(self._chroma_dir, ignore_errors=True)
+        super().tearDown()
+
+
+class _FakeLLMMixin(_TmpChromaMixin):
+    """Tmp CHROMA_PATH + a fake LLM client patched into documents.services.
+
+    Any suite that calls process_document on a LIBRARY document mixes this in so
+    embedding never hits the network / a live key and vectors land only in the
+    per-test tmp Chroma dir.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
 @override_settings(MEDIA_ROOT=_MEDIA)
 class ExtractionTests(TestCase):
     @classmethod
@@ -202,7 +295,10 @@ class ChunkingTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=_MEDIA)
-class ProcessDocumentTests(TestCase):
+class ProcessDocumentTests(_FakeLLMMixin, TestCase):
+    # process_document on a LIBRARY doc now embeds, so this suite uses the fake
+    # LLM client + tmp CHROMA_PATH harness (no network, no live key, no real
+    # chroma_data writes).
     @classmethod
     def setUpTestData(cls):
         cls.owner = User.objects.create_user(email="o@example.com", password="x")
@@ -251,8 +347,11 @@ class ProcessDocumentTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=_MEDIA)
-class DocumentApiScopingTests(TestCase):
+class DocumentApiScopingTests(_FakeLLMMixin, TestCase):
+    # The process action embeds library docs, so use the fake LLM + tmp Chroma
+    # harness (no network, no live key, no real chroma_data writes).
     def setUp(self):
+        super().setUp()
         self.client = APIClient()
         self.alice = User.objects.create_user(email="alice@example.com", password="x")
         self.bob = User.objects.create_user(email="bob@example.com", password="x")
@@ -343,7 +442,9 @@ class DocumentApiScopingTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=_MEDIA)
-class DocumentAdminHttpTests(TestCase):
+class DocumentAdminHttpTests(_FakeLLMMixin, TestCase):
+    # _ready_document processes LIBRARY docs (now embeds), so use the fake LLM +
+    # tmp Chroma harness (no network, no live key, no real chroma_data writes).
     @classmethod
     def setUpTestData(cls):
         # --keepdb uses a SEPARATE test database, so create the superuser here.
@@ -363,6 +464,7 @@ class DocumentAdminHttpTests(TestCase):
         shutil.rmtree(_MEDIA, ignore_errors=True)
 
     def setUp(self):
+        super().setUp()
         self.client.force_login(self.admin)
 
     def _ready_document(self, company, owner):
@@ -441,72 +543,8 @@ class DocumentAdminHttpTests(TestCase):
 #
 # Every test here sets CHROMA_PATH to a per-test tmp dir (override_settings +
 # tearDown rmtree) and uses a FAKE embeddings client (deterministic vectors) —
-# NEVER touching the real chroma_data and NEVER requiring a live key.
-
-from unittest import mock  # noqa: E402
-
-from django.urls import reverse  # noqa: E402
-
-from basics.llm import LLMConfigurationError  # noqa: E402
-from basics.vectorstore import ChromaVectorStore  # noqa: E402
-
-from .services import VECTOR_COLLECTION, find_relevant_chunks  # noqa: E402
-
-
-class _FakeEmbeddings:
-    """Deterministic 8-dim embeddings keyed off the text hash (no network)."""
-
-    DIM = 8
-
-    def _vector(self, text):
-        seed = abs(hash(text))
-        return [((seed >> (i * 3)) % 97) / 97.0 for i in range(self.DIM)]
-
-    def embed_documents(self, texts):
-        return [self._vector(text) for text in texts]
-
-    def embed_query(self, text):
-        return self._vector(text)
-
-
-class _FakeLLMClient:
-    """Stand-in for the LLM seam exposing only the embedding methods."""
-
-    def __init__(self, embeddings=None, *, raise_no_key=False):
-        self._embeddings = embeddings or _FakeEmbeddings()
-        self._raise_no_key = raise_no_key
-
-    def _check(self):
-        if self._raise_no_key:
-            raise LLMConfigurationError("LLM API key required to embed documents.")
-
-    def embed_documents(self, texts):
-        self._check()
-        return self._embeddings.embed_documents(texts)
-
-    def embed_query(self, text):
-        self._check()
-        return self._embeddings.embed_query(text)
-
-
-def _fake_client_factory(embeddings=None, *, raise_no_key=False):
-    client = _FakeLLMClient(embeddings, raise_no_key=raise_no_key)
-    return lambda: client
-
-
-class _TmpChromaMixin:
-    """Give each test an isolated tmp CHROMA_PATH, removed on tearDown."""
-
-    def setUp(self):
-        super().setUp()
-        self._chroma_dir = tempfile.mkdtemp(prefix="documents-chroma-")
-        self._chroma_override = override_settings(CHROMA_PATH=self._chroma_dir)
-        self._chroma_override.enable()
-
-    def tearDown(self):
-        self._chroma_override.disable()
-        shutil.rmtree(self._chroma_dir, ignore_errors=True)
-        super().tearDown()
+# NEVER touching the real chroma_data and NEVER requiring a live key. The
+# fake-client / tmp-Chroma harness is defined near the top of this module.
 
 
 @override_settings(MEDIA_ROOT=_MEDIA)
