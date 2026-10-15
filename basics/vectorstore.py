@@ -12,8 +12,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from chromadb.errors import InvalidCollectionException, NotFoundError
 from chromadb.telemetry.product import ProductTelemetryClient, ProductTelemetryEvent
 from overrides import override
+
+# A read against a collection that was never created (no documents have been
+# indexed yet) is a NORMAL "zero hits" case, not an error. Chroma signals the
+# missing collection with one of these depending on the client version.
+_MISSING_COLLECTION_ERRORS = (InvalidCollectionException, NotFoundError, ValueError)
 
 
 class DisabledProductTelemetry(ProductTelemetryClient):
@@ -96,7 +102,12 @@ class ChromaVectorStore:
         k: int = 5,
         filter: dict | None = None,
     ) -> list[dict]:
-        col = self.client.get_collection(collection)
+        try:
+            col = self.client.get_collection(collection)
+        except _MISSING_COLLECTION_ERRORS:
+            # Collection never created (no documents indexed yet) => no hits.
+            # Do NOT auto-create the collection on a read.
+            return []
         if col.count() == 0:
             return []
         results = col.query(
@@ -119,7 +130,11 @@ class ChromaVectorStore:
     def get_embeddings(self, ids: list[str], collection: str) -> dict[str, list[float]]:
         if not ids:
             return {}
-        col = self.client.get_collection(collection)
+        try:
+            col = self.client.get_collection(collection)
+        except _MISSING_COLLECTION_ERRORS:
+            # Missing collection => no stored embeddings.
+            return {}
         result = col.get(ids=ids, include=["embeddings"])
         return {
             vector_id: [float(value) for value in embedding]

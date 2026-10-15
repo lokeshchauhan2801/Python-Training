@@ -589,6 +589,25 @@ class VectorStoreTests(_TmpChromaMixin, TestCase):
             [],
         )
 
+    def test_missing_collection_search_returns_empty_not_error(self):
+        """A read against a never-created collection is a NORMAL zero-hit case.
+
+        With a fresh (empty) CHROMA_PATH the collection does not exist yet;
+        similarity_search / get_embeddings must return empty rather than raising
+        InvalidCollectionException (so chat still answers with no documents).
+        """
+        store = ChromaVectorStore()
+        self.assertEqual(
+            store.similarity_search(
+                [1.0, 0.0, 0.0], collection="never_created_collection", k=5
+            ),
+            [],
+        )
+        self.assertEqual(
+            store.get_embeddings(["x"], collection="never_created_collection"),
+            {},
+        )
+
 
 class LLMSeamTests(_TmpChromaMixin, TestCase):
     def test_fake_backend_embeds(self):

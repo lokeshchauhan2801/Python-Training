@@ -14,7 +14,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -582,6 +582,33 @@ class ProcessMessageTests(TestCase):
         self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
         self.assertEqual(assistant.company_id, self.company.id)
 
+    def test_empty_vector_store_yields_answer_not_retrieval_error(self):
+        """ADDITION A: with NO library docs / a never-created ('missing')
+        Chroma collection, retrieval must degrade to zero chunks and the chat
+        must still return a normal LLM answer (no citations), never a
+        ChatRetrievalError 502.
+
+        This exercises the REAL retrieval path (NOT mocked) against the fresh
+        empty CHROMA_PATH of this test class; the fake LLM's embed_query avoids
+        any network while get_collection('pdf_chunks') is genuinely missing.
+        """
+        assistant = self._service(response="general answer").process_message(
+            user=self.user,
+            message_text="what is the capital of France?",
+            conversation=self.session,
+            company=self.company,
+        )
+        self.assertEqual(assistant.role, Message.ROLE_ASSISTANT)
+        self.assertEqual(assistant.content, "general answer")
+        # No documents indexed => no citations, but a real answer persisted.
+        self.assertEqual(assistant.citations, [])
+        roles = list(
+            self.session.messages.order_by("created_at").values_list(
+                "role", flat=True
+            )
+        )
+        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
+
     def test_first_message_titles_session_bug2(self):
         """BUG 2: the first send retitles 'New session' from the message."""
         self.assertEqual(self.session.title, "New session")
@@ -933,6 +960,181 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(document.session_id, self.alice_session.pk)
         self.assertEqual(document.company_id, self.alice_co.id)
         self.assertEqual(document.uploaded_by_id, self.alice.id)
+
+    # --- delete_session (soft-delete) ------------------------------------
+    def test_delete_session_soft_deletes_in_scope(self):
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice, title="To delete"
+        )
+        Message.objects.create(
+            conversation=session,
+            company=self.alice_co,
+            role=Message.ROLE_USER,
+            content="hi",
+        )
+        self.client.force_login(self.alice)
+        resp = self.client.post(
+            reverse("chat:delete_session", args=[session.pk])
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/json")
+        self.assertTrue(resp.json()["deleted"])
+
+        # Soft-deleted (is_deleted=True), not hard-deleted.
+        self.assertFalse(
+            ConversationSession.objects.filter(pk=session.pk).exists()
+        )
+        row = ConversationSession.all_objects.get(pk=session.pk)
+        self.assertTrue(row.is_deleted)
+        self.assertIsNotNone(row.deleted_at)
+
+        # The session's messages are soft-deleted too.
+        self.assertFalse(
+            Message.objects.filter(conversation=session).exists()
+        )
+        self.assertTrue(
+            Message.all_objects.filter(conversation=session, is_deleted=True).exists()
+        )
+
+        # It disappears from the sessions list.
+        listing = self.client.get(reverse("chat:sessions_json")).json()
+        ids = {s["id"] for s in listing["sessions"]}
+        self.assertNotIn(str(session.pk), ids)
+
+    def test_delete_session_out_of_scope_is_404(self):
+        self.client.force_login(self.alice)
+        resp = self.client.post(
+            reverse("chat:delete_session", args=[self.bob_session.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+        # Bob's session is untouched (still visible, not deleted).
+        self.assertTrue(
+            ConversationSession.objects.filter(pk=self.bob_session.pk).exists()
+        )
+
+    def test_delete_session_rejects_get(self):
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice, title="Keep"
+        )
+        self.client.force_login(self.alice)
+        resp = self.client.get(
+            reverse("chat:delete_session", args=[session.pk])
+        )
+        self.assertEqual(resp.status_code, 405)
+        self.assertTrue(
+            ConversationSession.objects.filter(pk=session.pk).exists()
+        )
+
+    def test_delete_session_enforces_csrf(self):
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice, title="CSRF"
+        )
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.alice)
+        resp = csrf_client.post(
+            reverse("chat:delete_session", args=[session.pk])
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            ConversationSession.objects.filter(pk=session.pk).exists()
+        )
+
+    # --- rendered page structural assertions (BUG 1/2/delete button) -----
+    def test_chat_page_has_no_leaked_template_comments(self):
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        self.assertNotIn("Force a side-by-side", body)
+        self.assertNotIn("composer is visible by default", body)
+
+    def test_chat_page_composer_is_bottom_of_flex_column_panel(self):
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        # The composer markup is present.
+        self.assertIn('id="chat-composer"', body)
+        # #chat-messages (grow/scroll) comes before #chat-composer (bottom row)
+        # within the flex-column panel.
+        messages_pos = body.find('id="chat-messages"')
+        composer_pos = body.find('id="chat-composer"')
+        self.assertNotEqual(messages_pos, -1)
+        self.assertNotEqual(composer_pos, -1)
+        self.assertLess(messages_pos, composer_pos)
+        # The growing/scrolling transcript area.
+        self.assertIn("overflow-y-auto", body)
+        # The composer is pinned to the bottom (margin-top:auto) as the last
+        # child of the flex-column panel.
+        composer_tag = body[composer_pos:composer_pos + 120]
+        self.assertIn("mt-auto", composer_tag)
+        # The attach control renders as an SVG icon, NOT the literal ligature
+        # text "attach_file".
+        self.assertNotIn("attach_file", body)
+
+    def test_chat_page_renders_delete_control_wiring(self):
+        """Session rows get a delete control (rendered client-side). Assert the
+        page ships the delete wiring: the trash marker + the delete endpoint."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        self.assertIn("data-delete-session-id", body)
+        self.assertIn("/delete/", body)
+
+    def test_chat_page_icons_are_svg_not_literal_ligature_text(self):
+        """Icons must render as SVG, not the literal Material Symbols ligature
+        word (the user saw the paperclip render as the text 'attach_file')."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        # The attach control is an inline SVG, so the ligature word must NOT be
+        # present as static markup text.
+        self.assertNotIn("attach_file", body)
+        self.assertNotIn(">add<", body)
+        # Inline SVGs are present for the composer/new-chat controls.
+        self.assertIn("<svg", body)
+        # Belt-and-suspenders: the Material Symbols font is still loaded by the
+        # Unfold shell for any remaining glyphs.
+        self.assertIn("fonts/material-symbols/styles.css", body)
+
+    def test_company_selector_rendered_in_header_not_chats_column(self):
+        """ADDITION B: the #chat-company select sits in the page header
+        (#chat-header), before the Chats column / session list."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        header_pos = body.find('id="chat-header"')
+        company_pos = body.find('id="chat-company"')
+        list_pos = body.find('id="chat-session-list"')
+        self.assertNotEqual(header_pos, -1)
+        self.assertNotEqual(company_pos, -1)
+        self.assertNotEqual(list_pos, -1)
+        # The company selector lives inside the header, above the session list.
+        self.assertLess(header_pos, company_pos)
+        self.assertLess(company_pos, list_pos)
+
+    # --- ADDITION A: empty/missing vector store must NOT hard-fail --------
+    @override_settings(CHROMA_PATH=tempfile.mkdtemp(prefix="chat-empty-chroma-"))
+    def test_send_with_empty_vector_store_returns_answer(self):
+        """With NO library documents (empty/absent Chroma collection), a send
+        must still return a normal assistant answer (no citations), not a 502.
+
+        Uses the structured fake LLM (its embed_query avoids any network/key) and
+        the REAL retrieval path (find_relevant_chunks is NOT mocked), so the
+        empty-collection handling in ChromaVectorStore is exercised end-to-end.
+        """
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice
+        )
+        self.client.force_login(self.alice)
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="general answer"))
+        with mock.patch("chat.views._chat_service", return_value=fake):
+            resp = self.client.post(
+                reverse("chat:send", args=[session.pk]),
+                {"question": "What is the capital of France?"},
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        data = resp.json()
+        self.assertEqual(data["assistant"]["content"], "general answer")
+        self.assertEqual(data["assistant"]["citations"], [])
+        # Both the user and assistant messages were persisted.
+        roles = list(
+            session.messages.order_by("created_at").values_list("role", flat=True)
+        )
+        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
 
     @classmethod
     def tearDownClass(cls):

@@ -242,6 +242,25 @@ def send(request, session_id):
 
 @login_required
 @require_http_methods(["POST"])
+def delete_session(request, session_id):
+    """Soft-delete one session (and its messages) within the request's scope.
+
+    Scoped like every other chat endpoint (out-of-scope => 404). Uses the
+    SoftDeleteModel API (``is_deleted=True`` via ``delete``), never a hard
+    DELETE, and soft-deletes the session's messages for consistency.
+    """
+    session = _resolve_session(request, session_id)
+
+    # Soft-delete the session's messages first (consistent with the pattern),
+    # then the session itself. Both use the soft-delete queryset / instance API.
+    session.messages.all().delete(actor=request.user)
+    session.delete(actor=request.user)
+
+    return JsonResponse({"id": str(session.id), "deleted": True})
+
+
+@login_required
+@require_http_methods(["POST"])
 def attach(request, session_id):
     """Store an uploaded file as a chat Document (not chunked) on the session.
 

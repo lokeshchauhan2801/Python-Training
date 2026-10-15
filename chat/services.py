@@ -226,8 +226,26 @@ class ChatService:
         ish questions widen the ``k`` so the deterministic chart builder has more
         to work with. Returns an empty list when no company is in scope (there is
         nothing owner-scoped to search).
+
+        EARLY RETURN (matches the OLD project): if there are NO eligible library
+        documents (``source=LIBRARY``, ``status=READY``, ``chunk_count>0`` for
+        this company) we return ``[]`` immediately and NEVER touch Chroma. With
+        an empty/never-created vector collection this is the difference between a
+        normal general-knowledge answer and a spurious retrieval 502. The
+        ``ChatRetrievalError`` path then only fires when documents DO exist but
+        the search genuinely fails.
         """
         if company is None:
+            return []
+        eligible = Document.objects.filter(
+            source=Document.SOURCE_LIBRARY,
+            status=Document.STATUS_READY,
+            chunk_count__gt=0,
+            company=company,
+        )
+        if not eligible.exists():
+            # No indexed library documents => zero relevant chunks (NORMAL),
+            # never a retrieval error. Do not call embed_query / Chroma.
             return []
         k = 20 if self._is_chart_request(question) else 5
         try:

@@ -18,5 +18,6 @@ urlpatterns = [
     path("<str:session_id>/messages-json/", views.messages_json, name="messages_json"),
     path("<str:session_id>/send/", views.send, name="send"),
     path("<str:session_id>/attach/", views.attach, name="attach"),
+    path("<str:session_id>/delete/", views.delete_session, name="delete_session"),
     path("<str:session_id>/", views.chat_session, name="session"),
 ]

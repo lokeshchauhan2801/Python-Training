@@ -42,18 +42,37 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       {% translate "No companies available. You cannot start a chat yet." %}
     </p>
 
-    {# Force a side-by-side two-column layout at the ACTUAL Unfold content
-       width WITHOUT relying on Tailwind's md: breakpoint (it does not trigger
-       inside the admin content area, which made the columns stack and pushed
-       the conversation panel out of view). The inline flex-direction:row keeps
-       the two columns side-by-side by default; flex-wrap lets the narrow Chats
-       column (clamped ~18-20rem) and the flex-1 panel reflow on very narrow
-       screens. #}
+    <!-- Page header row: the Company selector lives here (top-right), NOT
+         inside the Chats column. Keeps the same #chat-company element + change
+         handler + scoping; only its DOM location changed. -->
+    <div id="chat-header" class="flex flex-wrap items-end justify-between gap-3 mb-4">
+      <h1 class="font-semibold text-base text-font-important-light dark:text-font-important-dark">
+        {% translate "Chat" %}
+      </h1>
+      <div class="flex flex-col">
+        <label for="chat-company"
+               class="block font-semibold mb-1 text-font-subtle-light text-xs uppercase dark:text-font-subtle-dark">
+          {% translate "Company" %}
+        </label>
+        <select id="chat-company"
+                class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
+                style="min-width:14rem;"></select>
+      </div>
+    </div>
+
+    {% comment %}
+    Force a side-by-side two-column layout at the ACTUAL Unfold content width
+    WITHOUT relying on Tailwind's md: breakpoint (it does not trigger inside the
+    admin content area, which made the columns stack and pushed the conversation
+    panel out of view). The inline flex-direction:row keeps the two columns
+    side-by-side by default; flex-wrap lets the narrow Chats column and the
+    flex-1 panel reflow on very narrow screens.
+    {% endcomment %}
     <div id="chat-layout"
          class="flex items-stretch gap-4"
-         style="flex-direction:row;flex-wrap:wrap;min-height:32rem;">
+         style="flex-direction:row;flex-wrap:wrap;min-height:calc(100vh - 12rem);">
 
-      {# --- MIDDLE: Chats history column ---------------------------------- #}
+      <!-- --- MIDDLE: Chats history column ---------------------------------- -->
       <div class="flex-none flex flex-col border border-base-200 rounded-default p-3 dark:border-base-700"
            style="width:19rem;max-width:100%;flex-basis:19rem;flex-grow:0;flex-shrink:0;">
         <div class="flex items-center justify-between mb-3">
@@ -62,38 +81,39 @@ ChatService.process_message), and the JS refreshes the list so it shows.
           </h2>
           <button type="button" id="chat-new"
                   title="{% translate 'New chat' %}"
+                  aria-label="{% translate 'New chat' %}"
                   class="border border-transparent bg-primary-600 cursor-pointer flex font-medium h-8 items-center justify-center rounded-default text-white w-8 hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
-            <span class="material-symbols-outlined md-18">add</span>
+            <!-- Inline SVG plus (icon-font-independent). -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
           </button>
-        </div>
-
-        <div class="mb-3">
-          <label for="chat-company"
-                 class="block font-semibold mb-1 text-font-subtle-light text-xs uppercase dark:text-font-subtle-dark">
-            {% translate "Company" %}
-          </label>
-          <select id="chat-company"
-                  class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"></select>
         </div>
 
         <ul id="chat-session-list" class="flex-1 list-none m-0 overflow-y-auto p-0"></ul>
       </div>
 
-      {# --- RIGHT: conversation panel ------------------------------------- #}
+      <!-- --- RIGHT: conversation panel -------------------------------------
+           ChatGPT-style layout: the panel is a flex COLUMN that fills its
+           height; #chat-messages grows and scrolls (flex:1, overflow-y:auto)
+           while #chat-composer is pinned to the BOTTOM as the panel's last
+           child. -->
       <div class="flex flex-1 flex-col min-w-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="flex:1 1 24rem;min-width:0;">
-        <div id="chat-messages" class="flex-1 min-h-[16rem] overflow-y-auto">
+        <div id="chat-messages" class="flex-1 min-h-0 overflow-y-auto">
           <p id="chat-empty-state"
              class="text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark">
             {% translate "No messages yet. Say hello!" %}
           </p>
         </div>
 
-        {# The composer is visible by default so the empty / new state still
-           shows an input ("No messages yet. Say hello!"). setComposerEnabled()
-           toggles the interactive controls for loaded vs. no-session states
-           without hiding the whole composer. #}
-        <div id="chat-composer" class="mt-4 border-t border-base-200 pt-4 dark:border-base-700">
+        {% comment %}
+        The composer stays visible by default so the empty / new state still
+        shows an input. setComposerEnabled() toggles the interactive controls
+        for loaded vs. no-session states without hiding the whole composer. It
+        is the panel's last child so it stays pinned at the bottom.
+        {% endcomment %}
+        <div id="chat-composer" class="mt-auto border-t border-base-200 pt-4 dark:border-base-700">
           <textarea id="chat-input" rows="3"
                     class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
                     placeholder="{% translate 'Type a message...' %}"></textarea>
@@ -108,8 +128,13 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
             <button type="button" id="chat-attach-btn"
                     title="{% translate 'Attach a document (PDF, text, etc.)' %}"
+                    aria-label="{% translate 'Attach a document' %}"
                     class="border border-base-200 cursor-pointer flex h-9 items-center justify-center rounded-default text-font-default-light w-9 hover:bg-base-100 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800">
-              <span class="material-symbols-outlined md-18">attach_file</span>
+              <!-- Inline SVG paperclip so the icon always renders, even if the
+                   Material Symbols icon font fails to load on this page. -->
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+              </svg>
             </button>
             <input type="file" id="chat-attach-input" class="hidden" />
 
@@ -170,6 +195,35 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
     function clear(el) {
       while (el.firstChild) { el.removeChild(el.firstChild); }
+    }
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    // Build an inline SVG trash icon via createElementNS (no innerHTML). Using
+    // an SVG rather than a Material Symbols ligature guarantees it renders as an
+    // icon, never the literal text "delete", regardless of icon-font loading.
+    function makeTrashIcon() {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("width", "18");
+      svg.setAttribute("height", "18");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", "currentColor");
+      svg.setAttribute("stroke-width", "2");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      svg.setAttribute("aria-hidden", "true");
+      const d = [
+        "M3 6h18",
+        "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+        "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6",
+        "M10 11v6",
+        "M14 11v6"
+      ];
+      d.forEach(function (segment) {
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", segment);
+        svg.appendChild(path);
+      });
+      return svg;
     }
     function setStatus(text) { statusEl.textContent = text || ""; }
     // The composer stays visible at all times (so the empty / new state shows
@@ -333,7 +387,11 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     }
 
     // --- data loads -------------------------------------------------------
-    function loadSession(id, push) {
+    // `quiet` (used by the initial auto-open) makes a failed load degrade to a
+    // clean empty state instead of surfacing a scary "Could not load session."
+    // error. An empty session is a NORMAL empty state (messages: []), never an
+    // error. Only a genuine user send failure shows an inline error.
+    function loadSession(id, push, quiet) {
       currentSessionId = id;
       clearAttachmentsUI();
       setStatus("Loading...");
@@ -345,7 +403,18 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       fetch(messagesUrlFor(id), { method: "GET", headers: jsonHeaders(), credentials: "same-origin" })
         .then(function (r) { if (!r.ok) { throw new Error("not ok"); } return r.json(); })
         .then(function (data) { renderMessages(data.messages); setStatus(""); })
-        .catch(function () { setStatus("Could not load session."); });
+        .catch(function () {
+          if (quiet) {
+            // Degrade gracefully: show the clean empty transcript + ready
+            // composer, no error text.
+            currentSessionId = null;
+            renderMessages([]);
+            highlightSession(null);
+            setStatus("");
+          } else {
+            setStatus("Could not load session.");
+          }
+        });
     }
 
     function highlightSession(id) {
@@ -363,11 +432,14 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       clear(sessionListEl);
       (sessions || []).forEach(function (session) {
         const li = document.createElement("li");
-        li.className = "mb-2";
+        li.className = "group mb-2 flex items-stretch gap-1";
+
+        // The loadable row button (flex-1) still carries data-session-id so
+        // highlightSession() keeps working; a row click LOADS the session.
         const btn = document.createElement("button");
         btn.type = "button";
         btn.setAttribute("data-session-id", session.id);
-        btn.className = "block border border-base-200 bg-white cursor-pointer px-3 py-2 rounded-default text-left text-font-default-light text-sm w-full hover:bg-base-100 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800";
+        btn.className = "flex-1 min-w-0 block border border-base-200 bg-white cursor-pointer px-3 py-2 rounded-default text-left text-font-default-light text-sm hover:bg-base-100 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800";
 
         const title = document.createElement("div");
         title.className = "font-medium truncate";
@@ -383,9 +455,58 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
         btn.addEventListener("click", function () { loadSession(session.id, true); });
         li.appendChild(btn);
+
+        // Delete control: a separate trash button, right-aligned, revealed on
+        // row hover (ChatGPT-style). Clicking it deletes the session and must
+        // NOT bubble up to the row-load handler.
+        const del = document.createElement("button");
+        del.type = "button";
+        del.setAttribute("data-delete-session-id", session.id);
+        del.title = "Delete chat";
+        del.setAttribute("aria-label", "Delete chat");
+        del.className = "flex-none flex h-auto items-center justify-center px-2 rounded-default text-font-subtle-light opacity-0 cursor-pointer hover:bg-base-100 hover:text-red-600 group-hover:opacity-100 focus:opacity-100 dark:text-font-subtle-dark dark:hover:bg-base-800";
+        // Inline SVG trash icon built with createElement (no innerHTML, and
+        // icon-font-independent so it never renders as the literal word).
+        del.appendChild(makeTrashIcon());
+        del.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          deleteSession(session.id, li);
+        });
+        li.appendChild(del);
+
         sessionListEl.appendChild(li);
       });
       if (currentSessionId) { highlightSession(currentSessionId); }
+    }
+
+    // Soft-delete a session via the scoped CSRF-protected endpoint, then prune
+    // its row from the DOM. If the open session was deleted, clear the panel
+    // and open the next most-recent session (or the empty state).
+    function deleteSession(id, li) {
+      if (!window.confirm("Delete this chat? This cannot be undone from here.")) {
+        return;
+      }
+      fetch(baseUrl + id + "/delete/", {
+        method: "POST",
+        headers: jsonHeaders({ "X-CSRFToken": getCookie("csrftoken") }),
+        credentials: "same-origin"
+      })
+        .then(function (r) { if (!r.ok) { throw new Error("not ok"); } return r.json(); })
+        .then(function () {
+          if (li && li.parentNode) { li.parentNode.removeChild(li); }
+          if (currentSessionId === id) {
+            currentSessionId = null;
+            renderMessages([]);
+            const next = sessionListEl.querySelector("button[data-session-id]");
+            if (next) {
+              loadSession(next.getAttribute("data-session-id"), true);
+            } else {
+              setComposerEnabled(false);
+              setStatus("");
+            }
+          }
+        })
+        .catch(function () { setStatus("Could not delete chat."); });
     }
 
     function loadSessions(then) {
@@ -555,8 +676,10 @@ ChatService.process_message), and the JS refreshes the list so it shows.
           createNewChat();
         } else if (sessions && sessions.length) {
           // Auto-open the most-recent session so messages + composer show
-          // immediately on page load.
-          loadSession(sessions[0].id, false);
+          // immediately on page load. `quiet=true`: if that session can't be
+          // loaded (empty/404/any error) we fall back to the clean empty state
+          // rather than showing an error (BUG 3).
+          loadSession(sessions[0].id, false, true);
         }
       });
     });
