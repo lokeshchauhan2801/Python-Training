@@ -245,6 +245,16 @@ UNFOLD = {
                 "collapsible": True,
                 "items": [
                     {
+                        "title": "Documents",
+                        "icon": "description",
+                        "link": reverse_lazy("admin:documents_document_changelist"),
+                    },
+                    {
+                        "title": "Document chunks",
+                        "icon": "auto_stories",
+                        "link": reverse_lazy("admin:documents_documentchunk_changelist"),
+                    },
+                    {
                         "title": "Scrape jobs",
                         "icon": "travel_explore",
                         "link": reverse_lazy("admin:scrapper_scrapejob_changelist"),
@@ -264,22 +274,6 @@ UNFOLD = {
                         "title": "Conversations",
                         "icon": "chat_bubble",
                         "link": reverse_lazy("admin:chat_conversation_changelist"),
-                    },
-                ],
-            },
-            {
-                "title": "Documents",
-                "collapsible": True,
-                "items": [
-                    {
-                        "title": "Documents",
-                        "icon": "description",
-                        "link": reverse_lazy("admin:documents_document_changelist"),
-                    },
-                    {
-                        "title": "Document chunks",
-                        "icon": "auto_stories",
-                        "link": reverse_lazy("admin:documents_documentchunk_changelist"),
                     },
                 ],
             },
