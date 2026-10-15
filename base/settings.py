@@ -143,6 +143,16 @@ LLM_API_KEY = (
     or ""
 )
 
+# Vector store (ChromaDB) + embedding configuration. These are plain values
+# only; no Chroma or embedding client is constructed at import. ChromaVectorStore
+# (basics/vectorstore.py) and LLMClient read these lazily on first use. When
+# CHROMA_HOST is set the store talks to a remote Chroma server, otherwise it uses
+# a local PersistentClient rooted at CHROMA_PATH (gitignored chroma_data/).
+CHROMA_PATH = Path(os.getenv("CHROMA_PATH", BASE_DIR / "chroma_data"))
+CHROMA_HOST = os.getenv("CHROMA_HOST", "")
+CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",

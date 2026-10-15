@@ -34,6 +34,7 @@ class LLMClient:
         self.base_url = base_url or settings.LLM_BASE_URL or None
         self._api_key = api_key or settings.LLM_API_KEY or None
         self._client = None  # lazy; NOT built at import or construct time
+        self._embeddings = None  # lazy; NOT built at import or construct time
 
     def _ensure_client(self):
         if self._client is None:
@@ -50,6 +51,23 @@ class LLMClient:
             )
         return self._client
 
+    def _ensure_embeddings(self):
+        if self._embeddings is None:
+            if not self._api_key:
+                raise LLMConfigurationError(
+                    "LLM API key required to embed documents."
+                )
+            # Lazy import mirrors _ensure_client: importing this module never
+            # requires the embeddings backend to be constructable.
+            from langchain_openai import OpenAIEmbeddings
+
+            self._embeddings = OpenAIEmbeddings(
+                model=settings.EMBEDDING_MODEL,
+                api_key=self._api_key,
+                base_url=self.base_url or None,
+            )
+        return self._embeddings
+
     def complete(self, messages, *, temperature=None, max_tokens=None) -> str:
         client = self._ensure_client()
         try:
@@ -62,6 +80,47 @@ class LLMClient:
             )
             raise LLMBackendError("LLM backend call failed.") from exc
         return self._content_to_text(result.content)
+
+    def embed_documents(self, texts) -> list:
+        embeddings = self._ensure_embeddings()
+        try:
+            return embeddings.embed_documents(texts)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+            logger.error(
+                "LLM embedding call failed (provider=%s model=%s)",
+                self.provider,
+                settings.EMBEDDING_MODEL,
+            )
+            raise LLMBackendError("LLM embedding call failed.") from exc
+
+    def embed_query(self, text) -> list:
+        embeddings = self._ensure_embeddings()
+        try:
+            return embeddings.embed_query(text)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+            logger.error(
+                "LLM embedding call failed (provider=%s model=%s)",
+                self.provider,
+                settings.EMBEDDING_MODEL,
+            )
+            raise LLMBackendError("LLM embedding call failed.") from exc
+
+    def generate_structured(self, prompt, schema):
+        """Return a ``schema`` instance validated from a structured completion."""
+        client = self._ensure_client()
+        try:
+            structured_client = client.with_structured_output(schema)
+            response = structured_client.invoke(prompt)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+            logger.error(
+                "LLM structured call failed (provider=%s model=%s)",
+                self.provider,
+                self.model,
+            )
+            raise LLMBackendError("LLM structured call failed.") from exc
+        if isinstance(response, schema):
+            return response
+        return schema.model_validate(response)
 
     @staticmethod
     def _to_lc_messages(messages):
@@ -98,3 +157,12 @@ class LLMClient:
                 for part in content
             )
         return str(content)
+
+
+def get_llm_client() -> LLMClient:
+    """Return an LLMClient. The single injectable seam services depend on.
+
+    Builds no backend at import or call time (LLMClient is lazy); tests patch
+    this function to inject a fake client.
+    """
+    return LLMClient()
