@@ -164,22 +164,22 @@ class ConversationSessionAdmin(BaseModelAdmin):
                 name="chat_conversation_sessions_json",
             ),
             path(
-                "chat/<uuid:pk>/turns-json/",
+                "chat/<str:pk>/turns-json/",
                 admin_view(self.session_turns_json_view),
                 name="chat_conversation_turns_json",
             ),
             path(
-                "chat/<uuid:pk>/send/",
+                "chat/<str:pk>/send/",
                 admin_view(self.send_message_view),
                 name="chat_conversation_send",
             ),
             path(
-                "<uuid:pk>/detail-json/",
+                "<str:pk>/detail-json/",
                 self.admin_site.admin_view(self.detail_json_view),
                 name="chat_conversationsession_detail_json",
             ),
             path(
-                "<uuid:pk>/summarize/",
+                "<str:pk>/summarize/",
                 self.admin_site.admin_view(self.summarize_view),
                 name="chat_conversationsession_summarize",
             ),

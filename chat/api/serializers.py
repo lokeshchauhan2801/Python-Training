@@ -3,7 +3,7 @@
 ``ConversationSessionSerializer`` owns the required-``company`` resolution rule
 (design "Required-company resolution on create"):
 
-* a supplied ``company`` uuid must be owned by the request user (superuser: any),
+* a supplied ``company`` id must be owned by the request user (superuser: any),
   else HTTP 400;
 * an omitted ``company`` defaults to the user's single owned company; zero or
   more than one owned company is a 400.
@@ -121,5 +121,5 @@ class ConversationSerializer(
 class AskSerializer(serializers.Serializer):
     """Input shape for the ``ask`` endpoint."""
 
-    session = serializers.UUIDField()
+    session = serializers.CharField(max_length=26)
     question = serializers.CharField()

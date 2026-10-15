@@ -2,7 +2,7 @@
 
 ``ScrapeJobAdmin`` uses the reusable ``BaseModelAdmin`` (soft-delete visibility,
 owner scoping, audit stamping) and adds a CSRF-protected confirmation flow for
-running a scrape. The custom ``<uuid:pk>/run/`` URL is registered BEFORE
+running a scrape. The custom ``<str:pk>/run/`` URL is registered BEFORE
 ``super().get_urls()`` and wrapped in ``admin_view`` (enforces admin login +
 permission). GET renders a confirmation page carrying ``{% csrf_token %}``; the
 POST is CSRF-validated by Django's middleware before the job is resolved from the
@@ -50,7 +50,7 @@ class ScrapeJobAdmin(BaseModelAdmin):
         # Custom URLs BEFORE super().get_urls() so they take precedence.
         custom = [
             path(
-                "<uuid:pk>/run/",
+                "<str:pk>/run/",
                 self.admin_site.admin_view(self.run_view),
                 name="scrapper_scrapejob_run",
             ),

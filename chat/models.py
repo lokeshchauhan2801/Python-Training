@@ -1,8 +1,9 @@
 """Chat domain models.
 
 ``ConversationSession`` groups a sequence of question/response ``Conversation``
-turns. Both inherit ``BaseModel`` (UUID pk, required company FK, audit +
-soft-delete). The cross-field invariant ``Conversation.company ==
+turns. Both compose ``BaseModel`` (audit) + ``SoftDeleteModel`` + a ULID ``id``
+PK and declare their own required ``company`` FK directly. The cross-field invariant
+``Conversation.company ==
 session.company`` is owned by the model: it is declared in ``clean()`` AND
 re-checked inside ``save()`` so admin, serializer, and service saves are all
 guarded (a cross-table rule cannot be a DB ``CheckConstraint``).
@@ -13,11 +14,18 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 from basics.managers import AllObjectsManager, SoftDeleteManager
-from basics.models import BaseModel
-from basics.ulid import new_ulid
+from basics.models import BaseModel, SoftDeleteModel
+from basics.ulid import ULIDField, new_ulid
 
 
-class ConversationSession(BaseModel):
+class ConversationSession(BaseModel, SoftDeleteModel):
+    id = ULIDField()
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="%(app_label)s_%(class)s_set",
+        db_index=True,
+    )
     session_id = models.CharField(
         max_length=26, unique=True, default=new_ulid, editable=False
     )
@@ -49,7 +57,14 @@ class ConversationSession(BaseModel):
         return self.title or self.session_id
 
 
-class Conversation(BaseModel):
+class Conversation(BaseModel, SoftDeleteModel):
+    id = ULIDField()
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="%(app_label)s_%(class)s_set",
+        db_index=True,
+    )
     session = models.ForeignKey(
         ConversationSession,
         on_delete=models.CASCADE,

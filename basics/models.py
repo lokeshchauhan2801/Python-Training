@@ -1,12 +1,21 @@
-"""Abstract audit base models.
+"""Composable abstract base models.
 
-``AuditModel`` provides a UUID primary key, created/updated timestamps and
-actors, and soft-delete columns, plus actor-aware ``save``/``delete``/``restore``
-methods. ``BaseModel`` extends it with a required company FK for tenant-scoped
-domain models.
+Three independent, composable pieces (ONE each, no per-module variants):
+
+* ``BaseModel`` — the single audit base inherited by EVERY model (including
+  ``accounts.User``). It holds EXACTLY FOUR fields: ``created_at``,
+  ``updated_at``, ``created_by``, ``updated_by``, plus the actor-aware ``save``
+  that stamps the audit actors. Nothing else.
+* The ULID primary key is a SEPARATE reusable field (``basics.ulid.ULIDField``);
+  each model declares its own ``id = ULIDField()``. The PK is NOT on ``BaseModel``.
+* ``SoftDeleteModel`` — a SEPARATE abstract mixin holding ``is_deleted`` /
+  ``deleted_at`` and the actor-aware soft ``delete``/``restore``/``hard_delete``.
+  Applied only to the models that need soft-delete, together with the
+  soft-delete managers. Soft-delete is NOT on ``BaseModel``.
+
+A fully-featured model composes ``BaseModel`` + ``SoftDeleteModel`` + an
+``id = ULIDField()`` PK (and, for non-auth models, a required ``company`` FK).
 """
-
-import uuid
 
 from django.conf import settings
 from django.db import models
@@ -30,8 +39,9 @@ def resolve_actor(explicit):
     return None
 
 
-class AuditModel(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+class BaseModel(models.Model):
+    """The single audit base — EXACTLY four audit fields and nothing else."""
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
@@ -50,8 +60,6 @@ class AuditModel(models.Model):
         editable=False,
         related_name="%(app_label)s_%(class)s_updated",
     )
-    is_deleted = models.BooleanField(default=False, db_index=True)
-    deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         abstract = True
@@ -63,6 +71,16 @@ class AuditModel(models.Model):
                 self.created_by = resolved
             self.updated_by = resolved
         super().save(*args, **kwargs)
+
+
+class SoftDeleteModel(models.Model):
+    """Separate soft-delete mixin: ``is_deleted`` / ``deleted_at`` + methods."""
+
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        abstract = True
 
     def delete(self, *args, actor=None, **kwargs):
         """Soft delete this instance (partial save of the soft-delete columns)."""
@@ -84,15 +102,3 @@ class AuditModel(models.Model):
         self.save(
             update_fields=["is_deleted", "deleted_at", "updated_by", "updated_at"]
         )
-
-
-class BaseModel(AuditModel):
-    company = models.ForeignKey(
-        "company.Company",
-        on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_set",
-        db_index=True,
-    )
-
-    class Meta:
-        abstract = True

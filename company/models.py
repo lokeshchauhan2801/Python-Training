@@ -1,18 +1,21 @@
 """The ``company.Company`` model (tenant root).
 
-``Company`` inherits the company-free ``AuditModel`` (UUID pk + audit +
-soft-delete) rather than ``BaseModel``, because it IS the tenant root and has no
-self-referential company FK.
+``Company`` composes ``BaseModel`` (4 audit fields) + ``SoftDeleteModel`` and
+declares its own ULID ``id`` PK. As the tenant root it has an ``owner`` FK but
+NO ``company`` FK (it IS the company), so it is the one domain model without a
+tenant-scoping company field.
 """
 
 from django.conf import settings
 from django.db import models
 
 from basics.managers import AllObjectsManager, SoftDeleteManager
-from basics.models import AuditModel
+from basics.models import BaseModel, SoftDeleteModel
+from basics.ulid import ULIDField
 
 
-class Company(AuditModel):
+class Company(BaseModel, SoftDeleteModel):
+    id = ULIDField()
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
