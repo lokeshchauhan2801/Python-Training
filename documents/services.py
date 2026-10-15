@@ -477,6 +477,27 @@ def extract_document_chunks(document: Document) -> list[tuple[int, str, str]]:
     return chunks
 
 
+def extract_document_text(document: Document) -> str:
+    """Return the full extracted text of a document as a single string.
+
+    Chat attachments are never embedded in the vector store, so when the chat
+    needs to answer FROM an attached text/pdf/docx/image file it reads the file
+    directly. This reuses the same dispatch-by-suffix extraction pipeline the
+    library indexer uses (``extract_document_chunks`` — which already handles
+    pdf/docx/txt/md/csv/xlsx/json and image OCR via tesseract), then joins the
+    chunk bodies into one blank-line-separated string.
+
+    A bad or edge attachment (OCR found no readable text, unsupported type, or
+    an unreadable file) degrades to an empty string rather than raising, so the
+    caller can simply skip a document with no usable content.
+    """
+    try:
+        chunks = extract_document_chunks(document)
+    except DocumentValidationError:
+        return ""
+    return "\n\n".join(content for _, _, content in chunks if content).strip()
+
+
 def _delete_chunks(document: Document) -> None:
     """Hard-delete every chunk row for a document (incl. soft-deleted ones)."""
     DocumentChunk.all_objects.filter(document=document).hard_delete()

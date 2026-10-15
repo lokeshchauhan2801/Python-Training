@@ -27,6 +27,7 @@ from .models import Document, DocumentChunk
 from .services import (
     DocumentValidationError,
     extract_document_chunks,
+    extract_document_text,
     process_document,
     split_page_text,
 )
@@ -273,6 +274,29 @@ class ExtractionTests(TestCase):
         chunks = self._extract("scan.png", _png_bytes("HELLO OCR"))
         self.assertTrue(chunks)
         self.assertIn("Image (OCR)", chunks[0][1])
+
+    def test_extract_document_text_joins_txt(self):
+        doc = _make_document(
+            self.company,
+            self.owner,
+            "note.txt",
+            b"The capital of France is Paris.",
+        )
+        text = extract_document_text(doc)
+        self.assertIn("The capital of France is Paris.", text)
+
+    def test_extract_document_text_includes_csv_values(self):
+        doc = _make_document(self.company, self.owner, "data.csv", _csv_bytes())
+        text = extract_document_text(doc)
+        self.assertIn("Alice", text)
+
+    def test_extract_document_text_returns_empty_on_validation_error(self):
+        # An unsupported type raises DocumentValidationError inside the chunk
+        # extractor; extract_document_text swallows it and returns "".
+        doc = _make_document(
+            self.company, self.owner, "archive.zip", b"PK\x03\x04not-a-real-zip"
+        )
+        self.assertEqual(extract_document_text(doc), "")
 
 
 class ChunkingTests(TestCase):

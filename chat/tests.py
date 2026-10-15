@@ -9,7 +9,7 @@ company/session).
 
 import shutil
 import tempfile
-from unittest import mock
+from unittest import mock, skipUnless
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -20,6 +20,7 @@ from rest_framework.test import APIClient
 
 from basics.llm import LLMConfigurationError
 from company.models import Company
+from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
 from .admin import ConversationSessionAdmin
@@ -804,6 +805,144 @@ class ProcessMessageTests(TestCase):
         # NYC appears twice in the CSV, LA once.
         self.assertEqual(nyc["values"][0], 2)
         self.assertEqual(points["LA"]["values"][0], 1)
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_attached_csv_chart_overrides_llm_fabricated_chart(self):
+        """A chat-attached CSV is AUTHORITATIVE for chart requests.
+
+        Even when the LLM returns its OWN (fabricated general-knowledge) chart,
+        the persisted chart must reflect the CSV's REAL rows (NYC=10, LA=5,
+        SF=3) and be a pie chart (the user asked for a pie). This proves the
+        attached CSV wins over the LLM chart.
+        """
+        Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            session=self.session,
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+            title="cities.csv",
+            file=SimpleUploadedFile(
+                "cities.csv",
+                b"city,count\nNYC,10\nLA,5\nSF,3\n",
+                content_type="text/csv",
+            ),
+            file_type="csv",
+        )
+        # The fake LLM fabricates a DIFFERENT chart from "general knowledge".
+        fabricated = ChartData(
+            type="pie",
+            title="City populations (general knowledge)",
+            x_axis="city",
+            y_axis="population",
+            series=["Population"],
+            data=[
+                ChartPoint(label="NYC", values=[8000000.0]),
+                ChartPoint(label="LA", values=[4000000.0]),
+                ChartPoint(label="SF", values=[800000.0]),
+            ],
+        )
+        with self._no_chunks():
+            assistant = self._service(
+                response="Here is a chart of city populations.",
+                chart=fabricated,
+            ).process_message(
+                user=self.user,
+                message_text="make a pie chart of count by city",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.assertIsNotNone(assistant.chart_data)
+        self.assertEqual(assistant.chart_data["type"], "pie")
+        points = {p["label"]: p["values"][0] for p in assistant.chart_data["data"]}
+        # Real CSV rows win over the LLM's fabricated populations.
+        self.assertEqual(points, {"NYC": 10.0, "LA": 5.0, "SF": 3.0})
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_attached_text_content_reaches_prompt(self):
+        """An attached notes.txt is injected into the prompt (strict mode on).
+
+        The fake LLM captures the prompt it is handed; the attachment block
+        (``Attached file: notes.txt`` + its text) must be present, and the
+        strict file-context instruction (no outside numbers) must be active.
+        """
+        Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            session=self.session,
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+            title="notes.txt",
+            file=SimpleUploadedFile(
+                "notes.txt",
+                b"The capital of France is Paris.",
+                content_type="text/plain",
+            ),
+            file_type="txt",
+        )
+        fake = _FakeStructuredLLM(response="The capital of France is Paris.")
+        with self._no_chunks():
+            ChatService(llm_client=fake).process_message(
+                user=self.user,
+                message_text="According to my attached file, what is the capital of France?",
+                conversation=self.session,
+                company=self.company,
+            )
+        prompt = fake.prompts[0]
+        self.assertIn("Attached file: notes.txt", prompt)
+        self.assertIn("The capital of France is Paris.", prompt)
+        # Attachment present => strict (no outside numbers) file-context branch.
+        self.assertIn("never make up numbers", prompt)
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    @skipUnless(
+        document_services._tesseract_available(),
+        "tesseract OCR not available",
+    )
+    def test_attached_image_ocr_text_reaches_prompt(self):
+        """An attached PNG is OCR'd and its text injected into the prompt.
+
+        Replicates OLD's image behaviour exactly: images are OCR'd to text via
+        tesseract (no vision model) and answered from that text.
+        """
+        from io import BytesIO
+
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (320, 80), color="white")
+        draw = ImageDraw.Draw(image)
+        draw.text((10, 30), "INVOICE TOTAL 4242", fill="black")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+
+        document = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            session=self.session,
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+            title="invoice.png",
+            file=SimpleUploadedFile(
+                "invoice.png", buffer.read(), content_type="image/png"
+            ),
+            file_type="png",
+        )
+        # The extractor OCRs the image to text.
+        extracted = document_services.extract_document_text(document)
+        self.assertIn("4242", extracted)
+
+        fake = _FakeStructuredLLM(response="The number is 4242.")
+        with self._no_chunks():
+            ChatService(llm_client=fake).process_message(
+                user=self.user,
+                message_text="what number is in this image?",
+                conversation=self.session,
+                company=self.company,
+            )
+        prompt = fake.prompts[0]
+        self.assertIn("Attached file: invoice.png", prompt)
+        self.assertIn("4242", prompt)
 
 
 class ChatUIViewTests(TestCase):

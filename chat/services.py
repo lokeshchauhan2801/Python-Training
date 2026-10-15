@@ -257,12 +257,29 @@ class ChatService:
                 "Could not search the uploaded document index."
             ) from exc
 
-    def _build_prompt(self, history_text, question, chunks, *, has_file_context=None):
+    def _build_prompt(
+        self,
+        history_text,
+        question,
+        chunks,
+        *,
+        has_file_context=None,
+        attachment_sections=None,
+    ):
         # Whether the session has file/document context to ground a chart in.
         # Defaults to "do we have retrieved chunks?" so the single existing call
         # site keeps working; tests may pass the flag explicitly.
+        #
+        # ``attachment_sections`` carries pre-extracted text from chat-attached
+        # files (``[(title, text), ...]``). Chat attachments are NOT embedded, so
+        # their content is folded directly into the grounding passages here. When
+        # any attachment text is present we also treat the turn as having file
+        # context (strict, no-outside-numbers mode) so the model answers FROM the
+        # file instead of general knowledge. Attachment blocks are NOT cited
+        # (they are not chunk-cited); citations stay sourced from ``chunks``.
+        attachment_sections = attachment_sections or []
         if has_file_context is None:
-            has_file_context = bool(chunks)
+            has_file_context = bool(chunks) or bool(attachment_sections)
 
         context_sections = []
         citations = []
@@ -290,9 +307,18 @@ class ChatService:
                 }
             )
 
+        # Chat-attached files are read directly (never embedded) and folded in
+        # as labelled, un-cited blocks ahead of any retrieved library chunks.
+        attachment_blocks = [
+            f"[Attached file: {title}]\n{text}"
+            for title, text in attachment_sections
+            if text
+        ]
+
+        all_sections = attachment_blocks + context_sections
         document_context = (
-            "\n\n".join(context_sections)
-            if context_sections
+            "\n\n".join(all_sections)
+            if all_sections
             else "No relevant passages were retrieved from uploaded files for this question."
         )
 
@@ -499,6 +525,55 @@ class ChatService:
         )
         return (session_docs | message_docs).distinct()
 
+    # Bounds for injected attachment text so a huge file cannot blow the token
+    # budget: cap each document's text and the number of documents folded in.
+    _MAX_ATTACHMENT_CHARS = 8000
+    _MAX_ATTACHMENT_DOCS = 5
+
+    def _chat_attachment_texts(self, conversation):
+        """Return ``(title, text)`` for this session's non-CSV chat attachments.
+
+        Chat attachments (``source=chat``) are never embedded in the vector
+        store, so a question about an attached txt/pdf/docx/image is answered by
+        reading the file directly and injecting its extracted text into the
+        prompt. CSV attachments are EXCLUDED here — they drive the deterministic
+        chart builder (``_build_csv_distribution_chart``) instead.
+
+        Documents are reachable the same two ways as ``_chat_csv_documents``:
+        the session (``ConversationSession.documents`` via ``Document.session``)
+        and the session's messages (``Message.documents`` M2M). Each document's
+        text is read via ``documents.services.extract_document_text`` (which
+        OCRs images via tesseract), capped per document, and docs with no usable
+        text are skipped. The number of docs folded in is bounded.
+        """
+        if conversation is None:
+            return []
+
+        session_docs = conversation.documents.filter(
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+        ).exclude(file_type="csv")
+        message_docs = Document.objects.filter(
+            chat_messages__conversation=conversation,
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+        ).exclude(file_type="csv")
+        documents = (session_docs | message_docs).distinct()
+
+        sections = []
+        for document in documents[: self._MAX_ATTACHMENT_DOCS]:
+            try:
+                text = document_services.extract_document_text(document)
+            except Exception:  # a bad attachment must never break the answer
+                logger.exception(
+                    "Could not extract text from chat attachment %s", document.pk
+                )
+                continue
+            if not text:
+                continue
+            sections.append((document.title, text[: self._MAX_ATTACHMENT_CHARS]))
+        return sections
+
     def _build_csv_distribution_chart(self, conversation, question):
         if not self._is_chart_request(question):
             return None
@@ -549,6 +624,41 @@ class ChatService:
 
             if not rows:
                 continue
+
+            # "<value> by <category>" aggregation (e.g. "count by city"): group
+            # the rows by a label column and SUM a numeric value column so the
+            # chart shows the file's real metric per category (NYC=10, LA=5,
+            # SF=3) rather than a frequency count. This fires only when the
+            # phrasing and columns clearly express that mapping; otherwise we
+            # fall through to the distribution summary below.
+            aggregated = self._aggregate_value_by_label(headers, rows, question)
+            if aggregated is not None:
+                label_index, value_index, label_values = aggregated
+                can_pie = wants_pie and any(v > 0 for _, v in label_values)
+                if can_pie:
+                    chart_type = "pie"
+                elif wants_line:
+                    chart_type = "line"
+                else:
+                    chart_type = "bar"
+                chart = ChartData(
+                    type=chart_type,
+                    title=f"{headers[value_index]} by {headers[label_index]}",
+                    x_axis=headers[label_index],
+                    y_axis=headers[value_index],
+                    series=[headers[value_index]],
+                    data=[
+                        ChartPoint(label=label, values=[float(value)])
+                        for label, value in label_values
+                    ],
+                )
+                total = sum(value for _, value in label_values)
+                return (
+                    f"Here is the {chart_type} chart of {headers[value_index]} "
+                    f"by {headers[label_index]} from {document.title}, "
+                    f"totalling {total:,.0f}.",
+                    chart,
+                )
 
             explicit_index = next(
                 (
@@ -615,6 +725,85 @@ class ChatService:
     # Maximum distinct categories to keep a chart (and especially a pie) readable.
     _MAX_CHART_CATEGORIES = 100
     _MAX_PIE_SLICES = 12
+
+    def _aggregate_value_by_label(self, headers, rows, question):
+        """Group rows by a label column and SUM a numeric value column.
+
+        Honours a ``"<value> by <category>"`` request (e.g. "count by city")
+        where the user names a numeric metric column and a categorical column:
+        we return ``(label_index, value_index, [(label, total), ...])`` with the
+        value column summed per label, preserving first-seen label order. This
+        is what makes an attached CSV (``city,count`` with NYC=10, LA=5, SF=3)
+        chart its REAL values instead of a per-row frequency count.
+
+        Returns ``None`` (so the caller falls back to the distribution summary)
+        unless BOTH columns are identifiable from the question AND the value
+        column is numeric for the data rows.
+        """
+        if not headers or len(headers) < 2:
+            return None
+
+        # Columns the user explicitly named, in question order, as (match_pos,
+        # index) so we can tell which was mentioned first.
+        named = []
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            match = re.search(rf"\b{re.escape(header)}s?\b", question, re.I)
+            if match:
+                named.append((match.start(), index))
+        if len(named) < 2:
+            return None
+
+        # Prefer an explicit "<X> by <Y>" phrasing: X is the value, Y the label.
+        value_index = label_index = None
+        by_match = re.search(
+            r"\b([A-Za-z0-9_ ]+?)\s+by\s+([A-Za-z0-9_ ]+)", question, re.I
+        )
+        if by_match:
+            value_phrase, label_phrase = by_match.group(1), by_match.group(2)
+
+            def _match_header(phrase):
+                for index, header in enumerate(headers):
+                    if header and re.search(
+                        rf"\b{re.escape(header)}s?\b", phrase, re.I
+                    ):
+                        return index
+                return None
+
+            value_index = _match_header(value_phrase)
+            label_index = _match_header(label_phrase)
+
+        if value_index is None or label_index is None or value_index == label_index:
+            return None
+
+        # The value column must be numeric across the data rows.
+        totals = {}
+        order = []
+        for row in rows:
+            if label_index >= len(row) or value_index >= len(row):
+                continue
+            label = row[label_index].strip()
+            raw_value = row[value_index].strip()
+            if not label or not raw_value:
+                continue
+            try:
+                value = float(raw_value)
+            except ValueError:
+                return None  # value column is not numeric -> not an aggregation
+            if not math.isfinite(value):
+                return None
+            if label not in totals:
+                totals[label] = 0.0
+                order.append(label)
+            totals[label] += value
+
+        if not order:
+            return None
+
+        label_values = [(label, totals[label]) for label in order]
+        max_categories = self._MAX_CHART_CATEGORIES
+        return label_index, value_index, label_values[:max_categories]
 
     def _summarize_csv_column(
         self,
@@ -853,7 +1042,17 @@ class ChatService:
                 conversation,
                 company,
             )
-            prompt, citations = self._build_prompt(history, message_text, chunks)
+            # Pre-extract the text of any non-CSV chat attachments on this
+            # session so the answer is grounded in the attached file (text/pdf/
+            # docx/image-OCR), not general knowledge. CSVs are handled by the
+            # deterministic chart builder below, so they are excluded here.
+            attachment_sections = self._chat_attachment_texts(conversation)
+            prompt, citations = self._build_prompt(
+                history,
+                message_text,
+                chunks,
+                attachment_sections=attachment_sections,
+            )
 
             completion = None
             provider_error = None
@@ -883,30 +1082,30 @@ class ChatService:
                     "LLM provider failed to generate a response: %s", exc
                 )
 
-            # Deterministic CSV chart fallback. Used when the user asked for a
-            # chart and either (a) the LLM returned no chart, or (b) the LLM
-            # call failed entirely. This keeps chart requests working offline /
-            # when the provider is misconfigured or rate-limited, instead of
-            # hard-failing the whole message.
+            # Deterministic CSV chart. For a chart request, build the chart from
+            # the ACTUAL rows of a chat-attached CSV. When such a CSV exists the
+            # locally-built chart is AUTHORITATIVE and OVERRIDES any chart the
+            # LLM returned, so the chart always reflects the file's real values
+            # (NYC=10, LA=5, SF=3) instead of fabricated general knowledge. This
+            # also works with no key. When there is NO chat CSV we keep the old
+            # behaviour: fall back to the (now-empty) builder only when the LLM
+            # returned no chart, otherwise trust the LLM's chart.
             if conversation and self._is_chart_request(message_text):
-                needs_fallback = (
-                    completion is None or completion.chart is None
+                local_chart = self._build_csv_distribution_chart(
+                    conversation, message_text
                 )
-                if needs_fallback:
-                    local_chart = self._build_csv_distribution_chart(
-                        conversation, message_text
+                needs_fallback = completion is None or completion.chart is None
+                if local_chart and (needs_fallback or completion.chart is not None):
+                    # Text and chart come from one source so they can never
+                    # contradict: when we attach the locally-built chart we also
+                    # use the builder's own sentence describing it, discarding
+                    # the LLM's prose/chart (which, for an attached CSV, is
+                    # fabricated general knowledge or a refusal that would
+                    # otherwise sit next to a correct rendered chart).
+                    response_text, chart = local_chart
+                    completion = ChatCompletion(
+                        response=response_text, chart=chart
                     )
-                    if local_chart:
-                        # Text and chart come from one source so they can never
-                        # contradict: when we attach the locally-built chart we
-                        # also use the builder's own sentence describing it,
-                        # discarding the LLM's prose (which here supplied no
-                        # chart and may be a refusal that would otherwise sit
-                        # next to a rendered chart).
-                        response_text, chart = local_chart
-                        completion = ChatCompletion(
-                            response=response_text, chart=chart
-                        )
 
             # If the provider failed and no fallback produced an answer, surface
             # the provider error to the caller.
