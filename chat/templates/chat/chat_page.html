@@ -202,7 +202,17 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
     function renderChart(container, chartData) {
       if (!chartData) { return; }
-      const points = chartData.data || chartData.series || [];
+      // Each point is {label, values: [one number per series]} (ChartData
+      // schema). series is the list of series names; a single-series chart
+      // (the CSV fallback always emits one) uses values[0].
+      const points = chartData.data || [];
+      const seriesNames = chartData.series || [];
+      const seriesCount = Math.max(seriesNames.length, 1);
+      const valueAt = function (p, i) {
+        const vals = p.values || [];
+        const v = vals[i];
+        return typeof v === "number" ? v : null;
+      };
       if (typeof Chart === "undefined") {
         // Fallback: an HTML table built with createElement.
         const table = document.createElement("table");
@@ -212,9 +222,13 @@ ChatService.process_message), and the JS refreshes the list so it shows.
           const l = document.createElement("td");
           l.className = "pr-3 font-medium";
           l.textContent = String(p.label);
-          const v = document.createElement("td");
-          v.textContent = String(p.value);
-          tr.appendChild(l); tr.appendChild(v);
+          for (let i = 0; i < seriesCount; i++) {
+            const v = document.createElement("td");
+            v.className = "pr-3";
+            v.textContent = String(valueAt(p, i));
+            tr.appendChild(v);
+          }
+          tr.insertBefore(l, tr.firstChild);
           table.appendChild(tr);
         });
         container.appendChild(table);
@@ -226,14 +240,18 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       canvas.style.maxHeight = "20rem";
       container.appendChild(canvas);
       const type = chartData.type || "bar";
+      const datasets = [];
+      for (let i = 0; i < seriesCount; i++) {
+        datasets.push({
+          label: seriesNames[i] || chartData.title || "",
+          data: points.map(function (p) { return valueAt(p, i); })
+        });
+      }
       new Chart(canvas.getContext("2d"), {
         type: type,
         data: {
           labels: points.map(function (p) { return p.label; }),
-          datasets: [{
-            label: chartData.title || "",
-            data: points.map(function (p) { return p.value; })
-          }]
+          datasets: datasets
         },
         options: { responsive: true }
       });

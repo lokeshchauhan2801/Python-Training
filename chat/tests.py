@@ -764,8 +764,19 @@ class ProcessMessageTests(TestCase):
             )
         self.assertIsNotNone(assistant.chart_data)
         self.assertIn(assistant.chart_data["type"], {"bar", "pie", "line"})
-        labels = {point["label"] for point in assistant.chart_data["data"]}
-        self.assertIn("NYC", labels)
+        # The CSV fallback emits a single-series chart whose points carry the
+        # numeric value under a "values" LIST (not a singular "value"); pin that
+        # shape so the client renderer (which reads values[0]) stays in sync.
+        self.assertEqual(len(assistant.chart_data["series"]), 1)
+        points = {point["label"]: point for point in assistant.chart_data["data"]}
+        self.assertIn("NYC", points)
+        nyc = points["NYC"]
+        self.assertNotIn("value", nyc)
+        self.assertIsInstance(nyc["values"], list)
+        self.assertEqual(len(nyc["values"]), 1)
+        # NYC appears twice in the CSV, LA once.
+        self.assertEqual(nyc["values"][0], 2)
+        self.assertEqual(points["LA"]["values"][0], 1)
 
 
 class ChatUIViewTests(TestCase):
