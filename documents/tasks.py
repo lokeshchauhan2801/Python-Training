@@ -27,6 +27,7 @@ from uuid import uuid4
 from celery import shared_task
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
+from django.db import transaction
 
 from .models import Document
 from .services import process_document
@@ -152,10 +153,15 @@ def dispatch_document_processing(
         )
 
     if requested in {"celery", "local-background"} and settings.DEBUG:
-        _local_executor.submit(
-            process_document_task.run,
-            document_id,
-            backend="local-background",
+        # Defer until the surrounding transaction (file write + row save from the
+        # admin add path) is committed, so the background thread never reads a
+        # not-yet-persisted file (previously caused FileNotFoundError / 0 chunks).
+        transaction.on_commit(
+            lambda: _local_executor.submit(
+                process_document_task.run,
+                document_id,
+                backend="local-background",
+            )
         )
         return task_id, "local-background"
 

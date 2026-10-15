@@ -487,3 +487,219 @@ PGPASSWORD=aiplatform123 psql -h localhost -p 5432 -U aiplatform -d "agentic-db"
 ```
 
 The full suite currently reports **`Ran 174 tests ... OK (skipped=1)`**.
+
+---
+
+## Complete flow (diagrams)
+
+### System architecture
+
+```mermaid
+flowchart TB
+    subgraph Browser
+      ADM["Django admin (Unfold)"]
+      CHAT["/chat/&lt;ulid&gt; chat UI"]
+    end
+
+    subgraph Django["Django 5.2 app"]
+      MW["CurrentUserMiddleware (contextvars actor)"]
+      ACT["active company (session)"]
+      subgraph Apps
+        DOCS["documents: Document / DocumentChunk"]
+        CH["chat: ConversationSession / Message"]
+        CO["company: Company (owner)"]
+        AU["accounts: User"]
+        SC["scrapper: ScrapeJob"]
+      end
+      SVC["services: process_document / ChatService"]
+      LLM["LLMClient (lazy, injectable)"]
+      DISP["infrastructure dispatcher"]
+      API["DRF api/v1/"]
+    end
+
+    PG[("PostgreSQL: agentic-db")]
+    CHROMA[("ChromaDB: pdf_chunks")]
+    OPENAI["OpenAI / compatible LLM"]
+    REDIS[("Redis")]
+    KAFKA[("Kafka")]
+    TEMP[("Temporal")]
+
+    ADM --> MW --> Apps
+    CHAT --> CH
+    Apps --> PG
+    SVC --> LLM --> OPENAI
+    SVC --> CHROMA
+    DISP --> REDIS
+    DISP --> KAFKA
+    DISP --> TEMP
+    ACT -. scopes .-> Apps
+```
+
+### Document upload → ready (with the on-commit fix)
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant A as Documents admin (add)
+    participant M as save_model
+    participant D as dispatch_document_processing
+    participant W as worker (inline/celery/kafka/temporal)
+    participant S as process_document
+    participant C as ChromaDB
+
+    U->>A: upload file OR paste URL (Save)
+    A->>M: company/uploaded_by/source=library set server-side
+    M->>D: dispatch(backend)
+    D->>D: status = queued
+    Note over D,W: inline path deferred via transaction.on_commit\n(so the file is on disk before extraction)
+    D-->>W: on commit → run
+    W->>S: process_document(document)
+    S->>S: extract chunks (pdf/docx/csv/xlsx/txt/json + OCR)
+    alt source = library
+        S->>OpenAI: embed chunks (text-embedding-3-small)
+        S->>C: add vectors (pdf_chunks)
+    end
+    S->>S: title via LLM, file_type auto, chunk_count set
+    S-->>U: status = ready (or failed w/ error) + chunks visible
+```
+
+### Chat message → answer (RAG + attachments + charts)
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant V as /chat send view
+    participant CS as ChatService.process_message
+    participant C as ChromaDB
+    participant L as LLMClient
+    U->>V: question (optional attached file)
+    V->>CS: process_message(user, text, session, company)
+    CS->>CS: context_signature + repeated-query cache check
+    alt library docs exist
+        CS->>L: embed_query
+        CS->>C: similarity_search (company-scoped) → chunks
+    else empty index
+        CS->>CS: chunks = [] (answer from general knowledge)
+    end
+    CS->>CS: inject attached file text (txt/pdf/docx) / OCR image
+    CS->>L: generate_structured(prompt) → answer + optional chart
+    alt chart requested + attached CSV
+        CS->>CS: deterministic CSV real-data chart (NYC=10, LA=5, SF=3)
+    end
+    CS-->>U: assistant Message (citations, chart_data) persisted
+```
+
+### Processing backend routing
+
+```mermaid
+flowchart LR
+    START["Schedule → Process now / Celery / Kafka / Temporal"] --> DISP{backend}
+    DISP -->|celery + DEBUG| INLINE["inline ThreadPool\n(on_commit, no infra)"]
+    DISP -->|celery| CELERY["apply_async → Redis + worker"]
+    DISP -->|kafka| KAFKA["publish → kafka_worker consumes"]
+    DISP -->|temporal| TEMPORAL["start_workflow → temporal_worker"]
+    INLINE --> RUN["run_document_processing → process_document"]
+    CELERY --> RUN
+    KAFKA --> RUN
+    TEMPORAL --> RUN
+    RUN --> READY["chunks + embeddings → ready"]
+```
+
+---
+
+## Before running (prerequisites & startup)
+
+### 1. Base app (always required)
+
+```bash
+cd /home/auriga/learnings/agentic-flow
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+
+# PostgreSQL-only. The DB "agentic-db" must exist and be reachable:
+#   host=localhost port=5432 user=aiplatform password=aiplatform123
+# (set via POSTGRES_* env / .env; optional DATABASE_URL override.)
+
+# Secrets: the OpenAI key is read from the shell env (OPENAI_API_KEY).
+# On Ubuntu it lives in ~/.bash_profile — export it into the server's shell.
+source ~/.bash_profile          # makes OPENAI_API_KEY available
+
+export POSTGRES_DB=agentic-db POSTGRES_USER=aiplatform \
+       POSTGRES_PASSWORD=aiplatform123 POSTGRES_HOST=localhost POSTGRES_PORT=5432
+
+venv/bin/python manage.py migrate
+venv/bin/python manage.py createsuperuser   # email is the username field
+venv/bin/python manage.py runserver
+```
+
+- Admin: http://127.0.0.1:8000/admin/  •  Chat: http://127.0.0.1:8000/chat/
+- **The LLM key must be exported in the shell that runs `runserver`** — otherwise
+  chat answers and library embeddings fail (title derivation falls back to the
+  filename). The app still imports/migrates fine with no key.
+
+### 2. Processing backends
+
+`DOCUMENT_PROCESSING_BACKEND` (default `celery`) sets the default; each document
+can override it from the **Schedule** dropdown. What each path needs:
+
+| Backend              | Infra needed to run                               |
+|----------------------|---------------------------------------------------|
+| **Celery (DEBUG)**   | **Nothing** — runs inline on a background thread (deferred until the DB commit). This is the zero-setup default. |
+| **Celery (non-DEBUG)** | Redis + a Celery worker (`celery -A base.celery worker`) |
+| **Kafka**            | Kafka broker (Docker) **and** `manage.py kafka_worker` |
+| **Temporal**         | Temporal server (Docker) **and** `manage.py temporal_worker` |
+
+> Documents only process into chunks when a worker for the chosen backend is
+> running. If you pick Kafka/Temporal without starting its broker **and** worker,
+> the document stays at **Queued**. Use **Process now** (celery/DEBUG inline) for
+> zero-setup processing.
+
+#### Kafka — start before using the Kafka backend
+
+```bash
+# Terminal 1 — broker (wait for STATUS: healthy)
+sudo docker compose -f docker-compose.processing.yml up -d kafka
+sudo docker compose -f docker-compose.processing.yml ps
+
+# Terminal 2 — worker (from the project root, key exported)
+DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py kafka_worker
+#   or simply:  python manage.py kafka_worker
+```
+
+#### Temporal — start before using the Temporal backend
+
+```bash
+# Terminal 1 — server + UI (wait until healthy)
+sudo docker compose -f docker-compose.processing.yml up -d \
+     temporal-postgresql temporal temporal-ui
+sudo docker compose -f docker-compose.processing.yml ps
+
+# Terminal 2 — worker (from the project root, key exported)
+DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py temporal_worker
+#   or simply:  python manage.py temporal_worker
+```
+
+- Temporal Web UI: http://localhost:8080/
+
+#### Shutting down the brokers
+
+```bash
+sudo docker compose -f docker-compose.processing.yml down
+```
+
+### Startup order (diagram)
+
+```mermaid
+flowchart TD
+    A["venv + pip install -r requirements.txt"] --> B["ensure agentic-db reachable"]
+    B --> C["source ~/.bash_profile (export OPENAI_API_KEY)"]
+    C --> D["set POSTGRES_* env"]
+    D --> E["manage.py migrate"]
+    E --> F["manage.py runserver"]
+    F --> G{need Kafka/Temporal?}
+    G -->|No| H["use Schedule → Process now (inline, no infra)"]
+    G -->|Kafka| I["docker compose up -d kafka → manage.py kafka_worker"]
+    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8080"]
+    I --> K["pick that backend in the Schedule dropdown"]
+    J --> K
+```
