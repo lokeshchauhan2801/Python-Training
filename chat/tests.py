@@ -1258,12 +1258,55 @@ class ChatUIViewTests(TestCase):
         self.assertIn('"/delete/"', body)
 
     def test_chat_page_renders_delete_control_wiring(self):
-        """Session rows get a delete control (rendered client-side). Assert the
-        page ships the delete wiring: the trash marker + the delete endpoint."""
+        """Session rows get a ChatGPT-style per-row '...' control (rendered
+        client-side) that opens a menu with Delete. Assert the page ships the
+        wiring: the per-row menu marker, the menu + Delete flow, and the reused
+        /delete/ endpoint. The '...'/menu click stopPropagation()s so the row
+        body click still loads the session."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        self.assertIn("data-delete-session-id", body)
+        # The per-row '...' trigger marker (ChatGPT-style, hover-revealed).
+        self.assertIn("data-row-menu-session-id", body)
+        # The menu-open helper + the Delete item wired to deleteSession().
+        self.assertIn("openRowMenuFor", body)
+        self.assertIn("deleteSession", body)
+        # It reuses the existing soft-delete endpoint (no new endpoint).
         self.assertIn("/delete/", body)
+        # The row body click still loads the session; the menu trigger
+        # stopPropagation()s so it does NOT also load the session.
+        self.assertIn("stopPropagation", body)
+        # Only one row menu open at a time + click-away closes it.
+        self.assertIn("closeRowMenu", body)
+
+    def test_chat_page_session_rows_are_uniform_grid(self):
+        """Every left-list session row shares one uniform row class with a
+        fixed height and consistent padding, a single-line ellipsis-truncated
+        title, and a timestamp line (so rows never vary in height). These are
+        rendered client-side via renderSessions(); assert the JS ships the
+        uniform row class + truncation styles."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        # The uniform row class with a fixed height (h-14) + consistent padding.
+        self.assertIn("chat-session-row", body)
+        self.assertIn("h-14", body)
+        # Single-line title truncation (overflow:hidden; ellipsis; nowrap).
+        self.assertIn("textOverflow", body)
+        self.assertIn('"ellipsis"', body)
+        self.assertIn('"nowrap"', body)
+
+    def test_chat_page_composer_is_reachable_and_usable(self):
+        """FIX 1: the composer must be reachable + usable without hunting for a
+        cut-off input. The textarea stays enabled on an empty/new chat (first
+        send auto-creates a session), the input auto-focuses, and Enter sends."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        # Auto-focus wiring + auto-create-on-first-send + Enter-to-send.
+        self.assertIn("inputEl.focus", body)
+        self.assertIn("sendMessage", body)
+        # On an empty state the first send creates a session via the new-session
+        # endpoint, then posts the message (no hunting for a chat to start).
+        self.assertIn("postMessage", body)
+        self.assertIn('body.append("question"', body)
 
     def test_chat_page_icons_are_svg_not_literal_ligature_text(self):
         """Icons must render as SVG, not the literal Material Symbols ligature

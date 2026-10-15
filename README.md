@@ -281,17 +281,33 @@ Open **`/chat/`** (or **`/chat/<ulid>/`** to auto-open a session). The page rend
 inside the Unfold shell (left admin sidebar intact) and is fully AJAX — no page
 refresh:
 
-- **Sessions history** on the left; click to load a session's messages in place;
-  **New chat** creates a session (returned as JSON, never a redirect).
+- **Sessions history** on the left as a **uniform, ChatGPT-style list**: every row
+  is the same fixed height with consistent padding, a single-line title truncated
+  with an ellipsis, and a timestamp line — no row grows or shrinks with its title.
+  Click a row to load its messages in place; the active row is highlighted and rows
+  highlight on hover. **New chat** creates a session (returned as JSON, never a
+  redirect).
+- **Reachable composer.** The input + Send + attach + model select sit at the
+  bottom of a viewport-bounded panel (`height: calc(100vh - 12rem)`, `overflow:
+  hidden`), so the composer is always on screen and the transcript scrolls
+  internally rather than pushing the input below the fold. On an **empty / new**
+  chat the textarea is focused on load and stays usable — just type and press
+  **Enter** (Shift+Enter for a newline) or **Send**, and the first send
+  **auto-creates a session** so you never have to hunt for a chat to start.
 - **Attach a document** to the session (stored as a `chat` document, not embedded);
   the chat reads attached files directly (e.g. CSV charts).
 - **Citations** render as footnote chips under assistant answers.
 - **Charts** render with Chart.js from the structured `chart_data`; a chat-attached
   CSV yields a deterministic real-data chart even when the model returns none.
 - **Model switching** via a per-message model dropdown.
-- **Delete** the currently-open chat from the control at the **top-right** of the
-  title, and delete any chat from the left history list — both soft-delete via the
-  same scoped endpoint.
+- **Delete**, two ways, both soft-deleting via the same scoped `/chat/<id>/delete/`
+  endpoint: a **ChatGPT-style per-row control** — a `…` (more) button that appears
+  on hover at the right edge of each left-list row and opens a small menu with a
+  **Delete** item (confirm → POST → the row is removed and the next session / empty
+  state opens); and the **top-right** delete control on the open conversation's
+  title. The `…`/menu click `stopPropagation()`s so it never also loads the row,
+  only one row menu is open at a time, and clicking away closes it. All delete icons
+  render as inline SVG (never literal ligature text).
 
 All client rendering uses `textContent` / `createElement` / `appendChild` (never
 `innerHTML`); every POST carries the CSRF token; out-of-scope session/company ids

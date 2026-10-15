@@ -257,6 +257,37 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       });
       return svg;
     }
+    // Build an inline SVG "..." (horizontal more) icon via createElementNS. Used
+    // for the ChatGPT-style per-row menu trigger; renders as an icon, never the
+    // literal text, regardless of icon-font loading.
+    function makeMoreIcon() {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("width", "18");
+      svg.setAttribute("height", "18");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("fill", "currentColor");
+      svg.setAttribute("stroke", "none");
+      svg.setAttribute("aria-hidden", "true");
+      [[5, 12], [12, 12], [19, 12]].forEach(function (cxcy) {
+        const circle = document.createElementNS(SVG_NS, "circle");
+        circle.setAttribute("cx", String(cxcy[0]));
+        circle.setAttribute("cy", String(cxcy[1]));
+        circle.setAttribute("r", "1.6");
+        svg.appendChild(circle);
+      });
+      return svg;
+    }
+
+    // Only one left-row menu may be open at a time; click-away closes it.
+    let openRowMenu = null;
+    function closeRowMenu() {
+      if (openRowMenu && openRowMenu.parentNode) {
+        openRowMenu.parentNode.removeChild(openRowMenu);
+      }
+      openRowMenu = null;
+    }
+    document.addEventListener("click", function () { closeRowMenu(); });
+
     function setStatus(text) { statusEl.textContent = text || ""; }
     // Update the conversation panel's title header. When a session is open the
     // title shows and the top-right delete control is enabled + visible; with
@@ -275,17 +306,26 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         }
       }
     }
-    // The composer stays visible at all times (so the empty / new state shows
-    // an input too). "enabled" only toggles whether the controls accept input:
-    // with no active session the user is prompted to pick/start a chat.
-    function setComposerEnabled(enabled) {
+    // The composer stays visible AND usable at all times. On an empty / new
+    // state the textarea + Send stay enabled so the user can click and type
+    // immediately; the first send auto-creates a session (see sendMessage()).
+    // `attach` still needs a live session, so only the paperclip is gated.
+    // `focusInput` auto-focuses the textarea so the user never has to hunt for
+    // a cut-off composer.
+    function setComposerEnabled(hasSession, focusInput) {
       composerEl.style.display = "";
-      inputEl.disabled = !enabled;
-      sendBtn.disabled = !enabled;
-      attachBtn.disabled = !enabled;
-      inputEl.placeholder = enabled
-        ? "Type a message..."
-        : "Select a chat or press + to start a new one...";
+      // Typing + sending are always allowed (empty state auto-creates a
+      // session on first send); only attach requires an open session.
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      attachBtn.disabled = !hasSession;
+      inputEl.placeholder = "Type a message...";
+      if (focusInput) {
+        // Defer so the element is laid out/visible before focusing.
+        window.setTimeout(function () {
+          try { inputEl.focus(); } catch (e) { /* no-op */ }
+        }, 0);
+      }
     }
 
     function jsonHeaders(extra) {
@@ -444,7 +484,8 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       currentSessionId = id;
       clearAttachmentsUI();
       setStatus("Loading...");
-      setComposerEnabled(true);
+      // Auto-focus the input when a session opens so the user can type at once.
+      setComposerEnabled(true, true);
       if (push) {
         history.pushState({ sessionId: id }, "", pageUrlFor(id));
       }
@@ -465,6 +506,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
             renderMessages([]);
             highlightSession(null);
             setConversationHeader("Conversation", false);
+            setComposerEnabled(false, true);
             setStatus("");
           } else {
             setStatus("Could not load session.");
@@ -472,62 +514,122 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         });
     }
 
+    // Highlight the ACTIVE row (the whole <li>, since the row body is now a
+    // transparent button and the <li> carries the background).
     function highlightSession(id) {
       const btns = sessionListEl.querySelectorAll("button[data-session-id]");
       btns.forEach(function (b) {
+        const row = b.closest("li");
+        if (!row) { return; }
         if (b.getAttribute("data-session-id") === id) {
-          b.classList.add("bg-base-100", "dark:bg-base-800");
+          row.classList.add("bg-base-100", "dark:bg-base-800");
         } else {
-          b.classList.remove("bg-base-100", "dark:bg-base-800");
+          row.classList.remove("bg-base-100", "dark:bg-base-800");
         }
       });
+    }
+
+    // Open the ChatGPT-style per-row menu anchored to its "..." trigger. The
+    // menu is appended to document.body with FIXED positioning (computed from
+    // the trigger's bounding rect) so it is NEVER clipped by the session list's
+    // overflow-y:auto (the earlier "drop down goes under the list line" bug).
+    function openRowMenuFor(triggerBtn, sessionId, li) {
+      closeRowMenu();
+      const menu = document.createElement("div");
+      menu.className = "chat-row-menu fixed z-50 min-w-[9rem] border border-base-200 bg-white rounded-default shadow-lg py-1 text-sm dark:border-base-700 dark:bg-base-900";
+
+      const delItem = document.createElement("button");
+      delItem.type = "button";
+      delItem.className = "flex w-full items-center gap-2 px-3 py-2 cursor-pointer text-left text-red-600 hover:bg-base-100 dark:hover:bg-base-800";
+      const icon = makeTrashIcon();
+      icon.setAttribute("width", "16");
+      icon.setAttribute("height", "16");
+      delItem.appendChild(icon);
+      const label = document.createElement("span");
+      label.textContent = "Delete";
+      delItem.appendChild(label);
+      delItem.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        closeRowMenu();
+        deleteSession(sessionId, li);
+      });
+      menu.appendChild(delItem);
+
+      // Keep clicks inside the menu from bubbling to the document click-away.
+      menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+      document.body.appendChild(menu);
+      const rect = triggerBtn.getBoundingClientRect();
+      const menuWidth = menu.offsetWidth || 144;
+      let left = rect.right - menuWidth;
+      if (left < 8) { left = 8; }
+      menu.style.left = left + "px";
+      menu.style.top = (rect.bottom + 4) + "px";
+      openRowMenu = menu;
     }
 
     function renderSessions(sessions) {
       clear(sessionListEl);
       (sessions || []).forEach(function (session) {
         const li = document.createElement("li");
-        li.className = "group mb-2 flex items-stretch gap-1";
+        // Uniform row: fixed height, consistent padding, hover/active highlight.
+        // The "relative" + "group" let the hover "..." control pin to the right
+        // edge and appear only on hover (ChatGPT-style).
+        li.className = "chat-session-row group relative mb-1 flex items-center h-14 px-3 rounded-default border border-base-200 bg-white cursor-pointer hover:bg-base-100 dark:border-base-700 dark:bg-base-900 dark:hover:bg-base-800";
 
-        // The loadable row button (flex-1) still carries data-session-id so
-        // highlightSession() keeps working; a row click LOADS the session.
+        // The loadable row body (flex-1) carries data-session-id so
+        // highlightSession() keeps working; a click on it LOADS the session.
+        // Fixed height on the row + single-line truncated title + a timestamp
+        // line keep EVERY row the same size regardless of title length.
         const btn = document.createElement("button");
         btn.type = "button";
         btn.setAttribute("data-session-id", session.id);
-        btn.className = "flex-1 min-w-0 block border border-base-200 bg-white cursor-pointer px-3 py-2 rounded-default text-left text-font-default-light text-sm hover:bg-base-100 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800";
+        btn.className = "flex-1 min-w-0 flex flex-col justify-center bg-transparent border-0 p-0 pr-6 cursor-pointer text-left text-font-default-light dark:text-font-default-dark";
 
         const title = document.createElement("div");
-        title.className = "font-medium truncate";
+        // One line, ellipsis-truncated no matter how long the title is.
+        title.className = "font-medium text-sm leading-5";
+        title.style.overflow = "hidden";
+        title.style.textOverflow = "ellipsis";
+        title.style.whiteSpace = "nowrap";
         title.textContent = session.title || session.session_id;
         btn.appendChild(title);
 
-        if (session.created_at) {
-          const ts = document.createElement("small");
-          ts.className = "block text-font-subtle-light truncate dark:text-font-subtle-dark";
-          ts.textContent = new Date(session.created_at).toLocaleString();
-          btn.appendChild(ts);
-        }
+        // Timestamp line is ALWAYS rendered (even if empty) so every row keeps
+        // the same two-line height; otherwise rows without a timestamp would be
+        // shorter than the others.
+        const ts = document.createElement("small");
+        ts.className = "block leading-4 text-font-subtle-light dark:text-font-subtle-dark";
+        ts.style.overflow = "hidden";
+        ts.style.textOverflow = "ellipsis";
+        ts.style.whiteSpace = "nowrap";
+        ts.textContent = session.created_at
+          ? new Date(session.created_at).toLocaleString()
+          : "\u00a0";
+        btn.appendChild(ts);
 
         btn.addEventListener("click", function () { loadSession(session.id, true); });
         li.appendChild(btn);
 
-        // Delete control: a separate trash button, right-aligned, revealed on
-        // row hover (ChatGPT-style). Clicking it deletes the session and must
-        // NOT bubble up to the row-load handler.
-        const del = document.createElement("button");
-        del.type = "button";
-        del.setAttribute("data-delete-session-id", session.id);
-        del.title = "Delete chat";
-        del.setAttribute("aria-label", "Delete chat");
-        del.className = "flex-none flex h-auto items-center justify-center px-2 rounded-default text-font-subtle-light opacity-0 cursor-pointer hover:bg-base-100 hover:text-red-600 group-hover:opacity-100 focus:opacity-100 dark:text-font-subtle-dark dark:hover:bg-base-800";
-        // Inline SVG trash icon built with createElement (no innerHTML, and
-        // icon-font-independent so it never renders as the literal word).
-        del.appendChild(makeTrashIcon());
-        del.addEventListener("click", function (ev) {
+        // ChatGPT-style per-row "..." control pinned to the row's right edge,
+        // revealed on hover. Clicking it opens a small menu with Delete; the
+        // click must NOT bubble to the row-load handler (stopPropagation) and
+        // must NOT trigger the document-level click-away that closes menus.
+        const more = document.createElement("button");
+        more.type = "button";
+        more.setAttribute("data-row-menu-session-id", session.id);
+        more.title = "Chat options";
+        more.setAttribute("aria-label", "Chat options");
+        more.className = "absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-default text-font-subtle-light opacity-0 cursor-pointer hover:bg-base-200 hover:text-font-default-light group-hover:opacity-100 focus:opacity-100 dark:text-font-subtle-dark dark:hover:bg-base-700 dark:hover:text-font-default-dark";
+        more.appendChild(makeMoreIcon());
+        more.addEventListener("click", function (ev) {
           ev.stopPropagation();
-          deleteSession(session.id, li);
+          // Toggle: a second click on the same trigger closes the menu.
+          const wasOpen = openRowMenu !== null;
+          closeRowMenu();
+          if (!wasOpen) { openRowMenuFor(more, session.id, li); }
         });
-        li.appendChild(del);
+        li.appendChild(more);
 
         sessionListEl.appendChild(li);
       });
@@ -538,6 +640,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     // its row from the DOM. If the open session was deleted, clear the panel
     // and open the next most-recent session (or the empty state).
     function deleteSession(id, li) {
+      closeRowMenu();
       if (!window.confirm("Delete this chat? This cannot be undone from here.")) {
         return;
       }
@@ -556,7 +659,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
             if (next) {
               loadSession(next.getAttribute("data-session-id"), true);
             } else {
-              setComposerEnabled(false);
+              setComposerEnabled(false, true);
               setConversationHeader("Conversation", false);
               setStatus("");
             }
@@ -655,7 +758,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     companySel.addEventListener("change", function () {
       currentSessionId = null;
       renderMessages([]);
-      setComposerEnabled(false);
+      setComposerEnabled(false, false);
       setConversationHeader("Conversation", false);
       // When switching companies, open the most-recent session for that
       // company (if any) so the transcript + composer are usable right away.
@@ -693,21 +796,14 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         .then(function () { attachInput.value = ""; });
     });
 
-    sendBtn.addEventListener("click", function () {
-      const question = inputEl.value.trim();
-      if (!question) { return; }
-      if (!currentSessionId) { setStatus("Select or start a chat first."); return; }
-
-      inputEl.disabled = true;
-      sendBtn.disabled = true;
-      setStatus("Sending...");
-
+    // POST the question to a KNOWN-open session id and render the turn.
+    function postMessage(sessionId, question) {
       const body = new URLSearchParams();
       body.append("question", question);
       body.append("model_name", modelSel.value);
       pendingAttachmentIds.forEach(function (id) { body.append("attachment_ids", id); });
 
-      fetch(sendUrlFor(currentSessionId), {
+      fetch(sendUrlFor(sessionId), {
         method: "POST",
         headers: jsonHeaders({
           "X-CSRFToken": getCookie("csrftoken"),
@@ -730,7 +826,78 @@ ChatService.process_message), and the JS refreshes the list so it shows.
           loadSessions();
         })
         .catch(function () { setStatus("Send failed."); })
-        .then(function () { inputEl.disabled = false; sendBtn.disabled = false; });
+        .then(function () {
+          inputEl.disabled = false;
+          sendBtn.disabled = false;
+          try { inputEl.focus(); } catch (e) { /* no-op */ }
+        });
+    }
+
+    // Send a message from the composer. If NO session is open (empty / new
+    // chat), auto-create one first (reusing the new-session endpoint), open it,
+    // then post — so the user can just type and hit Send without hunting for a
+    // chat to start.
+    function sendMessage() {
+      const question = inputEl.value.trim();
+      if (!question) { return; }
+
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      setStatus("Sending...");
+
+      if (currentSessionId) {
+        postMessage(currentSessionId, question);
+        return;
+      }
+
+      const companyId = companySel.value;
+      if (!companyId) {
+        setStatus("No company available to start a chat.");
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        return;
+      }
+      const createBody = new URLSearchParams();
+      createBody.append("company", companyId);
+      fetch(newUrl, {
+        method: "POST",
+        headers: jsonHeaders({
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        }),
+        credentials: "same-origin",
+        body: createBody.toString()
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.data.error) {
+            setStatus(res.data.error || "Could not start chat.");
+            inputEl.disabled = false;
+            sendBtn.disabled = false;
+            return;
+          }
+          currentSessionId = res.data.id;
+          history.pushState({ sessionId: currentSessionId }, "", pageUrlFor(currentSessionId));
+          setComposerEnabled(true, false);
+          setConversationHeader(res.data.title || "Conversation", true);
+          // Refresh the left list so the new row appears + highlights, then post.
+          loadSessions(function () { highlightSession(currentSessionId); });
+          postMessage(currentSessionId, question);
+        })
+        .catch(function () {
+          setStatus("Could not start chat.");
+          inputEl.disabled = false;
+          sendBtn.disabled = false;
+        });
+    }
+
+    sendBtn.addEventListener("click", sendMessage);
+    // Enter sends (Shift+Enter inserts a newline), matching ChatGPT.
+    inputEl.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        sendMessage();
+      }
     });
 
     window.addEventListener("popstate", function (ev) {
@@ -739,9 +906,10 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     });
 
     // --- initial load -----------------------------------------------------
-    // Start with a visible-but-disabled composer so the empty state still
-    // shows an input prompting the user to pick/start a chat.
-    setComposerEnabled(false);
+    // Start with a visible, USABLE composer (focused) so the user can click
+    // and type immediately on an empty chat; the first send auto-creates a
+    // session when none is open (see sendMessage()).
+    setComposerEnabled(false, true);
     const wantNew = /[?&]new=1(&|$)/.test(window.location.search);
     loadCompanies(function () {
       loadSessions(function (sessions) {
