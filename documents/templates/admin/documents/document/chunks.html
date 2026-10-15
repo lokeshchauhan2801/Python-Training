@@ -1,0 +1,94 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+App-local template (APP_DIRS=True, no central DIRS). This project DELIBERATELY
+diverges from the sibling django-unfold project's central templates/ tree: each
+app ships its own templates under <app>/templates/admin/<app>/.
+
+The scoped-chunk "Show" viewer. Extends the Unfold admin base so the left
+sidebar / branding / company switcher stay present on this custom page (CRITICAL
+LAYOUT guardrail). The chunk rows are fetched from the scoped JSON endpoint and
+rendered client-side using textContent/createElement/appendChild ONLY — never
+innerHTML — so document content can never be interpreted as markup.
+{% endcomment %}
+{% load i18n %}
+
+{% block content %}
+<div id="content-main">
+  <p>
+    <strong>{{ document.title }}</strong>
+    &mdash; {% translate "Status" %}: {{ document.get_status_display }}
+    &middot; {% translate "Chunks" %}: {{ document.chunk_count }}
+  </p>
+
+  <p>
+    <a href="{{ change_url }}" class="button">{% translate "Back to document" %}</a>
+  </p>
+
+  <div id="documents-chunks-loading"
+       data-json-url="{{ chunks_json_url }}">{% translate "Loading chunks…" %}</div>
+  <div id="documents-chunks-error" style="color:#dc2626;"></div>
+  <div id="documents-chunks"></div>
+</div>
+
+<script>
+(function () {
+  var loading = document.getElementById("documents-chunks-loading");
+  var jsonUrl = loading.getAttribute("data-json-url");
+  var errorBox = document.getElementById("documents-chunks-error");
+  var container = document.getElementById("documents-chunks");
+
+  function showError(message) {
+    loading.textContent = "";
+    errorBox.textContent = message;
+  }
+
+  function renderChunks(chunks) {
+    loading.textContent = "";
+    if (!chunks || chunks.length === 0) {
+      container.textContent = "No chunks yet.";
+      return;
+    }
+    chunks.forEach(function (chunk) {
+      var card = document.createElement("div");
+      card.style.border = "1px solid #e5e7eb";
+      card.style.borderRadius = "6px";
+      card.style.padding = "10px";
+      card.style.marginBottom = "10px";
+
+      var meta = document.createElement("div");
+      meta.style.fontWeight = "600";
+      meta.style.marginBottom = "6px";
+      var location = chunk.source_location ? " · " + chunk.source_location : "";
+      meta.textContent =
+        "#" + chunk.chunk_index + " · page " + chunk.page_number + location;
+      card.appendChild(meta);
+
+      var body = document.createElement("pre");
+      body.style.whiteSpace = "pre-wrap";
+      body.style.margin = "0";
+      body.textContent = chunk.content || "";
+      card.appendChild(body);
+
+      container.appendChild(card);
+    });
+  }
+
+  fetch(jsonUrl, {
+    credentials: "same-origin",
+    headers: {"X-Requested-With": "XMLHttpRequest"},
+  })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error("Request failed (" + response.status + ")");
+      }
+      return response.json();
+    })
+    .then(function (data) {
+      renderChunks(data.chunks);
+    })
+    .catch(function () {
+      showError("Could not load chunks.");
+    });
+})();
+</script>
+{% endblock %}

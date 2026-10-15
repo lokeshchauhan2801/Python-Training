@@ -403,3 +403,33 @@ class DocumentAdminHttpTests(TestCase):
             f"/admin/documents/document/{other_doc.pk}/chunks-json/"
         )
         self.assertEqual(resp.status_code, 404)
+
+    def test_chunks_html_view_renders_with_unfold_sidebar(self):
+        # The "Show" pill opens an HTML page (NOT raw JSON) that keeps the
+        # Unfold left sidebar; it fetches the JSON endpoint as its data source.
+        doc = self._ready_document(self.company, self.owner)
+        resp = self.client.get(f"/admin/documents/document/{doc.pk}/chunks/")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        # Unfold shell marker + the JSON data-source URL embedded for the fetch.
+        self.assertIn("sidebar", body.lower())
+        self.assertIn(f"/admin/documents/document/{doc.pk}/chunks-json/", body)
+
+    def test_show_pill_redirects_to_html_viewer(self):
+        # The row-action pill must point at the HTML viewer, not the raw JSON.
+        doc = self._ready_document(self.company, self.owner)
+        resp = self.client.get(
+            f"/admin/documents/document/{doc.pk}/show-chunks/"
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], f"/admin/documents/document/{doc.pk}/chunks/")
+
+    def test_chunks_html_view_out_of_scope_404(self):
+        self.owner.is_staff = True
+        self.owner.save(update_fields=["is_staff"])
+        other_doc = self._ready_document(self.other_co, self.other_owner)
+        self.client.force_login(self.owner)
+        resp = self.client.get(
+            f"/admin/documents/document/{other_doc.pk}/chunks/"
+        )
+        self.assertEqual(resp.status_code, 404)

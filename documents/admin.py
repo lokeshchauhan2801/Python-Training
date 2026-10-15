@@ -23,6 +23,7 @@ A library ``Document`` added/changed in the admin is extracted synchronously in
 from django.contrib import admin, messages
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.html import format_html
 from unfold.decorators import action
@@ -168,11 +169,11 @@ class DocumentAdmin(BaseModelAdmin):
         variant=ActionVariant.PRIMARY,
     )
     def show_chunks(self, request, object_id):
+        # Redirect to the Unfold-shelled HTML viewer (sidebar intact), NOT the
+        # raw JSON endpoint. The HTML page fetches the JSON as its data source.
         document = get_object_or_404(self.get_queryset(request), pk=object_id)
         return redirect(
-            reverse(
-                "admin:documents_document_chunks_json", args=[document.pk]
-            )
+            reverse("admin:documents_document_chunks", args=[document.pk])
         )
 
     @action(
@@ -227,8 +228,38 @@ class DocumentAdmin(BaseModelAdmin):
                 self.admin_site.admin_view(self.chunks_json_view),
                 name="documents_document_chunks_json",
             ),
+            path(
+                "<str:pk>/chunks/",
+                self.admin_site.admin_view(self.chunks_view),
+                name="documents_document_chunks",
+            ),
         ]
         return custom + super().get_urls()
+
+    def chunks_view(self, request, pk):
+        # The HTML "Show" page (target of the show_chunks pill). Renders via
+        # TemplateResponse with each_context so the Unfold shell/left sidebar
+        # stay present (CRITICAL LAYOUT guardrail); the page fetches the scoped
+        # JSON endpoint client-side and renders chunks with textContent/
+        # createElement (never innerHTML). Resolve from the permission-scoped
+        # queryset ONLY: out-of-scope documents 404.
+        document = get_object_or_404(self.get_queryset(request), pk=pk)
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Chunks — {document.title}",
+            "opts": self.model._meta,
+            "original": document,
+            "document": document,
+            "change_url": reverse(
+                "admin:documents_document_change", args=[document.pk]
+            ),
+            "chunks_json_url": reverse(
+                "admin:documents_document_chunks_json", args=[document.pk]
+            ),
+        }
+        return TemplateResponse(
+            request, "admin/documents/document/chunks.html", context
+        )
 
     def chunks_json_view(self, request, pk):
         if request.method != "GET":
