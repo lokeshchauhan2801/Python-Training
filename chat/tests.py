@@ -7,22 +7,29 @@ owner/company scoping (a user cannot attach or ``ask`` on another owner's
 company/session).
 """
 
+import shutil
+import tempfile
 from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
 from basics.llm import LLMConfigurationError
 from company.models import Company
+from documents.models import Document, DocumentChunk
 
 from .admin import ConversationSessionAdmin
-from .models import Conversation, ConversationSession
-from .services import ChatService
+from .models import Conversation, ConversationSession, Message, MessageVersion
+from .services import ChatCompletion, ChartData, ChartPoint, ChatService
 
 User = get_user_model()
+
+# Per-module temp MEDIA_ROOT so attach/CSV tests write real files off the repo.
+_MEDIA = tempfile.mkdtemp(prefix="chat-tests-media-")
 
 
 class _FakeLLM:
@@ -46,6 +53,36 @@ class _UnconfiguredLLM:
 
     def complete(self, messages, *, temperature=None, max_tokens=None):
         raise LLMConfigurationError("No LLM API key configured.")
+
+
+class _FakeStructuredLLM:
+    """Fake LLM exposing the RAG seam: generate_structured + embed_query.
+
+    ``generate_structured`` returns a canned ``ChatCompletion`` (so no key /
+    network is needed) and records every prompt it is handed so tests can assert
+    on the file-vs-no-file prompt branch. ``embed_query`` returns a cheap
+    deterministic vector so retrieval never touches a live embeddings backend.
+    """
+
+    provider = "fake"
+    model = "fake-model"
+
+    def __init__(self, response="fake answer", chart=None):
+        self._response = response
+        self._chart = chart
+        self.prompts = []
+        self.structured_calls = 0
+
+    def generate_structured(self, prompt, schema):
+        self.prompts.append(prompt)
+        self.structured_calls += 1
+        return schema(response=self._response, chart=self._chart)
+
+    def complete(self, messages, *, temperature=None, max_tokens=None):
+        return self._response
+
+    def embed_query(self, text):
+        return [0.0] * 8
 
 
 class ChatInvariantTests(TestCase):
@@ -430,3 +467,463 @@ class AdminChatUITests(TestCase):
         self.assertFalse(
             Conversation.objects.filter(session=self.alice_session).exists()
         )
+
+
+# =====================================================================
+# Phase-3 chat rebuild (FEAT-003): Message model + company invariant,
+# ChatService.process_message with a fake LLM, and the top-level /chat/
+# UI + AJAX surface. No LLM key / no network: a structured fake client +
+# a tmp CHROMA_PATH / MEDIA_ROOT.
+# =====================================================================
+
+
+class MessageModelTests(TestCase):
+    """Message/MessageVersion invariants (ULID PK, company match, uniqueness)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(email="m@example.com", password="x")
+        cls.owner = User.objects.create_user(email="mo@example.com", password="x")
+        cls.company_a = Company.objects.create(owner=cls.owner, name="MA", slug="ma")
+        cls.company_b = Company.objects.create(owner=cls.owner, name="MB", slug="mb")
+        cls.session = ConversationSession.objects.create(
+            company=cls.company_a, user=cls.user, title="S"
+        )
+
+    def test_message_save_rejects_company_mismatch(self):
+        message = Message(
+            conversation=self.session,
+            company=self.company_b,  # mismatches session.company (A)
+            role=Message.ROLE_USER,
+            content="hi",
+        )
+        with self.assertRaises(ValidationError):
+            message.save()
+
+    def test_message_save_accepts_matching_company(self):
+        message = Message(
+            conversation=self.session,
+            company=self.company_a,
+            role=Message.ROLE_USER,
+            content="hi",
+        )
+        message.save()
+        self.assertIsNotNone(message.pk)
+
+    def test_message_id_is_26_char_ulid(self):
+        message = Message.objects.create(
+            conversation=self.session,
+            company=self.company_a,
+            role=Message.ROLE_ASSISTANT,
+            content="answer",
+        )
+        self.assertEqual(len(str(message.id)), 26)
+
+    def test_message_version_unique_message_version(self):
+        from django.db import IntegrityError, transaction
+
+        message = Message.objects.create(
+            conversation=self.session,
+            company=self.company_a,
+            role=Message.ROLE_ASSISTANT,
+            content="answer",
+        )
+        MessageVersion.objects.create(
+            company=self.company_a, message=message, content="v1", version=1
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                MessageVersion.objects.create(
+                    company=self.company_a, message=message, content="dup", version=1
+                )
+
+
+@override_settings(CHROMA_PATH=tempfile.mkdtemp(prefix="chat-chroma-"))
+class ProcessMessageTests(TestCase):
+    """ChatService.process_message with the structured fake client."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(email="p@example.com", password="x")
+        cls.company = Company.objects.create(
+            owner=cls.user, name="PC", slug="pc"
+        )
+
+    def setUp(self):
+        self.session = ConversationSession.objects.create(
+            company=self.company, user=self.user
+        )
+
+    def _service(self, response="fake answer", chart=None):
+        return ChatService(llm_client=_FakeStructuredLLM(response, chart))
+
+    def _no_chunks(self):
+        """Patch retrieval so no embeddings/Chroma is touched."""
+        return mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        )
+
+    def test_persists_one_user_and_one_assistant_message(self):
+        with self._no_chunks():
+            assistant = self._service(response="hello back").process_message(
+                user=self.user,
+                message_text="hi there",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.assertEqual(assistant.role, Message.ROLE_ASSISTANT)
+        self.assertEqual(assistant.content, "hello back")
+        roles = list(
+            self.session.messages.order_by("created_at").values_list(
+                "role", flat=True
+            )
+        )
+        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
+        self.assertEqual(assistant.company_id, self.company.id)
+
+    def test_first_message_titles_session_bug2(self):
+        """BUG 2: the first send retitles 'New session' from the message."""
+        self.assertEqual(self.session.title, "New session")
+        with self._no_chunks():
+            self._service().process_message(
+                user=self.user,
+                message_text="What is the quarterly revenue breakdown?",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.session.refresh_from_db()
+        self.assertEqual(
+            self.session.title, "What is the quarterly revenue breakdown?"[:50]
+        )
+        self.assertNotEqual(self.session.title, "New session")
+
+    def test_citations_assembled_from_chunks(self):
+        document = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            source=Document.SOURCE_LIBRARY,
+            status=Document.STATUS_READY,
+            title="report.pdf",
+            file_type="pdf",
+            chunk_count=1,
+        )
+        chunk = DocumentChunk.objects.create(
+            company=self.company,
+            document=document,
+            chunk_index=0,
+            page_number=3,
+            source_location="page 3",
+            content="Revenue grew 20% year over year.",
+        )
+        with mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[chunk],
+        ):
+            assistant = self._service(response="It grew [%s]." % chunk.pk).process_message(
+                user=self.user,
+                message_text="How did revenue change?",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.assertEqual(len(assistant.citations), 1)
+        citation = assistant.citations[0]
+        self.assertEqual(citation["reference_id"], str(chunk.pk))
+        self.assertEqual(citation["document_id"], str(document.id))
+        self.assertEqual(citation["page"], 3)
+        self.assertIn("Revenue grew", citation["excerpt"])
+
+    def test_repeated_question_is_cache_hit_without_llm_call(self):
+        fake = _FakeStructuredLLM(response="cached answer")
+        service = ChatService(llm_client=fake)
+        with self._no_chunks():
+            service.process_message(
+                user=self.user,
+                message_text="same question",
+                conversation=self.session,
+                company=self.company,
+            )
+            self.assertEqual(fake.structured_calls, 1)
+            # Identical question + unchanged document context => cache HIT.
+            service.process_message(
+                user=self.user,
+                message_text="same question",
+                conversation=self.session,
+                company=self.company,
+            )
+        # No second LLM call: the answer came from the per-session cache.
+        self.assertEqual(fake.structured_calls, 1)
+        answers = self.session.messages.filter(role=Message.ROLE_ASSISTANT)
+        self.assertEqual(answers.count(), 2)
+        self.assertEqual({a.content for a in answers}, {"cached answer"})
+
+    def test_cache_miss_after_signature_change(self):
+        fake = _FakeStructuredLLM(response="first answer")
+        service = ChatService(llm_client=fake)
+        with self._no_chunks():
+            service.process_message(
+                user=self.user,
+                message_text="same question",
+                conversation=self.session,
+                company=self.company,
+            )
+            self.assertEqual(fake.structured_calls, 1)
+            # Adding a ready library doc changes the context signature => MISS.
+            Document.objects.create(
+                company=self.company,
+                uploaded_by=self.user,
+                source=Document.SOURCE_LIBRARY,
+                status=Document.STATUS_READY,
+                title="new.pdf",
+                file_type="pdf",
+                chunk_count=2,
+            )
+            service.process_message(
+                user=self.user,
+                message_text="same question",
+                conversation=self.session,
+                company=self.company,
+            )
+        # Signature changed, so the LLM was called a second time.
+        self.assertEqual(fake.structured_calls, 2)
+
+    def test_prompt_no_file_vs_file_branch(self):
+        # No-file branch: the fake records a prompt mentioning general knowledge.
+        no_file = _FakeStructuredLLM(response="answer")
+        with self._no_chunks():
+            ChatService(llm_client=no_file).process_message(
+                user=self.user,
+                message_text="draw a chart of sales",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.assertIn("general knowledge", no_file.prompts[0])
+
+        # File branch: with retrieved chunks the prompt forbids outside numbers.
+        document = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            source=Document.SOURCE_LIBRARY,
+            status=Document.STATUS_READY,
+            title="sales.pdf",
+            file_type="pdf",
+            chunk_count=1,
+        )
+        chunk = DocumentChunk.objects.create(
+            company=self.company,
+            document=document,
+            chunk_index=0,
+            page_number=1,
+            source_location="page 1",
+            content="Q1 sales were 100 units.",
+        )
+        with_file = _FakeStructuredLLM(response="answer")
+        with mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[chunk],
+        ):
+            ChatService(llm_client=with_file).process_message(
+                user=self.user,
+                message_text="draw a chart of sales",
+                conversation=ConversationSession.objects.create(
+                    company=self.company, user=self.user
+                ),
+                company=self.company,
+            )
+        prompt = with_file.prompts[0]
+        self.assertIn("never make up numbers", prompt)
+        self.assertIn("Q1 sales were 100 units.", prompt)
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_csv_distribution_chart_fallback_without_key(self):
+        """A chat-attached CSV yields a deterministic chart with no LLM chart."""
+        csv_doc = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.user,
+            session=self.session,
+            source=Document.SOURCE_CHAT,
+            status=Document.STATUS_READY,
+            title="people.csv",
+            file=SimpleUploadedFile(
+                "people.csv",
+                b"name,city\nAlice,NYC\nBob,LA\nCara,NYC\n",
+                content_type="text/csv",
+            ),
+            file_type="csv",
+        )
+        self.assertTrue(csv_doc.file)
+        # The fake LLM returns NO chart, so the deterministic CSV builder fires.
+        with self._no_chunks():
+            assistant = self._service(
+                response="here you go"
+            ).process_message(
+                user=self.user,
+                message_text="make a bar chart of city distribution",
+                conversation=self.session,
+                company=self.company,
+            )
+        self.assertIsNotNone(assistant.chart_data)
+        self.assertIn(assistant.chart_data["type"], {"bar", "pie", "line"})
+        labels = {point["label"] for point in assistant.chart_data["data"]}
+        self.assertIn("NYC", labels)
+
+
+class ChatUIViewTests(TestCase):
+    """HTTP tests for the top-level /chat/ surface (FEAT-002 behaviour)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user(
+            email="uialice@example.com", password="pw"
+        )
+        cls.bob = User.objects.create_user(
+            email="uibob@example.com", password="pw"
+        )
+        cls.alice_co = Company.objects.create(
+            owner=cls.alice, name="UI Alice Co", slug="ui-alice-co"
+        )
+        cls.bob_co = Company.objects.create(
+            owner=cls.bob, name="UI Bob Co", slug="ui-bob-co"
+        )
+        cls.alice_session = ConversationSession.objects.create(
+            company=cls.alice_co, user=cls.alice, title="Alice UI chat"
+        )
+        cls.bob_session = ConversationSession.objects.create(
+            company=cls.bob_co, user=cls.bob, title="Bob UI chat"
+        )
+
+    # --- page render ------------------------------------------------------
+    def test_chat_home_renders_sidebar_and_regions(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("chat:home"))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        self.assertIn('id="nav-sidebar"', body)  # Unfold LEFT sidebar
+        self.assertIn('id="chat-session-list"', body)  # session list region
+        self.assertIn('id="chat-messages"', body)  # conversation panel region
+        self.assertIn('id="chat-input"', body)  # composer region
+
+    def test_chat_session_preselects_valid_ulid(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(
+            reverse("chat:session", args=[self.alice_session.pk])
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(str(self.alice_session.id), resp.content.decode())
+
+    def test_chat_session_malformed_id_is_404(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("chat:session", args=["too-short"]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_chat_session_out_of_scope_is_404(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(
+            reverse("chat:session", args=[self.bob_session.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # --- new_session (BUG 1) ---------------------------------------------
+    def test_new_session_returns_json_201_not_redirect_single_session(self):
+        self.client.force_login(self.alice)
+        before = ConversationSession.objects.filter(company=self.alice_co).count()
+        resp = self.client.post(reverse("chat:new_session"))
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp["Content-Type"], "application/json")
+        self.assertNotIn("Location", resp)  # never a redirect
+        self.assertIn("session_id", resp.json())
+        after = ConversationSession.objects.filter(company=self.alice_co).count()
+        self.assertEqual(after - before, 1)  # exactly one session created
+
+    def test_new_session_rejects_get(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("chat:new_session"))
+        self.assertEqual(resp.status_code, 405)
+
+    # --- send (persistence + BUG 2) --------------------------------------
+    def test_send_persists_user_and_assistant_messages(self):
+        self.client.force_login(self.alice)
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="hi back"))
+        with mock.patch("chat.views._chat_service", return_value=fake), mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        ):
+            resp = self.client.post(
+                reverse("chat:send", args=[self.alice_session.pk]),
+                {"question": "hello"},
+            )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["user"]["content"], "hello")
+        self.assertEqual(data["assistant"]["content"], "hi back")
+        rows = Message.objects.filter(conversation=self.alice_session)
+        self.assertEqual(rows.count(), 2)
+
+    def test_send_first_message_sets_meaningful_title_bug2(self):
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice
+        )
+        self.assertEqual(session.title, "New session")
+        self.client.force_login(self.alice)
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="ok"))
+        with mock.patch("chat.views._chat_service", return_value=fake), mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        ):
+            resp = self.client.post(
+                reverse("chat:send", args=[session.pk]),
+                {"question": "Summarize the onboarding policy please"},
+            )
+        self.assertEqual(resp.status_code, 201)
+        session.refresh_from_db()
+        self.assertEqual(
+            session.title, "Summarize the onboarding policy please"[:50]
+        )
+        self.assertNotEqual(session.title, "New session")
+        self.assertEqual(resp.json()["session"]["title"], session.title)
+
+    # --- company scoping --------------------------------------------------
+    def test_send_on_another_owners_session_is_404(self):
+        self.client.force_login(self.alice)
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="nope"))
+        with mock.patch("chat.views._chat_service", return_value=fake):
+            resp = self.client.post(
+                reverse("chat:send", args=[self.bob_session.pk]),
+                {"question": "hi"},
+            )
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(
+            Message.objects.filter(conversation=self.bob_session).exists()
+        )
+
+    def test_messages_json_out_of_scope_is_404(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(
+            reverse("chat:messages_json", args=[self.bob_session.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # --- attach -----------------------------------------------------------
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_attach_creates_chat_source_document(self):
+        self.client.force_login(self.alice)
+        upload = SimpleUploadedFile(
+            "notes.txt", b"hello world", content_type="text/plain"
+        )
+        resp = self.client.post(
+            reverse("chat:attach", args=[self.alice_session.pk]),
+            {"file": upload},
+        )
+        self.assertEqual(resp.status_code, 201)
+        doc_id = resp.json()["id"]
+        document = Document.objects.get(pk=doc_id)
+        self.assertEqual(document.source, Document.SOURCE_CHAT)
+        self.assertEqual(document.status, Document.STATUS_READY)
+        self.assertEqual(document.session_id, self.alice_session.pk)
+        self.assertEqual(document.company_id, self.alice_co.id)
+        self.assertEqual(document.uploaded_by_id, self.alice.id)
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
