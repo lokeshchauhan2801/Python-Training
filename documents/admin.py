@@ -25,6 +25,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
+from django.utils import timezone
 from django.utils.html import format_html
 from unfold.decorators import action
 from unfold.enums import ActionVariant
@@ -32,13 +33,19 @@ from unfold.enums import ActionVariant
 from basics.admin import BaseModelAdmin
 from basics.vectorstore import ChromaVectorStore
 
+from .forms import DocumentAdminForm
 from .models import Document, DocumentChunk
-from .services import (
-    DocumentIndexError,
-    DocumentValidationError,
-    VECTOR_COLLECTION,
-    process_document,
+from .services import VECTOR_COLLECTION
+from .tasks import dispatch_document_processing
+
+# The backends the "Process with…" confirmation page offers, in display order.
+_BACKEND_CHOICES = (
+    ("celery", "Celery"),
+    ("kafka", "Kafka"),
+    ("temporal", "Temporal"),
 )
+# How recently a document must have been updated to appear in the status poll.
+_STATUS_POLL_WINDOW_SECONDS = 600
 
 def _embedding_preview_text(vector):
     """Render a vector as the screenshot's truncated preview, or '—' when empty.
@@ -72,10 +79,18 @@ class DocumentAdmin(BaseModelAdmin):
     # scoped/defaulted to the user's owned company by CompanyScopedAdminMixin.
     actor_field = "uploaded_by"
 
+    # Add/change form surfaces the file-OR-URL rule as a field error.
+    form = DocumentAdminForm
+
+    # Changelist override adds the completion-notification status poller while
+    # keeping the house-style/Unfold changelist intact.
+    change_list_template = "admin/documents/document/change_list.html"
+
     # Per-row purple pills (ActionVariant.PRIMARY). All resolve the row from the
-    # scoped queryset; "process" re-runs synchronous extraction, "show" opens
-    # the scoped chunk view, "schedule" is a Phase-4 placeholder (no-op).
-    actions_row = ("process_now", "show_chunks", "schedule_processing")
+    # scoped queryset; "Process now" dispatches via the document's current/
+    # default backend, "Process with…" opens the backend chooser, "Show" opens
+    # the scoped chunk view.
+    actions_row = ("process_now", "process_with", "show_chunks")
 
     list_display = (
         "id_short",
@@ -92,7 +107,17 @@ class DocumentAdmin(BaseModelAdmin):
     date_hierarchy = "created_at"
 
     fieldsets = (
-        (None, {"fields": ("id", "title", "source", "file", "file_type")}),
+        (
+            None,
+            {
+                "fields": ("id", "title", "source", "file", "source_url", "file_type"),
+                "description": (
+                    "For a library document, upload a file OR paste a media URL "
+                    "(exactly one). A URL is downloaded in the background by the "
+                    "scrapper, then processed with the selected backend."
+                ),
+            },
+        ),
         (
             "Processing",
             {
@@ -174,21 +199,104 @@ class DocumentAdmin(BaseModelAdmin):
                 level=messages.WARNING,
             )
             return redirect(change_url)
-        try:
-            process_document(document)
-        except (DocumentValidationError, DocumentIndexError) as exc:
+        # Dispatch via the document's current/default backend. In DEBUG the
+        # celery path runs inline on a background thread and completes quickly;
+        # the status poll surfaces the completion notification. Kafka/Temporal
+        # dispatch and return immediately (Queued) for their worker to pick up.
+        self._reset_for_reprocess(document)
+        _job_id, resolved = dispatch_document_processing(str(document.pk))
+        self.message_user(
+            request,
+            f"Queued “{document.title}” for processing via {resolved}.",
+            level=messages.INFO,
+        )
+        return redirect(change_url)
+
+    @action(
+        description="Process with…",
+        url_path="process-with",
+        variant=ActionVariant.PRIMARY,
+    )
+    def process_with(self, request, object_id):
+        # Backend chooser (replaces the Phase-1 "Schedule" no-op). GET renders a
+        # CSRF-protected radio form (default = the document's current backend);
+        # POST records the chosen backend, resets the row to a clean QUEUED
+        # state, and dispatches via that backend. Resolved from the scoped
+        # queryset ONLY (out-of-scope → 404); POST is CSRF-validated by the
+        # admin_view wrapper + the template's {% csrf_token %}.
+        document = get_object_or_404(self.get_queryset(request), pk=object_id)
+        change_url = reverse("admin:documents_document_change", args=[document.pk])
+        if document.source != Document.SOURCE_LIBRARY:
             self.message_user(
                 request,
-                f"Extraction failed for “{document.title}”: {exc}",
+                "Only library documents can be processed.",
                 level=messages.WARNING,
             )
-        else:
+            return redirect(change_url)
+
+        if request.method == "POST":
+            backend = request.POST.get("backend", "")
+            valid = {value for value, _label in _BACKEND_CHOICES}
+            if backend not in valid:
+                self.message_user(
+                    request,
+                    "Pick a valid backend (Celery, Kafka, or Temporal).",
+                    level=messages.WARNING,
+                )
+                return redirect(request.path)
+            document.processing_backend = backend
+            self._reset_for_reprocess(document)
+            _job_id, resolved = dispatch_document_processing(
+                str(document.pk), backend=backend
+            )
             self.message_user(
                 request,
-                f"Extracted {document.chunk_count} chunk(s) from “{document.title}”.",
-                level=messages.SUCCESS,
+                f"Queued “{document.title}” for processing via {resolved}.",
+                level=messages.INFO,
             )
-        return redirect(change_url)
+            return redirect(change_url)
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Process with… — {document.title}",
+            "opts": self.model._meta,
+            "original": document,
+            "document": document,
+            "backends": _BACKEND_CHOICES,
+            "current_backend": document.processing_backend or "celery",
+            "change_url": change_url,
+        }
+        return TemplateResponse(
+            request,
+            "admin/documents/document/process_backend.html",
+            context,
+        )
+
+    def _reset_for_reprocess(self, document):
+        """Clear prior chunks/vectors + processing state before a re-dispatch.
+
+        Hard-deletes the document's chunks (incl. soft-deleted) and zeroes the
+        progress/attempts/error so the backend starts from a clean state. The
+        QUEUED transition itself is set by ``dispatch_document_processing``.
+        """
+        DocumentChunk.all_objects.filter(document=document).hard_delete()
+        document.chunk_count = 0
+        document.processing_attempts = 0
+        document.processing_progress = 0
+        document.processing_error = ""
+        document.save(
+            update_fields=[
+                "chunk_count",
+                "processing_attempts",
+                "processing_progress",
+                "processing_error",
+                # Persist a caller-set processing_backend (e.g. the "Process
+                # with…" chooser) so the choice survives even if the dispatch
+                # itself is a no-op for this backend.
+                "processing_backend",
+                "updated_at",
+            ]
+        )
 
     @action(
         description="Show",
@@ -203,54 +311,34 @@ class DocumentAdmin(BaseModelAdmin):
             reverse("admin:documents_document_chunks", args=[document.pk])
         )
 
-    @action(
-        description="Schedule",
-        url_path="schedule",
-        variant=ActionVariant.PRIMARY,
-    )
-    def schedule_processing(self, request, object_id):
-        # PHASE 4 PLACEHOLDER: async scheduling (Celery/Kafka/Temporal) is not
-        # implemented in Phase 1. This pill is intentionally a no-op so the row
-        # layout matches the reference; it will dispatch to a processing backend
-        # in Phase 4.
-        document = get_object_or_404(self.get_queryset(request), pk=object_id)
-        self.message_user(
-            request,
-            "Scheduled background processing is coming in a later phase.",
-            level=messages.INFO,
-        )
-        return redirect(
-            reverse("admin:documents_document_change", args=[document.pk])
-        )
-
     def save_model(self, request, obj, form, change):
         # BaseModelAdmin stamps the actor (uploaded_by=request.user) + enforces
-        # the owned company server-side; this override only adds the Phase-1
-        # synchronous library auto-extract after the row is saved.
+        # the owned company server-side; this override then dispatches library
+        # processing through the backend seam.
         super().save_model(request, obj, form, change)
-        # A library document is extracted synchronously on save so its chunks
-        # appear immediately (Phase 1 — no async broker). Chat attachments are
+        # A library document is dispatched for processing on save (Phase 4). In
+        # DEBUG the default celery path runs inline on a background thread so
+        # chunks appear almost immediately and the status poll surfaces the
+        # completion notification; a URL-sourced document is downloaded first on
+        # that same background path. Kafka/Temporal dispatch and return
+        # immediately (Queued) for their worker to pick up. Chat attachments are
         # NOT auto-processed (Phase 3 wires that flow).
         if obj.source == Document.SOURCE_LIBRARY:
-            try:
-                process_document(obj)
-            except (DocumentValidationError, DocumentIndexError) as exc:
-                # The service already persisted status=failed with the message.
-                self.message_user(
-                    request,
-                    f"Extraction failed for “{obj.title}”: {exc}",
-                    level=messages.WARNING,
-                )
-            else:
-                self.message_user(
-                    request,
-                    f"Extracted {obj.chunk_count} chunk(s) from “{obj.title}”.",
-                    level=messages.SUCCESS,
-                )
+            _job_id, resolved = dispatch_document_processing(str(obj.pk))
+            self.message_user(
+                request,
+                f"Queued “{obj.title}” for processing via {resolved}.",
+                level=messages.INFO,
+            )
 
     def get_urls(self):
         # Custom URLs BEFORE super().get_urls() so they take precedence.
         custom = [
+            path(
+                "status-json/",
+                self.admin_site.admin_view(self.status_json_view),
+                name="documents_document_status_json",
+            ),
             path(
                 "<str:pk>/chunks-json/",
                 self.admin_site.admin_view(self.chunks_json_view),
@@ -263,6 +351,39 @@ class DocumentAdmin(BaseModelAdmin):
             ),
         ]
         return custom + super().get_urls()
+
+    def status_json_view(self, request):
+        # Completion-notification data source: the changelist poller fetches this
+        # every few seconds and shows a toast when a document flips to
+        # ready/failed. GET only (no CSRF needed). Scoped to
+        # self.get_queryset(request) so a user only ever sees their own rows;
+        # limited to recently-updated documents to keep the payload small.
+        if request.method != "GET":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        since = timezone.now() - timezone.timedelta(
+            seconds=_STATUS_POLL_WINDOW_SECONDS
+        )
+        rows = (
+            self.get_queryset(request)
+            .filter(updated_at__gte=since)
+            .values(
+                "id", "title", "status", "chunk_count", "processing_error"
+            )[:200]
+        )
+        return JsonResponse(
+            {
+                "documents": [
+                    {
+                        "id": str(row["id"]),
+                        "title": row["title"],
+                        "status": row["status"],
+                        "chunk_count": row["chunk_count"],
+                        "processing_error": row["processing_error"],
+                    }
+                    for row in rows
+                ]
+            }
+        )
 
     def chunks_view(self, request, pk):
         # The HTML "Show" page (target of the show_chunks pill). Renders via

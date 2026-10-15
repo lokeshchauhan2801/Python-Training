@@ -153,6 +153,22 @@ CHROMA_HOST = os.getenv("CHROMA_HOST", "")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
+# Document-processing backends (Phase 4). All values are plain strings read from
+# the environment; NOTHING here opens a broker/server connection at import. The
+# selected backend is resolved lazily when a document is dispatched. The DEBUG
+# "celery" path runs inline on a background thread so no Redis/worker is needed
+# in local development.
+#   celery   — Celery/Redis (inline ThreadPool in DEBUG, apply_async otherwise)
+#   kafka    — publish an event consumed by the kafka_worker
+#   temporal — start a Temporal workflow run by the temporal_worker
+DOCUMENT_PROCESSING_BACKEND = os.getenv("DOCUMENT_PROCESSING_BACKEND", "celery")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8080")
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",

@@ -73,7 +73,11 @@ class Document(BaseModel, SoftDeleteModel):
         db_index=True,
     )
     title = models.CharField(max_length=255)
-    file = models.FileField(upload_to="documents/%Y/%m/%d/")
+    # A library document carries EITHER an uploaded file OR a media URL the
+    # scrapper downloads in the background (exactly one — see clean()). ``file``
+    # is therefore no longer unconditionally required at the DB/form level.
+    file = models.FileField(upload_to="documents/%Y/%m/%d/", blank=True)
+    source_url = models.URLField(blank=True, default="")
     file_type = models.CharField(max_length=20, default="pdf")
     content_type = models.CharField(max_length=150, blank=True)
     file_size = models.PositiveBigIntegerField(default=0)
@@ -100,6 +104,30 @@ class Document(BaseModel, SoftDeleteModel):
 
     def __str__(self) -> str:
         return self.title
+
+    def clean(self) -> None:
+        """Enforce EXACTLY ONE of file/source_url for library documents.
+
+        Ported from the OLD ``scrapper.Document.clean()`` file-OR-url rule. Chat
+        attachments always carry a file (Phase 3 wiring), so this rule applies
+        only to library documents, where the user chooses an upload OR a media
+        URL to download — never both, never neither.
+        """
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        if self.source != self.SOURCE_LIBRARY:
+            return
+        has_file = bool(self.file)
+        has_url = bool(self.source_url)
+        if has_file and has_url:
+            raise ValidationError(
+                "Provide EITHER a file OR a media URL, not both."
+            )
+        if not has_file and not has_url:
+            raise ValidationError(
+                "A library document needs a file upload or a media URL."
+            )
 
     @property
     def processing_duration_display(self) -> str:

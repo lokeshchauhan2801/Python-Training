@@ -1,0 +1,122 @@
+===============================================================================
+ START PROCESSING — Kafka / Temporal / Celery (agentic-flow)
+===============================================================================
+
+Every command below is run from the project root:
+
+    cd /home/auriga/learnings/agentic-flow
+
+The project uses PostgreSQL, so every manage.py call needs the Postgres env
+prefix (shown inline below):
+
+    POSTGRES_DB=agentic-db POSTGRES_USER=aiplatform POSTGRES_PASSWORD=aiplatform123 \
+      POSTGRES_HOST=localhost POSTGRES_PORT=5432 \
+      /home/auriga/learnings/agentic-flow/venv/bin/python manage.py <command>
+
+The default backend is DOCUMENT_PROCESSING_BACKEND in .env (defaults to celery).
+Per-document selection in the admin ("Process with…") overrides the default for
+that document.
+
+-------------------------------------------------------------------------------
+ ONE-TIME PREREQUISITES
+-------------------------------------------------------------------------------
+
+1. Docker installed and the daemon running (only needed for Kafka/Temporal).
+   On this machine Docker is a snap owned by root, so prefix docker/compose
+   commands with `sudo` (the Python worker commands do NOT need sudo):
+       sudo docker ps
+
+2. The virtualenv exists at /home/auriga/learnings/agentic-flow/venv.
+
+3. .env exists at the project root (gitignored). It already carries the Phase-4
+   keys (DOCUMENT_PROCESSING_BACKEND / REDIS_URL / KAFKA_BOOTSTRAP_SERVERS /
+   TEMPORAL_HOST / TEMPORAL_UI_URL).
+
+Docker is only needed for Kafka and Temporal. The CELERY backend works with
+ZERO setup in local DEBUG (see OPTION C).
+
+===============================================================================
+ OPTION A — PROCESS WITH KAFKA
+===============================================================================
+
+Open TWO terminals, both in /home/auriga/learnings/agentic-flow.
+
+Terminal 1 — start the Kafka broker (localhost:9092), leave it running:
+    sudo docker compose -f docker-compose.processing.yml up -d kafka
+    # wait until STATUS shows "healthy":
+    sudo docker compose -f docker-compose.processing.yml ps
+
+Terminal 2 — start the Kafka consumer worker, leave it running:
+    POSTGRES_DB=agentic-db POSTGRES_USER=aiplatform POSTGRES_PASSWORD=aiplatform123 \
+      POSTGRES_HOST=localhost POSTGRES_PORT=5432 DJANGO_SETTINGS_MODULE=base.settings \
+      /home/auriga/learnings/agentic-flow/venv/bin/python manage.py kafka_worker
+
+Then in the admin, pick a library document and choose "Process with…" → Kafka.
+The document moves Queued → Processing → Ready, and chunks appear in the
+Document chunks admin.
+
+===============================================================================
+ OPTION B — PROCESS WITH TEMPORAL
+===============================================================================
+
+Open TWO terminals, both in /home/auriga/learnings/agentic-flow.
+
+Terminal 1 — start the Temporal server (gRPC :7233) + Web UI (:8080):
+    sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
+    sudo docker compose -f docker-compose.processing.yml ps
+
+Terminal 2 — start the Temporal worker, leave it running:
+    POSTGRES_DB=agentic-db POSTGRES_USER=aiplatform POSTGRES_PASSWORD=aiplatform123 \
+      POSTGRES_HOST=localhost POSTGRES_PORT=5432 DJANGO_SETTINGS_MODULE=base.settings \
+      /home/auriga/learnings/agentic-flow/venv/bin/python manage.py temporal_worker
+
+Then in the admin, pick a library document and choose "Process with…" →
+Temporal. Inspect runs (workflow id doc-<ulid>) in the Temporal Web UI:
+    http://localhost:8080
+
+===============================================================================
+ OPTION C — PROCESS WITH CELERY (default)
+===============================================================================
+
+Local development (DEBUG=True): nothing to start. Celery documents are
+processed INLINE automatically on a background thread — no Redis, no worker, no
+Docker needed. Just add/select a library document and leave the default backend
+as celery (or pick "Process with…" → Celery).
+
+Production-style (DEBUG=False): run Redis plus a Celery worker:
+    /home/auriga/learnings/agentic-flow/venv/bin/celery -A base.celery worker \
+      --loglevel=info --concurrency=4
+
+===============================================================================
+ START BOTH KAFKA AND TEMPORAL AT ONCE
+===============================================================================
+
+    sudo docker compose -f docker-compose.processing.yml up -d
+
+Then start whichever worker(s) you need in their own terminals.
+
+===============================================================================
+ STOP / TEAR DOWN
+===============================================================================
+
+Stop the workers:   Ctrl+C in each worker terminal.
+Stop the containers:
+    sudo docker compose -f docker-compose.processing.yml down
+Also delete the data volumes (full reset):
+    sudo docker compose -f docker-compose.processing.yml down -v
+
+===============================================================================
+ TROUBLESHOOTING
+===============================================================================
+
+* Document stays "Queued" forever on kafka/temporal:
+    The broker/server is up but the WORKER is not running (or vice versa).
+    Both the container AND the worker must run for that backend. For celery in
+    DEBUG this cannot happen — it runs inline.
+
+* Port already in use (9092 / 7233 / 8080):
+    Stop the other process, or tear the stack down first.
+
+* Which backend is the default?
+    DOCUMENT_PROCESSING_BACKEND in .env (defaults to celery). Per-document
+    "Process with…" overrides it for that document.

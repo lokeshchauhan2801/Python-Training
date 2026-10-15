@@ -1,0 +1,99 @@
+# Local-only infrastructure for the Kafka and Temporal document-processing
+# backends. Dev convenience ONLY — single broker, no auth, no TLS, no
+# ZooKeeper. Do NOT use this for production.
+#
+#   sudo docker compose -f docker-compose.processing.yml up -d kafka
+#   sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
+#   sudo docker compose -f docker-compose.processing.yml up -d        # everything
+#   sudo docker compose -f docker-compose.processing.yml down          # tear down
+#
+# Image tags are pinned deliberately — do not change them to `latest`.
+
+services:
+  # --- Kafka (KRaft mode, single broker, no ZooKeeper) ----------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: processing-kafka
+    ports:
+      # Host clients (Django, workers) connect here.
+      - "9092:9092"
+    environment:
+      # KRaft single-node: this broker is also the controller.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # Two listeners: PLAINTEXT advertised to the host as localhost:9092,
+      # and an internal controller listener on 29093.
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      # Single-broker: everything replicates to 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # The producer publishes to `document.processing.requested`; let the
+      # broker create it on first publish so no init step is needed.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # A fixed cluster id keeps the KRaft metadata stable across restarts.
+      # MUST be a base64-encoded 16-byte UUID (22 chars), not an arbitrary
+      # string — Confluent's KRaft image rejects anything else at startup.
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  # --- Temporal dev server + dependencies -----------------------------------
+  temporal-postgresql:
+    image: postgres:16.3
+    container_name: processing-temporal-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      # Temporal auto-setup races ahead of Postgres on a cold start; gate it on
+      # the DB actually accepting connections so the first boot is reliable.
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: processing-temporal
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    ports:
+      # Workers and the Django dispatcher connect to the gRPC frontend here.
+      - "7233:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgresql
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    container_name: processing-temporal-ui
+    depends_on:
+      - temporal
+    ports:
+      # Browse workflows at http://localhost:8080
+      - "8080:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8080
+
+volumes:
+  kafka-data:
+  temporal-pg-data:
