@@ -255,9 +255,20 @@ UNFOLD = {
                         "link": reverse_lazy("admin:documents_documentchunk_changelist"),
                     },
                     {
-                        "title": "Scrape jobs",
-                        "icon": "travel_explore",
-                        "link": reverse_lazy("admin:scrapper_scrapejob_changelist"),
+                        "title": "Queue messages",
+                        "icon": "queue",
+                        "link": "#",  # placeholder — model lands in Phase 3/4
+                    },
+                ],
+            },
+            {
+                "title": "Agentic",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "LangGraph",
+                        "icon": "account_tree",
+                        "link": "#",  # placeholder — wired when LangGraph is added
                     },
                 ],
             },
@@ -274,6 +285,11 @@ UNFOLD = {
                         "title": "Conversations",
                         "icon": "chat_bubble",
                         "link": reverse_lazy("admin:chat_conversation_changelist"),
+                    },
+                    {
+                        "title": "Tickets",
+                        "icon": "confirmation_number",
+                        "link": "#",  # placeholder — model lands later
                     },
                 ],
             },
