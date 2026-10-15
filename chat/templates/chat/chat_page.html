@@ -68,17 +68,22 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     side-by-side by default; flex-wrap lets the narrow Chats column and the
     flex-1 panel reflow on very narrow screens.
 
-    VIEWPORT BOUNDING (ChatGPT-style): the layout is bounded to the viewport
-    with a DEFINITE height = calc(100vh - 12rem) (the ~12rem reserves the Unfold
-    top header + breadcrumb + page padding above this content block) and
-    overflow:hidden, so the page itself never grows past the screen and the
-    composer can never be pushed below the fold. The two columns are themselves
-    flex children with min-height:0 so their inner lists / transcript scroll
-    INTERNALLY instead of stretching the page.
+    VIEWPORT BOUNDING (ChatGPT-style): the layout height is MEASURED at runtime
+    (sizeChatLayout(), below) rather than guessed with a hardcoded rem offset.
+    The previous calc(100vh - 12rem) under-counted the real space consumed above
+    this block (the Unfold top header + breadcrumb + the in-page #chat-header
+    title row + page padding), so the layout still extended BELOW the viewport
+    bottom and pushed #chat-composer off-screen at 100% zoom (only visible when
+    zoomed out). Now we set height = window.innerHeight - layout.top - 16px from
+    the element's real getBoundingClientRect().top, on load and on resize, so
+    the layout fills EXACTLY the remaining space down to the viewport bottom and
+    the composer is always on screen. overflow:hidden keeps the page itself from
+    growing; the two columns are flex children with min-height:0 so their inner
+    lists / transcript scroll INTERNALLY instead of stretching the page.
     {% endcomment %}
     <div id="chat-layout"
          class="flex items-stretch gap-4"
-         style="flex-direction:row;flex-wrap:wrap;height:calc(100vh - 12rem);max-height:calc(100vh - 12rem);overflow:hidden;">
+         style="flex-direction:row;flex-wrap:wrap;overflow:hidden;">
 
       <!-- --- MIDDLE: Chats history column ---------------------------------- -->
       <div class="flex-none flex flex-col min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
@@ -142,7 +147,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         for loaded vs. no-session states without hiding the whole composer. It
         is the panel's last child so it stays pinned at the bottom.
         {% endcomment %}
-        <div id="chat-composer" class="mt-auto border-t border-base-200 pt-4 dark:border-base-700">
+        <div id="chat-composer" class="flex-none mt-auto border-t border-base-200 pt-4 dark:border-base-700">
           <textarea id="chat-input" rows="3"
                     class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
                     placeholder="{% translate 'Type a message...' %}"></textarea>
@@ -215,9 +220,33 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     const attachmentsEl = document.getElementById("chat-attachments");
     const statusEl = document.getElementById("chat-status");
 
+    const layoutEl = document.getElementById("chat-layout");
+
     let currentSessionId = null;
     let pendingAttachmentIds = [];
     let chartSeq = 0;
+
+    // --- viewport sizing --------------------------------------------------
+    // Bound #chat-layout to the ACTUAL remaining viewport space instead of a
+    // guessed `calc(100vh - 12rem)`. The old fixed offset under-counted the
+    // real space above this block (Unfold top header + breadcrumb + the in-page
+    // #chat-header title row + padding), so the layout spilled below the
+    // viewport bottom and pushed #chat-composer off-screen at 100% zoom.
+    //
+    // We measure the layout's real top via getBoundingClientRect().top and set
+    // its height to the pixels left down to the viewport bottom (minus a small
+    // bottom margin). This guarantees the composer sits on-screen regardless of
+    // header/title heights or zoom level. Recomputed on load and on resize.
+    const CHAT_LAYOUT_BOTTOM_MARGIN = 16; // px gap below the panel
+    function sizeChatLayout() {
+      if (!layoutEl) { return; }
+      const top = layoutEl.getBoundingClientRect().top;
+      let h = window.innerHeight - top - CHAT_LAYOUT_BOTTOM_MARGIN;
+      // Guard against a non-positive height during odd layout states.
+      if (!(h > 0)) { h = 0; }
+      layoutEl.style.height = h + "px";
+      layoutEl.style.maxHeight = h + "px";
+    }
 
     // Per-session URLs are built from the base chat prefix, never hardcoded.
     function messagesUrlFor(id) { return baseUrl + id + "/messages-json/"; }
@@ -906,6 +935,14 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     });
 
     // --- initial load -----------------------------------------------------
+    // Size the layout to the real remaining viewport space right away (and on
+    // every resize) so the composer is on-screen at 100% zoom without the user
+    // scrolling or zooming out. A second deferred call covers the case where
+    // the Unfold header/sidebar finishes laying out after this script runs.
+    sizeChatLayout();
+    window.addEventListener("resize", sizeChatLayout);
+    window.setTimeout(sizeChatLayout, 0);
+
     // Start with a visible, USABLE composer (focused) so the user can click
     // and type immediately on an empty chat; the first send auto-creates a
     // session when none is open (see sendMessage()).

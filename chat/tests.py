@@ -1208,19 +1208,31 @@ class ChatUIViewTests(TestCase):
         self.assertNotIn("attach_file", body)
 
     def test_chat_page_layout_is_viewport_bounded(self):
-        """The chat layout must be bounded to the viewport (DEFINITE height +
-        overflow hidden) so the page never grows past the screen and pushes the
-        composer below the fold. The transcript scrolls INTERNALLY instead."""
+        """The chat layout must be bounded to the ACTUAL remaining viewport
+        space so the page never grows past the screen and pushes the composer
+        below the fold. The height is MEASURED at runtime (sizeChatLayout) from
+        the element's real top offset rather than guessed with a hardcoded rem
+        offset -- the old `calc(100vh - 12rem)` under-counted the space above
+        the block (Unfold header + in-page title row) and still pushed the
+        composer off-screen at 100% zoom. The transcript scrolls INTERNALLY."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
         layout_pos = body.find('id="chat-layout"')
         self.assertNotEqual(layout_pos, -1)
         layout_tag = body[layout_pos:layout_pos + 260]
-        # Bounded to the viewport with a definite height (calc(100vh - header))
-        # and overflow hidden on the outer layout; children scroll internally.
-        self.assertIn("calc(100vh - 12rem)", layout_tag)
-        self.assertIn("height:", layout_tag)
+        # The outer layout clips overflow so the page never grows past the
+        # screen; children scroll internally.
         self.assertIn("overflow:hidden", layout_tag)
+        # The buggy hardcoded reservation is GONE -- height is measured in JS,
+        # not baked into the markup as a guessed offset.
+        self.assertNotIn("calc(100vh - 12rem)", layout_tag)
+        self.assertNotIn("100vh", layout_tag)
+        # The runtime sizing helper measures the layout's real top and sets its
+        # height to the remaining viewport space, on load and on resize.
+        self.assertIn("sizeChatLayout", body)
+        self.assertIn("getBoundingClientRect", body)
+        self.assertIn("window.innerHeight", body)
+        self.assertIn('addEventListener("resize", sizeChatLayout)', body)
         # The transcript area grows + scrolls internally (flex-1 + min-h-0 +
         # overflow-y-auto); it is NOT the whole page scrolling.
         messages_pos = body.find('id="chat-messages"')
@@ -1229,6 +1241,13 @@ class ChatUIViewTests(TestCase):
         self.assertIn("flex-1", messages_tag)
         self.assertIn("min-h-0", messages_tag)
         self.assertIn("overflow-y-auto", messages_tag)
+        # The composer is a fixed, non-scrolling row pinned to the bottom of the
+        # panel (flex-none + margin-top:auto), so it never scrolls out of view.
+        composer_pos = body.find('id="chat-composer"')
+        self.assertNotEqual(composer_pos, -1)
+        composer_tag = body[composer_pos:composer_pos + 140]
+        self.assertIn("flex-none", composer_tag)
+        self.assertIn("mt-auto", composer_tag)
 
     def test_chat_page_title_header_has_top_right_delete_control(self):
         """The OPEN conversation's title header carries a top-right delete
