@@ -111,3 +111,123 @@ class Conversation(BaseModel, SoftDeleteModel):
         # path (admin direct-save, serializer, service) before persisting.
         self._validate_company_matches_session()
         super().save(*args, **kwargs)
+
+
+class Message(BaseModel, SoftDeleteModel):
+    """A single chat message (user/assistant/system) inside a session.
+
+    The RAG chat UI (Phase 3) persists one ``Message`` per turn side, carrying
+    the answer's citations, an optional structured ``chart_data`` payload, the
+    documents it is grounded in, and the ``context_signature`` the repeated-query
+    cache keys on. Like every chat row it composes ``BaseModel`` + ``SoftDeleteModel``
+    with a ULID PK and a required ``company`` FK, and enforces
+    ``company == conversation.company`` in both ``clean()`` and ``save()``.
+    """
+
+    ROLE_USER = "user"
+    ROLE_ASSISTANT = "assistant"
+    ROLE_SYSTEM = "system"
+    ROLE_CHOICES = [
+        (ROLE_USER, "User"),
+        (ROLE_ASSISTANT, "Assistant"),
+        (ROLE_SYSTEM, "System"),
+    ]
+
+    id = ULIDField()
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="%(app_label)s_%(class)s_set",
+        db_index=True,
+    )
+    conversation = models.ForeignKey(
+        ConversationSession,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        related_name="children",
+        null=True,
+        blank=True,
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_USER)
+    content = models.TextField()
+    citations = models.JSONField(default=list, blank=True)
+    chart_data = models.JSONField(null=True, blank=True)
+    documents = models.ManyToManyField(
+        "documents.Document",
+        related_name="chat_messages",
+        blank=True,
+    )
+    model_name = models.CharField(max_length=100, default="gpt-4o-mini")
+    # Document-context signature in effect when this answer was produced. Used
+    # by the repeated-query cache to detect whether the retrievable document
+    # context changed between two identical questions. NULL on legacy rows is
+    # treated as unknown => cache miss. See ChatService._context_signature.
+    context_signature = models.CharField(max_length=64, null=True, blank=True)
+
+    objects = SoftDeleteManager()
+    all_objects = AllObjectsManager()
+
+    class Meta:
+        db_table = "chat_message"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.role}: {self.content[:40]}"
+
+    def _validate_company_matches_conversation(self):
+        """A message must belong to the same company as its conversation."""
+        if self.company_id != self.conversation.company_id:
+            raise ValidationError(
+                {"company": "Message.company must match conversation.company."}
+            )
+
+    def clean(self):
+        super().clean()
+        self._validate_company_matches_conversation()
+
+    def save(self, *args, **kwargs):
+        # Universal backstop: re-check the cross-field invariant on every save
+        # path (admin direct-save, serializer, service) before persisting.
+        self._validate_company_matches_conversation()
+        super().save(*args, **kwargs)
+
+
+class MessageVersion(BaseModel, SoftDeleteModel):
+    """A historical content revision of a ``Message`` (edit/regenerate trail)."""
+
+    id = ULIDField()
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="%(app_label)s_%(class)s_set",
+        db_index=True,
+    )
+    message = models.ForeignKey(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="versions",
+    )
+    content = models.TextField()
+    version = models.PositiveIntegerField()
+
+    objects = SoftDeleteManager()
+    all_objects = AllObjectsManager()
+
+    class Meta:
+        db_table = "chat_message_version"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["message", "version"],
+                name="chat_message_version_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.message_id} v{self.version}"
