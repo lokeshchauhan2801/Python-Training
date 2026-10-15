@@ -1068,6 +1068,56 @@ class ChatUIViewTests(TestCase):
         # text "attach_file".
         self.assertNotIn("attach_file", body)
 
+    def test_chat_page_layout_is_viewport_bounded(self):
+        """The chat layout must be bounded to the viewport (DEFINITE height +
+        overflow hidden) so the page never grows past the screen and pushes the
+        composer below the fold. The transcript scrolls INTERNALLY instead."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        layout_pos = body.find('id="chat-layout"')
+        self.assertNotEqual(layout_pos, -1)
+        layout_tag = body[layout_pos:layout_pos + 260]
+        # Bounded to the viewport with a definite height (calc(100vh - header))
+        # and overflow hidden on the outer layout; children scroll internally.
+        self.assertIn("calc(100vh - 12rem)", layout_tag)
+        self.assertIn("height:", layout_tag)
+        self.assertIn("overflow:hidden", layout_tag)
+        # The transcript area grows + scrolls internally (flex-1 + min-h-0 +
+        # overflow-y-auto); it is NOT the whole page scrolling.
+        messages_pos = body.find('id="chat-messages"')
+        self.assertNotEqual(messages_pos, -1)
+        messages_tag = body[messages_pos:messages_pos + 120]
+        self.assertIn("flex-1", messages_tag)
+        self.assertIn("min-h-0", messages_tag)
+        self.assertIn("overflow-y-auto", messages_tag)
+
+    def test_chat_page_title_header_has_top_right_delete_control(self):
+        """The OPEN conversation's title header carries a top-right delete
+        control that REUSES the existing /chat/<id>/delete/ endpoint (no new
+        endpoint). The icon renders as SVG, not the literal word 'delete'."""
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        # The conversation panel has a title/header row with a delete button.
+        header_pos = body.find('id="chat-conv-header"')
+        title_pos = body.find('id="chat-conv-title"')
+        delete_pos = body.find('id="chat-conv-delete"')
+        self.assertNotEqual(header_pos, -1)
+        self.assertNotEqual(title_pos, -1)
+        self.assertNotEqual(delete_pos, -1)
+        # The title header sits ABOVE the messages area (fixed top row), and the
+        # title comes before the delete control (delete is at the top-RIGHT).
+        self.assertLess(header_pos, body.find('id="chat-messages"'))
+        self.assertLess(title_pos, delete_pos)
+        # The delete control is NOT the literal ligature word; the icon is
+        # injected as an inline SVG client-side (makeTrashIcon via createElementNS).
+        delete_tag = body[delete_pos:delete_pos + 400]
+        self.assertNotIn(">delete<", delete_tag)
+        self.assertIn("makeTrashIcon", body)
+        # It reuses the shared deleteSession() flow -> the existing delete
+        # endpoint; the per-session delete URL fragment is present in the JS.
+        self.assertIn('chat-conv-delete', body)
+        self.assertIn('"/delete/"', body)
+
     def test_chat_page_renders_delete_control_wiring(self):
         """Session rows get a delete control (rendered client-side). Assert the
         page ships the delete wiring: the trash marker + the delete endpoint."""

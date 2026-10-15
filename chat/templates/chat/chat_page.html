@@ -67,13 +67,21 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     panel out of view). The inline flex-direction:row keeps the two columns
     side-by-side by default; flex-wrap lets the narrow Chats column and the
     flex-1 panel reflow on very narrow screens.
+
+    VIEWPORT BOUNDING (ChatGPT-style): the layout is bounded to the viewport
+    with a DEFINITE height = calc(100vh - 12rem) (the ~12rem reserves the Unfold
+    top header + breadcrumb + page padding above this content block) and
+    overflow:hidden, so the page itself never grows past the screen and the
+    composer can never be pushed below the fold. The two columns are themselves
+    flex children with min-height:0 so their inner lists / transcript scroll
+    INTERNALLY instead of stretching the page.
     {% endcomment %}
     <div id="chat-layout"
          class="flex items-stretch gap-4"
-         style="flex-direction:row;flex-wrap:wrap;min-height:calc(100vh - 12rem);">
+         style="flex-direction:row;flex-wrap:wrap;height:calc(100vh - 12rem);max-height:calc(100vh - 12rem);overflow:hidden;">
 
       <!-- --- MIDDLE: Chats history column ---------------------------------- -->
-      <div class="flex-none flex flex-col border border-base-200 rounded-default p-3 dark:border-base-700"
+      <div class="flex-none flex flex-col min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="width:19rem;max-width:100%;flex-basis:19rem;flex-grow:0;flex-shrink:0;">
         <div class="flex items-center justify-between mb-3">
           <h2 class="font-semibold text-sm text-font-important-light dark:text-font-important-dark">
@@ -94,12 +102,33 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       </div>
 
       <!-- --- RIGHT: conversation panel -------------------------------------
-           ChatGPT-style layout: the panel is a flex COLUMN that fills its
-           height; #chat-messages grows and scrolls (flex:1, overflow-y:auto)
-           while #chat-composer is pinned to the BOTTOM as the panel's last
-           child. -->
-      <div class="flex flex-1 flex-col min-w-0 border border-base-200 rounded-default p-3 dark:border-base-700"
+           ChatGPT-style layout: the panel is a flex COLUMN of DEFINITE height
+           (it fills #chat-layout, which is viewport-bounded). It has three
+           children: a FIXED title/header row at the top (with the top-right
+           delete control), #chat-messages which grows and scrolls INTERNALLY
+           (flex:1, min-h-0, overflow-y:auto), and #chat-composer pinned to the
+           BOTTOM as the last child so it is ALWAYS visible on screen. -->
+      <div class="flex flex-1 flex-col min-w-0 min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="flex:1 1 24rem;min-width:0;">
+        <!-- Conversation title header (fixed, top). The delete control sits at
+             the TOP-RIGHT corner and deletes the CURRENTLY-OPEN session by
+             reusing the same scoped /chat/<id>/delete/ endpoint the left-list
+             trash button uses. Hidden until a session is open. -->
+        <div id="chat-conv-header"
+             class="flex items-center justify-between gap-2 mb-3 pb-2 border-b border-base-200 dark:border-base-700">
+          <h2 id="chat-conv-title"
+              class="font-semibold text-sm truncate text-font-important-light dark:text-font-important-dark">
+            {% translate "Conversation" %}
+          </h2>
+          <button type="button" id="chat-conv-delete"
+                  title="{% translate 'Delete this chat' %}"
+                  aria-label="{% translate 'Delete this chat' %}"
+                  class="flex-none hidden h-8 w-8 items-center justify-center rounded-default cursor-pointer text-font-subtle-light hover:bg-base-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-font-subtle-dark dark:hover:bg-base-800">
+            <!-- Icon injected via createElementNS (makeTrashIcon) at init so it
+                 renders as an SVG icon regardless of icon-font loading. -->
+          </button>
+        </div>
+
         <div id="chat-messages" class="flex-1 min-h-0 overflow-y-auto">
           <p id="chat-empty-state"
              class="text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark">
@@ -174,6 +203,9 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     const newBtn = document.getElementById("chat-new");
     const messagesEl = document.getElementById("chat-messages");
     const emptyStateEl = document.getElementById("chat-empty-state");
+    const convHeaderEl = document.getElementById("chat-conv-header");
+    const convTitleEl = document.getElementById("chat-conv-title");
+    const convDeleteBtn = document.getElementById("chat-conv-delete");
     const composerEl = document.getElementById("chat-composer");
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("chat-send");
@@ -226,6 +258,23 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       return svg;
     }
     function setStatus(text) { statusEl.textContent = text || ""; }
+    // Update the conversation panel's title header. When a session is open the
+    // title shows and the top-right delete control is enabled + visible; with
+    // no open session the delete control is hidden.
+    function setConversationHeader(title, hasSession) {
+      if (convTitleEl) { convTitleEl.textContent = title || "Conversation"; }
+      if (convDeleteBtn) {
+        if (hasSession) {
+          convDeleteBtn.classList.remove("hidden");
+          convDeleteBtn.classList.add("flex");
+          convDeleteBtn.disabled = false;
+        } else {
+          convDeleteBtn.classList.add("hidden");
+          convDeleteBtn.classList.remove("flex");
+          convDeleteBtn.disabled = true;
+        }
+      }
+    }
     // The composer stays visible at all times (so the empty / new state shows
     // an input too). "enabled" only toggles whether the controls accept input:
     // with no active session the user is prompted to pick/start a chat.
@@ -400,9 +449,14 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         history.pushState({ sessionId: id }, "", pageUrlFor(id));
       }
       highlightSession(id);
+      setConversationHeader("Conversation", true);
       fetch(messagesUrlFor(id), { method: "GET", headers: jsonHeaders(), credentials: "same-origin" })
         .then(function (r) { if (!r.ok) { throw new Error("not ok"); } return r.json(); })
-        .then(function (data) { renderMessages(data.messages); setStatus(""); })
+        .then(function (data) {
+          renderMessages(data.messages);
+          setConversationHeader(data.title, true);
+          setStatus("");
+        })
         .catch(function () {
           if (quiet) {
             // Degrade gracefully: show the clean empty transcript + ready
@@ -410,6 +464,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
             currentSessionId = null;
             renderMessages([]);
             highlightSession(null);
+            setConversationHeader("Conversation", false);
             setStatus("");
           } else {
             setStatus("Could not load session.");
@@ -502,6 +557,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
               loadSession(next.getAttribute("data-session-id"), true);
             } else {
               setComposerEnabled(false);
+              setConversationHeader("Conversation", false);
               setStatus("");
             }
           }
@@ -578,10 +634,29 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
     newBtn.addEventListener("click", createNewChat);
 
+    // Title-header delete (top-right of the OPEN conversation). It REUSES the
+    // same deleteSession() flow — and therefore the same scoped, CSRF-protected
+    // /chat/<id>/delete/ endpoint — as the left-list per-session trash button,
+    // locating that session's left-list row so it is pruned too. No new
+    // endpoint and no server-logic change.
+    if (convDeleteBtn) {
+      // Render the delete affordance as an SVG icon (never the literal word).
+      convDeleteBtn.appendChild(makeTrashIcon());
+      convDeleteBtn.addEventListener("click", function () {
+        if (!currentSessionId) { return; }
+        const row = sessionListEl.querySelector(
+          'button[data-session-id="' + currentSessionId + '"]'
+        );
+        const li = row ? row.closest("li") : null;
+        deleteSession(currentSessionId, li);
+      });
+    }
+
     companySel.addEventListener("change", function () {
       currentSessionId = null;
       renderMessages([]);
       setComposerEnabled(false);
+      setConversationHeader("Conversation", false);
       // When switching companies, open the most-recent session for that
       // company (if any) so the transcript + composer are usable right away.
       loadSessions(function (sessions) {
