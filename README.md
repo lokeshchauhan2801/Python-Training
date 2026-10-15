@@ -59,6 +59,19 @@ The project was built in phases, then refined with targeted follow-ups:
 - **Follow-ups.** The minimal Documents add form (file OR URL only; LLM-decided
   title; auto file_type), and the always-present, non-clipped in-row **Schedule**
   dropdown (fixed so the menu is no longer hidden under the changelist rows).
+- **Chat responsive layout.** The `/chat/` page is now a fixed, viewport-bounded
+  app surface at 100% zoom (no whole-page scroll regardless of how many sessions
+  exist). The Unfold shell's Tailwind flex utilities (`flex`, `flex-col`,
+  `flex-1`, `min-h-0`) do not take effect on this page, so the layout is driven
+  by explicit ID-based CSS in `chat/templates/chat/chat_page.html`: `#page` and
+  `#main` are pinned to `100dvh`, a `min-height:0` flex chain flows that bound
+  down the real content wrappers (`.chat-flex-fill`) to `#chat-layout`, and the
+  two columns (`#chat-sessions-col`, `#chat-panel-col`) are explicit flex
+  columns. The left **Chats** list (`#chat-session-list`) and the right
+  **messages** area (`#chat-messages`) scroll internally while the composer
+  (textarea + Send + attach + model select) stays pinned on screen. Verified in
+  a headless Chromium at 1280×720, 1366×768, 1440×800, 1600×900, 1920×1080, and
+  1024×768, plus a live resize.
 
 ---
 

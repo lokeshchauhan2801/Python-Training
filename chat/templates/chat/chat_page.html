@@ -24,6 +24,151 @@ ChatService.process_message), and the JS refreshes the list so it shows.
 
 {% block extrahead %}{{ block.super }}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  {% comment %}
+  ROOT-CAUSE RESPONSIVE FIX (100% zoom, any session count).
+
+  The chat lives inside the Unfold admin shell whose wrappers are, from the
+  viewport down:
+      #page (flex min-h-screen)  ->  #main (flex flex-col grow)  ->  .px-4
+      ->  #content (container)   ->  #content-main  ->  #chat-root
+      ->  #chat-layout           ->  the two columns  ->  the scrollable lists.
+  NONE of those Unfold wrappers set min-height:0, and `min-h-screen` is a
+  MINIMUM not a cap, so a long Chats list expands every flex ancestor and GROWS
+  THE WHOLE PAGE: at 100% zoom the right panel + composer get shoved below the
+  viewport and only the left list shows (exactly the reported bug). A measured
+  pixel height on #chat-layout alone cannot fix this because its ancestors are
+  free to grow.
+
+  Fix = the standard "min-height:0 flex chain" applied to the REAL ancestor
+  chain, scoped to the chat page (body.chat-fixed-viewport, set from JS) so no
+  other admin page is affected:
+    * Pin #main to the viewport height (100dvh) and let it be a flex column that
+      cannot grow past the viewport (min-height:0, overflow:hidden).
+    * Give every intermediate wrapper (.px-4, #content, #content-main,
+      #chat-root) flex + min-height:0 so the height constraint flows down
+      instead of being broken by a default-min-content child.
+    * #chat-layout fills the remaining space (flex:1, min-height:0) and hides
+      its own overflow; its two columns are min-height:0 flex children whose
+      inner lists (#chat-session-list, #chat-messages) scroll INTERNALLY
+      (overflow-y:auto). The long Chats list now scrolls inside its column and
+      never pushes the page down.
+  The JS sizeChatLayout() still runs as a belt-and-braces fallback for browsers
+  without dvh, but the CSS chain is what actually bounds the page.
+  {% endcomment %}
+  {% comment %}
+  CRITICAL: on this page the Tailwind utility classes that create the flex
+  behaviour (`.flex`, `.flex-col`, `.flex-1`, `.min-h-0`) DO NOT take effect —
+  Unfold ships a prebuilt stylesheet and these utilities either are not emitted
+  or lose to the cascade here, so every `.flex` element computes `display:block`
+  (verified in the headless browser: #chat-layout and both columns rendered as
+  block, so the Chats list stacked and grew the page). This is the real reason
+  the two earlier fixes failed. Therefore we DO NOT rely on utility classes for
+  the viewport-bounding/flex chain: every rule below is written with ID / tagged
+  selectors that explicitly set display:flex, flex, min-height:0 and overflow,
+  so the layout is correct regardless of whether the utilities apply. These
+  rules win on specificity (id, or body.class descendant) over the utilities.
+  {% endcomment %}
+  <style>
+    /* Final guard: the chat page is a fixed app surface, so the document itself
+       must never scroll — only the inner lists do. Caps html/body to the
+       viewport in case any Unfold wrapper still reports extra height. */
+    html:has(body.chat-fixed-viewport),
+    body.chat-fixed-viewport {
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+    /* ---- Outer viewport bound ------------------------------------------------
+       #page is the Unfold flex row (sidebar + #main). Its `.flex min-h-screen`
+       utilities ALSO fail to apply on this page (it computes display:block), so
+       the sidebar and #main stack and #page grows to ~1575px, scrolling the
+       whole document even though #main itself is capped. We force #page to be a
+       viewport-tall flex row that hides its own overflow, so neither the tall
+       nav sidebar nor the chat can grow the page. */
+    body.chat-fixed-viewport #page {
+      display: flex;
+      flex-direction: row;
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+    /* Pin the Unfold #main to the real viewport. */
+    /* Scoped to the chat page only (class added to <body> from the init JS). */
+    body.chat-fixed-viewport #main {
+      height: 100vh;        /* fallback for no-dvh browsers */
+      height: 100dvh;       /* exact visible viewport, excludes mobile UI bars */
+      min-height: 0;
+      overflow: hidden;     /* the shell itself never scrolls; lists scroll */
+      display: flex;        /* force the column so children fill the bounded height */
+      flex-direction: column;
+    }
+    /* ---- Flow the bound down the REAL content chain --------------------------
+       The Unfold header is a direct child of #main and must keep its natural
+       height (it shares the .px-4 utility with the content wrapper, so a blind
+       `#main > .px-4` would wrongly stretch it). The exact content chain between
+       #main and the chat layout is tagged from JS with .chat-flex-fill (see
+       initChatChain()): the content .px-4 -> #content -> #content-main ->
+       #chat-root, never the header. Each is forced to a min-height:0 flex column
+       so the bound reaches #chat-layout instead of being broken by a
+       min-content floor. */
+    body.chat-fixed-viewport .chat-flex-fill {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    /* ---- #chat-root's own children ------------------------------------------ */
+    /* The in-page title/company row is fixed height; the layout takes the rest. */
+    body.chat-fixed-viewport #chat-header { flex: 0 0 auto; }
+    body.chat-fixed-viewport #chat-empty  { flex: 0 0 auto; }
+    /* ---- The two-column layout (explicit flex, NOT relying on .flex) --------- */
+    body.chat-fixed-viewport #chat-layout {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;      /* keep columns side-by-side; the panel can shrink */
+      align-items: stretch;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+    /* MIDDLE Chats column: fixed width, a flex column so its list can scroll. */
+    body.chat-fixed-viewport #chat-sessions-col {
+      display: flex;
+      flex-direction: column;
+      flex: 0 0 19rem;
+      min-height: 0;
+      max-width: 100%;
+    }
+    /* RIGHT conversation panel: grows, a flex column (header / messages /
+       composer stacked) so the messages area can scroll and the composer pins. */
+    body.chat-fixed-viewport #chat-panel-col {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 24rem;
+      min-width: 0;
+      min-height: 0;
+    }
+    /* Fixed header + composer, scrollable middle, inside the right panel. */
+    body.chat-fixed-viewport #chat-conv-header { flex: 0 0 auto; }
+    body.chat-fixed-viewport #chat-composer    { flex: 0 0 auto; }
+    body.chat-fixed-viewport #chat-messages {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    /* The Chats list fills its column and scrolls INTERNALLY no matter how many
+       sessions exist, so it never pushes the panel or the page down. */
+    body.chat-fixed-viewport #chat-session-list {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    /* The Chats-column header (title + New button) is fixed height. */
+    body.chat-fixed-viewport #chat-sessions-head { flex: 0 0 auto; }
+  </style>
 {% endblock %}
 
 {% block content %}
@@ -61,34 +206,30 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     </div>
 
     {% comment %}
-    Force a side-by-side two-column layout at the ACTUAL Unfold content width
-    WITHOUT relying on Tailwind's md: breakpoint (it does not trigger inside the
-    admin content area, which made the columns stack and pushed the conversation
-    panel out of view). The inline flex-direction:row keeps the two columns
-    side-by-side by default; flex-wrap lets the narrow Chats column and the
-    flex-1 panel reflow on very narrow screens.
+    Two-column layout, side-by-side at the real Unfold content width. The layout
+    and its columns are sized by the ID-based CSS in the <style> block above
+    (#chat-layout / #chat-sessions-col / #chat-panel-col) because the Tailwind
+    `.flex` / `.flex-col` / `.flex-1` utilities DO NOT take effect on this page
+    (verified: they compute display:block), which is why earlier attempts that
+    leaned on those classes failed and the columns stacked.
 
-    VIEWPORT BOUNDING (ChatGPT-style): the layout height is MEASURED at runtime
-    (sizeChatLayout(), below) rather than guessed with a hardcoded rem offset.
-    The previous calc(100vh - 12rem) under-counted the real space consumed above
-    this block (the Unfold top header + breadcrumb + the in-page #chat-header
-    title row + page padding), so the layout still extended BELOW the viewport
-    bottom and pushed #chat-composer off-screen at 100% zoom (only visible when
-    zoomed out). Now we set height = window.innerHeight - layout.top - 16px from
-    the element's real getBoundingClientRect().top, on load and on resize, so
-    the layout fills EXACTLY the remaining space down to the viewport bottom and
-    the composer is always on screen. overflow:hidden keeps the page itself from
-    growing; the two columns are flex children with min-height:0 so their inner
-    lists / transcript scroll INTERNALLY instead of stretching the page.
+    VIEWPORT BOUNDING: #main is pinned to 100dvh and the min-height:0 flex chain
+    (.chat-flex-fill on the content wrappers) flows that bound down to
+    #chat-layout, so #chat-layout fills EXACTLY the remaining viewport space and
+    its two columns' inner lists (#chat-session-list, #chat-messages) scroll
+    INTERNALLY — the page itself never grows and the composer stays on screen at
+    100% zoom. sizeChatLayout() in JS only adds a maxHeight guard as a no-dvh
+    fallback; it does not force a fixed height.
     {% endcomment %}
     <div id="chat-layout"
          class="flex items-stretch gap-4"
-         style="flex-direction:row;flex-wrap:wrap;overflow:hidden;">
+         style="flex-direction:row;flex-wrap:nowrap;overflow:hidden;">
 
       <!-- --- MIDDLE: Chats history column ---------------------------------- -->
-      <div class="flex-none flex flex-col min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
+      <div id="chat-sessions-col"
+           class="flex-none flex flex-col min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="width:19rem;max-width:100%;flex-basis:19rem;flex-grow:0;flex-shrink:0;">
-        <div class="flex items-center justify-between mb-3">
+        <div id="chat-sessions-head" class="flex items-center justify-between mb-3">
           <h2 class="font-semibold text-sm text-font-important-light dark:text-font-important-dark">
             {% translate "Chats" %}
           </h2>
@@ -113,7 +254,8 @@ ChatService.process_message), and the JS refreshes the list so it shows.
            delete control), #chat-messages which grows and scrolls INTERNALLY
            (flex:1, min-h-0, overflow-y:auto), and #chat-composer pinned to the
            BOTTOM as the last child so it is ALWAYS visible on screen. -->
-      <div class="flex flex-1 flex-col min-w-0 min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
+      <div id="chat-panel-col"
+           class="flex flex-1 flex-col min-w-0 min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="flex:1 1 24rem;min-width:0;">
         <!-- Conversation title header (fixed, top). The delete control sits at
              the TOP-RIGHT corner and deletes the CURRENTLY-OPEN session by
@@ -237,15 +379,27 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     // its height to the pixels left down to the viewport bottom (minus a small
     // bottom margin). This guarantees the composer sits on-screen regardless of
     // header/title heights or zoom level. Recomputed on load and on resize.
+    // The CSS min-height:0 flex chain (see the <style> block in extrahead) is
+    // the primary fix: #main is bounded to 100dvh and every wrapper down to the
+    // columns carries min-height:0, so the lists scroll internally and the page
+    // never grows. This JS is a belt-and-braces fallback: it pins #chat-layout
+    // to the exact remaining pixels from its measured top to the viewport
+    // bottom, covering browsers without dvh or any residual rounding. It runs
+    // on load and on resize.
     const CHAT_LAYOUT_BOTTOM_MARGIN = 16; // px gap below the panel
     function sizeChatLayout() {
       if (!layoutEl) { return; }
+      // Primary bounding is the CSS min-height:0 flex chain (#main is 100dvh and
+      // #chat-layout is flex:1 1 auto; min-height:0), so #chat-layout already
+      // fills exactly the remaining space. We set a maxHeight guard from the
+      // measured top as a fallback for browsers without dvh, but we do NOT force
+      // a fixed `height` (doing so early, before the flex chain lays out,
+      // collapsed the layout to 0). maxHeight only clamps; it never collapses.
       const top = layoutEl.getBoundingClientRect().top;
       let h = window.innerHeight - top - CHAT_LAYOUT_BOTTOM_MARGIN;
-      // Guard against a non-positive height during odd layout states.
-      if (!(h > 0)) { h = 0; }
-      layoutEl.style.height = h + "px";
-      layoutEl.style.maxHeight = h + "px";
+      if (h > 0) {
+        layoutEl.style.maxHeight = h + "px";
+      }
     }
 
     // Per-session URLs are built from the base chat prefix, never hardcoded.
@@ -939,6 +1093,35 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     // every resize) so the composer is on-screen at 100% zoom without the user
     // scrolling or zooming out. A second deferred call covers the case where
     // the Unfold header/sidebar finishes laying out after this script runs.
+    // Activate the scoped CSS viewport-bounding chain (body.chat-fixed-viewport)
+    // so the Unfold shell wrappers are capped to the viewport and the lists
+    // scroll internally instead of growing the page.
+    document.body.classList.add("chat-fixed-viewport");
+    // Cap the document element too (the :has() CSS guard is modern-only). An
+    // ~8px residual page overflow was traced to the un-reset default margins /
+    // html not being clipped; pinning html + body here removes the last sliver
+    // so document.scrollHeight == innerHeight.
+    document.documentElement.style.height = "100dvh";
+    document.documentElement.style.overflow = "hidden";
+    document.documentElement.style.margin = "0";
+    document.body.style.margin = "0";
+    document.body.style.overflow = "hidden";
+
+    // Tag ONLY the real content wrappers between #chat-root and #main with
+    // .chat-flex-fill so the min-height:0 flex chain is applied precisely — the
+    // Unfold header also uses the .px-4 utility, so a blind `#main > .px-4`
+    // selector would wrongly stretch the header. Walking up from #chat-root to
+    // #main tags #chat-root, #content-main, #content, and the content .px-4
+    // wrapper, and nothing else.
+    (function initChatChain() {
+      let node = root; // #chat-root
+      const mainEl = document.getElementById("main");
+      while (node && node !== mainEl && node !== document.body) {
+        node.classList.add("chat-flex-fill");
+        node = node.parentElement;
+      }
+    })();
+
     sizeChatLayout();
     window.addEventListener("resize", sizeChatLayout);
     window.setTimeout(sizeChatLayout, 0);
