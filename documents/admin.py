@@ -115,6 +115,25 @@ class DocumentAdmin(BaseModelAdmin):
     search_fields = ("title", "uploaded_by__email")
     date_hierarchy = "created_at"
 
+    # The ADD form is intentionally minimal: the user only chooses a file OR a
+    # media URL. Everything else (title, source, file_type, status, processing
+    # fields, tenant/audit) is set automatically server-side (see save_model and
+    # the process-time derivation in documents.services.process_document), so it
+    # is hidden from the add form entirely.
+    add_fieldsets = (
+        (
+            None,
+            {
+                "fields": ("file", "source_url"),
+                "description": (
+                    "Upload a file OR paste a media URL (exactly one). A URL is "
+                    "downloaded in the background by the scrapper. The title and "
+                    "file type are filled in automatically after processing."
+                ),
+            },
+        ),
+    )
+
     fieldsets = (
         (
             None,
@@ -159,6 +178,14 @@ class DocumentAdmin(BaseModelAdmin):
             },
         ),
     )
+
+    def get_fieldsets(self, request, obj=None):
+        # ADD (obj is None): the minimal file-OR-URL fieldset only — nothing
+        # from the richer change layout (title/source/file_type/processing/
+        # tenant/audit) is exposed. CHANGE: the full read-only-aware layout.
+        if obj is None:
+            return self.add_fieldsets
+        return super().get_fieldsets(request, obj)
 
     def get_readonly_fields(self, request, obj=None):
         readonly = list(super().get_readonly_fields(request, obj))
@@ -289,6 +316,15 @@ class DocumentAdmin(BaseModelAdmin):
         )
 
     def save_model(self, request, obj, form, change):
+        # The minimal ADD form omits ``source``; a document added through that
+        # form is always a library upload, so stamp it BEFORE super().save_model
+        # (which enforces company + stamps uploaded_by). The title/file_type are
+        # left to process-time derivation. Only force this when the submitted
+        # form actually omitted ``source`` (the add form) — a programmatic
+        # save_model (form=None) or any form that does expose ``source`` keeps
+        # the caller's chosen source (e.g. a chat attachment).
+        if not change and form is not None and "source" not in form.fields:
+            obj.source = Document.SOURCE_LIBRARY
         # BaseModelAdmin stamps the actor (uploaded_by=request.user) + enforces
         # the owned company server-side; this override then dispatches library
         # processing through the backend seam.

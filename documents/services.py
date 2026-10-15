@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,7 +25,11 @@ from docx import Document as WordDocument
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from basics.llm import LLMConfigurationError, get_llm_client
+from basics.llm import (
+    LLMBackendError,
+    LLMConfigurationError,
+    get_llm_client,
+)
 from basics.vectorstore import ChromaVectorStore
 
 from .models import Document, DocumentChunk
@@ -498,6 +503,62 @@ def extract_document_text(document: Document) -> str:
     return "\n\n".join(content for _, _, content in chunks if content).strip()
 
 
+def derive_document_title(
+    document: Document,
+    extracted_text: str,
+    user_supplied_title: bool,
+) -> str:
+    """Return a title for a document, LLM-derived when the user supplied none.
+
+    When ``user_supplied_title`` is True the current ``document.title`` is kept
+    verbatim. Otherwise the LLM is asked for a concise (<=8 word) title from the
+    first slice of extracted text. ANY failure — no key configured
+    (``LLMConfigurationError``), a backend error, or anything else — falls back
+    to the uploaded file's name stem, or the source URL host, or the current
+    title. This helper NEVER raises and is import-safe/no-key.
+    """
+    if user_supplied_title:
+        return document.title
+
+    text = (extracted_text or "").strip()
+    if text:
+        try:
+            raw = get_llm_client().complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return a concise <=8 word document title, "
+                            "no quotes."
+                        ),
+                    },
+                    {"role": "user", "content": text[:1500]},
+                ]
+            )
+            title = (raw or "").strip().splitlines()[0].strip().strip('"').strip()
+            if title:
+                return title[:255]
+        except (LLMConfigurationError, LLMBackendError):
+            pass
+        except Exception:  # noqa: BLE001 - title derivation never raises
+            logger.exception(
+                "Unexpected error deriving title for document %s", document.pk
+            )
+
+    # No-key / failure fallback: filename stem, then URL host, then current.
+    working_name = document.file.name if document.file else ""
+    stem = Path(os.path.basename(working_name)).stem if working_name else ""
+    if stem:
+        return stem[:255]
+    if document.source_url:
+        from urllib.parse import urlsplit
+
+        host = urlsplit(document.source_url).hostname or ""
+        if host:
+            return host[:255]
+    return document.title
+
+
 def _delete_chunks(document: Document) -> None:
     """Hard-delete every chunk row for a document (incl. soft-deleted ones)."""
     DocumentChunk.all_objects.filter(document=document).hard_delete()
@@ -592,6 +653,15 @@ def process_document(document: Document) -> Document:
         ]
     )
 
+    # A user-supplied title is one that is non-blank AND already carries a file
+    # suffix (the admin add form may leave title blank). When it is blank or has
+    # no suffix, fall back to the uploaded file's basename so the suffix-based
+    # dispatch in extract_document_chunks works; the real title is derived from
+    # the extracted text after extraction.
+    user_supplied_title = bool(document.title and Path(document.title).suffix)
+    if not user_supplied_title and document.file:
+        document.title = os.path.basename(document.file.name)
+
     embed = document.source == Document.SOURCE_LIBRARY
     vector_store: ChromaVectorStore | None = None
     vector_ids: list[str] = []
@@ -663,6 +733,22 @@ def process_document(document: Document) -> Document:
                     )
                 )
 
+        # Auto-fill file_type from the working filename's suffix when it was
+        # not already set (url_source stamps it for URL docs). Then derive the
+        # title from the extracted text when the user supplied none.
+        working_name = document.title if user_supplied_title else (
+            document.file.name if document.file else document.title
+        )
+        suffix = Path(working_name).suffix.lstrip(".").lower()
+        if suffix:
+            document.file_type = suffix
+        extracted_text = "\n\n".join(
+            text for _page, _loc, text in extracted_chunks if text
+        ).strip()
+        document.title = derive_document_title(
+            document, extracted_text, user_supplied_title
+        )
+
         document.status = Document.STATUS_READY
         document.processing_stage = "ready"
         document.processing_progress = 100
@@ -671,6 +757,8 @@ def process_document(document: Document) -> Document:
         document.processing_duration_ms = _elapsed_ms()
         document.save(
             update_fields=[
+                "title",
+                "file_type",
                 "status",
                 "processing_stage",
                 "processing_progress",

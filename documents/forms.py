@@ -23,10 +23,20 @@ class DocumentAdminForm(forms.ModelForm):
         # exactly one is present).
         if "file" in self.fields:
             self.fields["file"].required = False
+        # The minimal add form hides the title; it is derived from the document
+        # content at process time (with a filename/URL no-key fallback), so the
+        # title is never required at the form level.
+        if "title" in self.fields:
+            self.fields["title"].required = False
 
     def clean(self):
         cleaned = super().clean()
-        source = cleaned.get("source")
+        # The minimal add form omits the ``source`` field entirely; such a
+        # submission is always a library upload, so run the file-OR-URL rule.
+        if "source" in self.fields:
+            source = cleaned.get("source")
+        else:
+            source = Document.SOURCE_LIBRARY
         if source != Document.SOURCE_LIBRARY:
             return cleaned
         has_file = bool(cleaned.get("file"))
