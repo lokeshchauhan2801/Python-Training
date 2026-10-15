@@ -83,7 +83,13 @@ class CompanyScopedAdminMixin:
         return qs
 
     def _owned_companies(self, request):
-        """Companies the requesting user may use (non-deleted)."""
+        """Companies the requesting user may PICK from in the form.
+
+        Superusers keep the full queryset (they may choose any company in the
+        change form); everyone else is limited to companies they own. This is
+        the picker scope, NOT the auto-fill default — the default is resolved by
+        ``_resolve_active_company`` from the companies the user actually OWNS.
+        """
         from company.models import Company
 
         if request.user.is_superuser:
@@ -91,15 +97,29 @@ class CompanyScopedAdminMixin:
         return Company.objects.filter(owner=request.user)
 
     def _resolve_active_company(self, request):
-        """Resolve a non-superuser's single owned company (same rule as chat).
+        """Resolve the user's active/default owned company for server-side fill.
 
-        Returns the one owned company, or ``None`` when there are zero or more
-        than one (the form then requires an explicit choice).
+        Reuses the project's owner-based "active company" rule (the same
+        ``company__owner=request.user`` ownership the chat surfaces use — see
+        ``chat.scope.allowed_companies`` and
+        ``chat.api.serializers.RequiredCompanyResolutionMixin``):
+
+        * exactly one owned company → that company;
+        * several owned companies, no explicit selection → a deterministic
+          default (the most-recently created owned company) rather than erroring,
+          so a required ``company`` is never left null;
+        * no owned company → ``None`` (the caller surfaces a clean admin error).
+
+        This resolves by OWNERSHIP for every user, including superusers, so a
+        superuser who owns a company gets it auto-filled when the hidden-company
+        add form submits no company.
         """
-        owned = list(self._owned_companies(request)[:2])
-        if len(owned) == 1:
-            return owned[0]
-        return None
+        from company.models import Company
+
+        owned = Company.objects.filter(owner=request.user).order_by(
+            "-created_at", "-id"
+        )
+        return owned.first()
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == "company" and not request.user.is_superuser:
@@ -110,26 +130,44 @@ class CompanyScopedAdminMixin:
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def _enforce_company(self, request, obj):
-        """Server-side company enforcement, independent of the submitted form."""
-        if request.user.is_superuser:
-            return
+        """Server-side company enforcement, independent of the submitted form.
+
+        The required ``company`` FK is NEVER trusted to the submitted form (it is
+        hidden from the minimal add form, so a POST carries no company at all).
+        This stamps it server-side so the NOT NULL constraint is always
+        satisfied and a null company can never reach the INSERT:
+
+        * company already set and allowed → keep it;
+        * company unset → auto-fill the resolved active/default owned company;
+        * a non-superuser's submitted company they do not own → coerce to the
+          owned default;
+        * no resolvable company → a clean, user-facing admin error instead of a
+          500 IntegrityError.
+        """
         model_field_names = {f.name for f in obj._meta.get_fields()}
         if "company" not in model_field_names:
             return
         active = self._resolve_active_company(request)
         if not obj.company_id:
+            # No company on the row (hidden add form / tampered POST): stamp the
+            # resolved owned default. Applies to superusers too, so a hidden
+            # company field never leaves company_id null.
             if active is None:
                 raise PermissionDenied(
-                    "Select a company you own before saving."
+                    "You must have a company before adding a document."
                 )
             obj.company = active
             return
-        # A submitted company the user does not own: coerce to the owned default
-        # when there is one, else reject.
+        # Superusers may deliberately pick any company in the change form; honor
+        # a company that is already set for them.
+        if request.user.is_superuser:
+            return
+        # A non-superuser submitted a company they do not own: coerce to the
+        # owned default when there is one, else reject.
         if not self._owned_companies(request).filter(pk=obj.company_id).exists():
             if active is None:
                 raise PermissionDenied(
-                    "You can only save against a company you own."
+                    "You must have a company before adding a document."
                 )
             obj.company = active
 

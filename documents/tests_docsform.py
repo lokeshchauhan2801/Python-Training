@@ -296,6 +296,160 @@ class DocsAddFormTests(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Regression: the Documents ADD form hides the Company (tenant) field, so a POST
+# carries NO company. The company FK is NOT NULL, so the save path MUST stamp
+# the user's active/owned company server-side; otherwise the INSERT raised
+# ``IntegrityError: null value in column "company_id"`` (both "Save" and "Save
+# and add another"). These assert the server-side auto-fill for the real-world
+# case the bug hit: a SUPERUSER who owns a company, plus the clean-error path
+# when the user owns no company at all.
+# ---------------------------------------------------------------------------
+@override_settings(MEDIA_ROOT=_MEDIA)
+class DocsAddCompanyAutofillTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        # A superuser who OWNS exactly one company ('auriga'), mirroring the
+        # reported account (lokeshchauhan058@gmail.com owns 'auriga'). The
+        # company must be auto-filled from ownership even though the user is a
+        # superuser and the add form submits no company.
+        cls.root = User.objects.create_superuser(
+            email="root-owns@example.com", password="x"
+        )
+        cls.company = Company.objects.create(
+            owner=cls.root, name="auriga", slug="auriga"
+        )
+        # A user (staff + document perms) who owns NO company — the clean-error
+        # path (must NOT 500 / IntegrityError).
+        cls.no_company_user = User.objects.create_user(
+            email="nocompany@example.com", password="x", is_staff=True
+        )
+        from django.contrib.auth.models import Permission
+
+        perms = Permission.objects.filter(
+            content_type__app_label="documents",
+            content_type__model="document",
+        )
+        cls.no_company_user.user_permissions.add(*perms)
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def setUp(self):
+        super().setUp()
+        self._chroma_dir = tempfile.mkdtemp(prefix="documents-autofill-chroma-")
+        override = override_settings(CHROMA_PATH=self._chroma_dir)
+        override.enable()
+        self.addCleanup(override.disable)
+        self.addCleanup(shutil.rmtree, self._chroma_dir, True)
+        patcher = mock.patch.object(
+            services, "get_llm_client", lambda: _FakeLLMClient()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # --- Save: file-only, company auto-filled (was IntegrityError) ----------
+    def test_superuser_save_file_only_autofills_company(self):
+        self.client.force_login(self.root)
+        with mock.patch(
+            "documents.admin.dispatch_document_processing",
+            side_effect=_inline_dispatch,
+        ):
+            resp = self.client.post(
+                _ADD_URL,
+                {
+                    "file": SimpleUploadedFile("report.csv", _csv_bytes()),
+                    "source_url": "",
+                },
+            )
+        # 302 == saved, no IntegrityError.
+        self.assertEqual(resp.status_code, 302)
+        doc = Document.objects.get()
+        self.assertIsNotNone(doc.company_id)
+        self.assertEqual(doc.company_id, self.company.id)
+        self.assertEqual(doc.uploaded_by_id, self.root.id)
+        self.assertEqual(doc.source, Document.SOURCE_LIBRARY)
+
+    # --- Save and add another: same auto-fill -------------------------------
+    def test_superuser_save_and_add_another_autofills_company(self):
+        self.client.force_login(self.root)
+        with mock.patch(
+            "documents.admin.dispatch_document_processing",
+            side_effect=_inline_dispatch,
+        ):
+            resp = self.client.post(
+                _ADD_URL,
+                {
+                    "file": SimpleUploadedFile("report.csv", _csv_bytes()),
+                    "source_url": "",
+                    "_addanother": "1",
+                },
+            )
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp.url.rstrip("/").endswith("/add"))
+        doc = Document.objects.get()
+        self.assertEqual(doc.company_id, self.company.id)
+        self.assertEqual(doc.uploaded_by_id, self.root.id)
+        self.assertEqual(doc.source, Document.SOURCE_LIBRARY)
+
+    # --- Save: URL-only, same auto-fill (download mocked) -------------------
+    def test_superuser_save_url_only_autofills_company(self):
+        self.client.force_login(self.root)
+
+        def _url_dispatch(document_id, backend=None):
+            # Stand in for the background download+process: stamp a file so the
+            # synchronous process path succeeds, then process. The company has
+            # already been auto-filled by save_model before this runs.
+            document = Document.objects.get(pk=document_id)
+            document.file.save(
+                "downloaded.csv",
+                SimpleUploadedFile("downloaded.csv", _csv_bytes()),
+                save=False,
+            )
+            document.file_type = "csv"
+            document.save(update_fields=["file", "file_type", "updated_at"])
+            services.process_document(document)
+            return "job-inline", "local-background"
+
+        with mock.patch(
+            "documents.admin.dispatch_document_processing",
+            side_effect=_url_dispatch,
+        ):
+            resp = self.client.post(
+                _ADD_URL,
+                {
+                    "file": "",
+                    "source_url": "https://files.example.com/report.csv",
+                },
+            )
+        self.assertEqual(resp.status_code, 302)
+        doc = Document.objects.get()
+        self.assertEqual(doc.company_id, self.company.id)
+        self.assertEqual(doc.uploaded_by_id, self.root.id)
+        self.assertEqual(doc.source, Document.SOURCE_LIBRARY)
+
+    # --- No company => clean error, NOT a 500 / IntegrityError --------------
+    def test_user_without_company_gets_clean_error_not_500(self):
+        self.client.force_login(self.no_company_user)
+        with mock.patch(
+            "documents.admin.dispatch_document_processing",
+            side_effect=_inline_dispatch,
+        ):
+            resp = self.client.post(
+                _ADD_URL,
+                {
+                    "file": SimpleUploadedFile("report.csv", _csv_bytes()),
+                    "source_url": "",
+                },
+            )
+        # A clean PermissionDenied (403) — never a 500 and never a persisted row
+        # with a null company.
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(Document.all_objects.count(), 0)
+
+
+# ---------------------------------------------------------------------------
 # PART B targeted tests: the in-row "Schedule" dropdown on the changelist.
 #
 # The Schedule control (an "Action" button + a hidden four-item dropdown) must
