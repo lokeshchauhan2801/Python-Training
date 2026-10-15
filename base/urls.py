@@ -8,6 +8,9 @@ from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
+    # The top-level /chat/ surface (option B) is mounted BEFORE the admin so it
+    # lives outside /admin/ while still rendering inside the admin shell.
+    path("chat/", include("chat.urls")),
     path("admin/", admin.site.urls),
     path("api/v1/auth/", include("auth.api.urls")),
     path("api/v1/company/", include("company.api.urls")),

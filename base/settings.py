@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from django.urls import reverse_lazy
+from django.utils.text import format_lazy
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -75,6 +76,8 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                # ChatGPT-style recent-chat history in the Unfold sidebar.
+                "chat.context_processors.admin_chat_history",
             ],
         },
     },
@@ -209,12 +212,15 @@ UNFOLD = {
                     {
                         "title": "Chat",
                         "icon": "chat",
-                        "link": reverse_lazy("admin:chat_conversation_sessions"),
+                        "link": reverse_lazy("chat:home"),
                     },
                     {
                         "title": "New chat",
                         "icon": "add_comment",
-                        "link": reverse_lazy("admin:chat_conversation_new"),
+                        # Open the chat page with a flag the page JS reads to
+                        # create a new session in-place — NEVER the raw JSON
+                        # new-session endpoint (BUG 1).
+                        "link": format_lazy("{}?new=1", reverse_lazy("chat:home")),
                     },
                 ],
             },
@@ -287,9 +293,14 @@ UNFOLD = {
                         "link": reverse_lazy("admin:chat_conversation_changelist"),
                     },
                     {
-                        "title": "Tickets",
-                        "icon": "confirmation_number",
-                        "link": "#",  # placeholder — model lands later
+                        "title": "Messages",
+                        "icon": "mail",
+                        "link": reverse_lazy("admin:chat_message_changelist"),
+                    },
+                    {
+                        "title": "Message versions",
+                        "icon": "history",
+                        "link": reverse_lazy("admin:chat_messageversion_changelist"),
                     },
                 ],
             },

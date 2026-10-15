@@ -31,9 +31,11 @@ from django.urls import path
 from basics.admin import BaseModelAdmin
 from basics.llm import LLMBackendError, LLMConfigurationError
 
-from company.models import Company
+from django.utils.html import format_html
 
-from .models import Conversation, ConversationSession
+from .models import Conversation, ConversationSession, Message, MessageVersion
+from .scope import allowed_companies as _allowed_companies_for
+from .scope import scoped_sessions as _scoped_sessions_for
 from .services import ChatService
 
 
@@ -118,26 +120,12 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
     # --- scope helpers (re-derive scope server-side, never trust client) ---
     def _allowed_companies(self, request):
-        """Companies the requesting user may use (non-deleted only)."""
-        if request.user.is_superuser:
-            return Company.objects.all()
-        return Company.objects.filter(owner=request.user)
+        """Companies the requesting user may use (shared with /chat/ views)."""
+        return _allowed_companies_for(request)
 
     def _scoped_sessions(self, request):
-        """Non-deleted sessions owned by / visible to the requesting user.
-
-        Uses the non-deleted ``objects`` manager (user-facing list), NOT the
-        changelist's soft-delete-inclusive queryset. Superusers see all
-        non-deleted sessions; everyone else only their own, limited to
-        companies they own.
-        """
-        qs = ConversationSession.objects.all()
-        if not request.user.is_superuser:
-            qs = qs.filter(
-                user=request.user,
-                company__in=self._allowed_companies(request),
-            )
-        return qs.order_by("-created_at")
+        """Non-deleted sessions visible to the user (shared with /chat/ views)."""
+        return _scoped_sessions_for(request)
 
     # --- Goal 2: custom URLs (BEFORE super().get_urls()) -------------------
     def get_urls(self):
@@ -433,3 +421,104 @@ class ConversationAdmin(BaseModelAdmin):
     @admin.display(description="Question")
     def short_question(self, obj):
         return (obj.question[:60] + "...") if len(obj.question) > 60 else obj.question
+
+
+class MessageVersionInline(admin.TabularInline):
+    model = MessageVersion
+    extra = 0
+    fields = ("version", "content", "created_at")
+    readonly_fields = ("created_at",)
+    ordering = ("version",)
+
+    def has_add_permission(self, request, obj=None):
+        # Versions are written by the service, not hand-added here.
+        return False
+
+
+@admin.register(Message)
+class MessageAdmin(BaseModelAdmin):
+    date_hierarchy = "created_at"
+    list_display = (
+        "role_badge",
+        "short_content",
+        "conversation",
+        "company",
+        "model_name",
+        "created_at",
+        "is_deleted",
+    )
+    list_filter = ("role", "company", "is_deleted", "created_at")
+    search_fields = ("content", "conversation__session_id")
+    inlines = [MessageVersionInline]
+
+    fieldsets = (
+        (None, {"fields": ("id", "conversation", "parent", "company", "role")}),
+        ("Content", {"fields": ("content", "citations", "chart_data", "documents")}),
+        ("Context", {"fields": ("model_name", "context_signature")}),
+        (
+            "Audit",
+            {
+                "fields": (
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "is_deleted",
+                    "deleted_at",
+                )
+            },
+        ),
+    )
+
+    # Role -> badge colour. Theme-aware foreground on a tinted background.
+    _ROLE_COLORS = {
+        Message.ROLE_USER: "#2563eb",
+        Message.ROLE_ASSISTANT: "#7c3aed",
+        Message.ROLE_SYSTEM: "#6b7280",
+    }
+
+    @admin.display(description="Role", ordering="role")
+    def role_badge(self, obj):
+        color = self._ROLE_COLORS.get(obj.role, "#6b7280")
+        return format_html(
+            '<span style="background:{0}1a;color:{0};border-radius:4px;'
+            'padding:2px 8px;font-weight:600;font-size:11px;">{1}</span>',
+            color,
+            obj.get_role_display(),
+        )
+
+    @admin.display(description="Content")
+    def short_content(self, obj):
+        return (obj.content[:60] + "...") if len(obj.content) > 60 else obj.content
+
+
+@admin.register(MessageVersion)
+class MessageVersionAdmin(BaseModelAdmin):
+    date_hierarchy = "created_at"
+    list_display = (
+        "message",
+        "version",
+        "company",
+        "created_at",
+        "is_deleted",
+    )
+    list_filter = ("company", "is_deleted", "created_at")
+    search_fields = ("content", "message__conversation__session_id")
+
+    fieldsets = (
+        (None, {"fields": ("id", "message", "company", "version")}),
+        ("Content", {"fields": ("content",)}),
+        (
+            "Audit",
+            {
+                "fields": (
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "is_deleted",
+                    "deleted_at",
+                )
+            },
+        ),
+    )

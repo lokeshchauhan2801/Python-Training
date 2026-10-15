@@ -1,0 +1,511 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Top-level /chat/ page (option B), rendered inside the Unfold admin shell.
+
+The LEFT column is the Unfold admin sidebar (from base_site.html, left
+untouched). The content area holds the MIDDLE "Chats" history column (session
+list + purple New chat button + company selector) and the RIGHT conversation
+panel (ordered Messages + a composer pinned to the bottom with Send, a paperclip
+attach control, and a model-selector dropdown).
+
+The whole surface is AJAX — no full-page navigation. All server data is rendered
+with textContent / createElement / appendChild (NEVER innerHTML) so content can
+never execute, and every POST carries the CSRF token.
+
+BUG 1 (fixed): the New chat "+" button POSTs to the JSON new-session endpoint
+in-page, appends the returned session, opens it, and pushes /chat/<id>/ via
+history.pushState. It NEVER sets window.location to a JSON URL.
+
+BUG 2 (fixed): a new chat creates exactly one session; after the first send the
+session title becomes the server-derived first-message slice (set in
+ChatService.process_message), and the JS refreshes the list so it shows.
+{% endcomment %}
+{% load i18n %}
+
+{% block extrahead %}{{ block.super }}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% csrf_token %}
+
+  <div id="chat-root"
+       data-companies-url="{% url 'chat:companies_json' %}"
+       data-sessions-url="{% url 'chat:sessions_json' %}"
+       data-new-url="{% url 'chat:new_session' %}"
+       data-base-url="/chat/"
+       data-preselect="{{ preselect_session_id }}">
+
+    <p id="chat-empty"
+       class="hidden mb-4 text-red-600 text-sm dark:text-red-400">
+      {% translate "No companies available. You cannot start a chat yet." %}
+    </p>
+
+    <div class="flex flex-col gap-4 md:flex-row md:items-stretch" style="min-height:32rem;">
+
+      {# --- MIDDLE: Chats history column ---------------------------------- #}
+      <div class="flex-none flex flex-col border border-base-200 rounded-default p-3 w-full md:w-72 dark:border-base-700">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold text-sm text-font-important-light dark:text-font-important-dark">
+            {% translate "Chats" %}
+          </h2>
+          <button type="button" id="chat-new"
+                  title="{% translate 'New chat' %}"
+                  class="border border-transparent bg-primary-600 cursor-pointer flex font-medium h-8 items-center justify-center rounded-default text-white w-8 hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
+            <span class="material-symbols-outlined md-18">add</span>
+          </button>
+        </div>
+
+        <div class="mb-3">
+          <label for="chat-company"
+                 class="block font-semibold mb-1 text-font-subtle-light text-xs uppercase dark:text-font-subtle-dark">
+            {% translate "Company" %}
+          </label>
+          <select id="chat-company"
+                  class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"></select>
+        </div>
+
+        <ul id="chat-session-list" class="flex-1 list-none m-0 overflow-y-auto p-0"></ul>
+      </div>
+
+      {# --- RIGHT: conversation panel ------------------------------------- #}
+      <div class="flex flex-1 flex-col min-w-0 border border-base-200 rounded-default p-3 dark:border-base-700">
+        <div id="chat-messages" class="flex-1 min-h-[16rem] overflow-y-auto">
+          <p id="chat-empty-state"
+             class="text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark">
+            {% translate "No messages yet. Say hello!" %}
+          </p>
+        </div>
+
+        <div id="chat-composer" class="mt-4 border-t border-base-200 pt-4 dark:border-base-700" style="display:none;">
+          <textarea id="chat-input" rows="3"
+                    class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
+                    placeholder="{% translate 'Type a message...' %}"></textarea>
+
+          <div id="chat-attachments" class="flex flex-wrap gap-2 mt-2"></div>
+
+          <div class="flex items-center gap-3 mt-2">
+            <button type="button" id="chat-send"
+                    class="border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-2 rounded-default text-sm text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
+              {% translate "Send" %}
+            </button>
+
+            <button type="button" id="chat-attach-btn"
+                    title="{% translate 'Attach a document (PDF, text, etc.)' %}"
+                    class="border border-base-200 cursor-pointer flex h-9 items-center justify-center rounded-default text-font-default-light w-9 hover:bg-base-100 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800">
+              <span class="material-symbols-outlined md-18">attach_file</span>
+            </button>
+            <input type="file" id="chat-attach-input" class="hidden" />
+
+            <select id="chat-model"
+                    title="{% translate 'Model' %}"
+                    class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark">
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="gpt-4o">gpt-4o</option>
+            </select>
+
+            <span id="chat-status" class="text-font-subtle-light text-sm dark:text-font-subtle-dark"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    "use strict";
+
+    function getCookie(name) {
+      const match = document.cookie.match("(^|;)\\s*" + name + "\\s*=\\s*([^;]+)");
+      return match ? match.pop() : "";
+    }
+
+    const root = document.getElementById("chat-root");
+    const companiesUrl = root.dataset.companiesUrl;
+    const sessionsUrl = root.dataset.sessionsUrl;
+    const newUrl = root.dataset.newUrl;        // POST-only JSON create (BUG 1)
+    const baseUrl = root.dataset.baseUrl;      // "/chat/"
+    const preselectId = root.dataset.preselect || "";
+
+    const companySel = document.getElementById("chat-company");
+    const emptyEl = document.getElementById("chat-empty");
+    const sessionListEl = document.getElementById("chat-session-list");
+    const newBtn = document.getElementById("chat-new");
+    const messagesEl = document.getElementById("chat-messages");
+    const emptyStateEl = document.getElementById("chat-empty-state");
+    const composerEl = document.getElementById("chat-composer");
+    const inputEl = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("chat-send");
+    const modelSel = document.getElementById("chat-model");
+    const attachBtn = document.getElementById("chat-attach-btn");
+    const attachInput = document.getElementById("chat-attach-input");
+    const attachmentsEl = document.getElementById("chat-attachments");
+    const statusEl = document.getElementById("chat-status");
+
+    let currentSessionId = null;
+    let pendingAttachmentIds = [];
+    let chartSeq = 0;
+
+    // Per-session URLs are built from the base chat prefix, never hardcoded.
+    function messagesUrlFor(id) { return baseUrl + id + "/messages-json/"; }
+    function sendUrlFor(id) { return baseUrl + id + "/send/"; }
+    function attachUrlFor(id) { return baseUrl + id + "/attach/"; }
+    function pageUrlFor(id) { return baseUrl + id + "/"; }
+
+    function clear(el) {
+      while (el.firstChild) { el.removeChild(el.firstChild); }
+    }
+    function setStatus(text) { statusEl.textContent = text || ""; }
+    function setComposerEnabled(enabled) {
+      composerEl.style.display = enabled ? "" : "none";
+    }
+
+    function jsonHeaders(extra) {
+      const h = { "X-Requested-With": "XMLHttpRequest" };
+      if (extra) { Object.keys(extra).forEach(function (k) { h[k] = extra[k]; }); }
+      return h;
+    }
+
+    // --- rendering --------------------------------------------------------
+    function renderCitations(container, citations) {
+      if (!citations || !citations.length) { return; }
+      const wrap = document.createElement("div");
+      wrap.className = "flex flex-wrap gap-1 mt-2";
+      citations.forEach(function (cite, idx) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "border border-base-200 bg-base-100 cursor-pointer px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+        const label = cite.reference_id || ("[" + (idx + 1) + "]");
+        chip.textContent = label;
+        const excerpt = cite.excerpt || cite.filename || "";
+        if (excerpt) { chip.title = excerpt; }
+        chip.addEventListener("click", function () {
+          popover.textContent = "";
+          const t = document.createElement("div");
+          t.className = "font-semibold mb-1";
+          t.textContent = cite.filename || label;
+          popover.appendChild(t);
+          const b = document.createElement("div");
+          b.textContent = excerpt || "(no excerpt)";
+          popover.appendChild(b);
+          popover.style.display = "";
+        });
+        wrap.appendChild(chip);
+      });
+      const popover = document.createElement("div");
+      popover.className = "border border-base-200 bg-white mt-2 p-2 rounded-default text-xs dark:border-base-700 dark:bg-base-900";
+      popover.style.display = "none";
+      container.appendChild(wrap);
+      container.appendChild(popover);
+    }
+
+    function renderChart(container, chartData) {
+      if (!chartData) { return; }
+      const points = chartData.data || chartData.series || [];
+      if (typeof Chart === "undefined") {
+        // Fallback: an HTML table built with createElement.
+        const table = document.createElement("table");
+        table.className = "mt-2 text-sm";
+        points.forEach(function (p) {
+          const tr = document.createElement("tr");
+          const l = document.createElement("td");
+          l.className = "pr-3 font-medium";
+          l.textContent = String(p.label);
+          const v = document.createElement("td");
+          v.textContent = String(p.value);
+          tr.appendChild(l); tr.appendChild(v);
+          table.appendChild(tr);
+        });
+        container.appendChild(table);
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.id = "chat-chart-" + (chartSeq++);
+      canvas.className = "mt-2";
+      canvas.style.maxHeight = "20rem";
+      container.appendChild(canvas);
+      const type = chartData.type || "bar";
+      new Chart(canvas.getContext("2d"), {
+        type: type,
+        data: {
+          labels: points.map(function (p) { return p.label; }),
+          datasets: [{
+            label: chartData.title || "",
+            data: points.map(function (p) { return p.value; })
+          }]
+        },
+        options: { responsive: true }
+      });
+    }
+
+    function renderMessage(message) {
+      const isUser = message.role === "user";
+      const wrap = document.createElement("div");
+      wrap.className = "mb-3 flex " + (isUser ? "justify-end" : "justify-start");
+
+      const bubble = document.createElement("div");
+      bubble.className = "max-w-[80%] px-3 py-2 rounded-default text-sm " +
+        (isUser
+          ? "bg-primary-600 text-white"
+          : "border border-base-200 text-font-default-light dark:border-base-700 dark:text-font-default-dark");
+
+      const text = document.createElement("div");
+      text.textContent = message.content || "";
+      text.style.whiteSpace = "pre-wrap";
+      bubble.appendChild(text);
+
+      if (!isUser) {
+        renderCitations(bubble, message.citations);
+        renderChart(bubble, message.chart_data);
+      }
+
+      wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderMessages(messages) {
+      clear(messagesEl);
+      if (!messages || !messages.length) {
+        const p = document.createElement("p");
+        p.className = "text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark";
+        p.textContent = "No messages yet. Say hello!";
+        messagesEl.appendChild(p);
+        return;
+      }
+      messages.forEach(renderMessage);
+    }
+
+    function clearAttachmentsUI() {
+      pendingAttachmentIds = [];
+      clear(attachmentsEl);
+    }
+
+    function addAttachmentChip(doc) {
+      pendingAttachmentIds.push(doc.id);
+      const chip = document.createElement("span");
+      chip.className = "border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+      chip.textContent = doc.title;
+      attachmentsEl.appendChild(chip);
+    }
+
+    // --- data loads -------------------------------------------------------
+    function loadSession(id, push) {
+      currentSessionId = id;
+      clearAttachmentsUI();
+      setStatus("Loading...");
+      setComposerEnabled(true);
+      if (push) {
+        history.pushState({ sessionId: id }, "", pageUrlFor(id));
+      }
+      highlightSession(id);
+      fetch(messagesUrlFor(id), { method: "GET", headers: jsonHeaders(), credentials: "same-origin" })
+        .then(function (r) { if (!r.ok) { throw new Error("not ok"); } return r.json(); })
+        .then(function (data) { renderMessages(data.messages); setStatus(""); })
+        .catch(function () { setStatus("Could not load session."); });
+    }
+
+    function highlightSession(id) {
+      const btns = sessionListEl.querySelectorAll("button[data-session-id]");
+      btns.forEach(function (b) {
+        if (b.getAttribute("data-session-id") === id) {
+          b.classList.add("bg-base-100", "dark:bg-base-800");
+        } else {
+          b.classList.remove("bg-base-100", "dark:bg-base-800");
+        }
+      });
+    }
+
+    function renderSessions(sessions) {
+      clear(sessionListEl);
+      (sessions || []).forEach(function (session) {
+        const li = document.createElement("li");
+        li.className = "mb-2";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.setAttribute("data-session-id", session.id);
+        btn.className = "block border border-base-200 bg-white cursor-pointer px-3 py-2 rounded-default text-left text-font-default-light text-sm w-full hover:bg-base-100 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800";
+
+        const title = document.createElement("div");
+        title.className = "font-medium truncate";
+        title.textContent = session.title || session.session_id;
+        btn.appendChild(title);
+
+        if (session.created_at) {
+          const ts = document.createElement("small");
+          ts.className = "block text-font-subtle-light truncate dark:text-font-subtle-dark";
+          ts.textContent = new Date(session.created_at).toLocaleString();
+          btn.appendChild(ts);
+        }
+
+        btn.addEventListener("click", function () { loadSession(session.id, true); });
+        li.appendChild(btn);
+        sessionListEl.appendChild(li);
+      });
+      if (currentSessionId) { highlightSession(currentSessionId); }
+    }
+
+    function loadSessions(then) {
+      const companyId = companySel.value;
+      const url = companyId
+        ? sessionsUrl + "?company=" + encodeURIComponent(companyId)
+        : sessionsUrl;
+      fetch(url, { method: "GET", headers: jsonHeaders(), credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          renderSessions(data.sessions);
+          if (typeof then === "function") { then(data.sessions || []); }
+        })
+        .catch(function () { setStatus("Could not load sessions."); });
+    }
+
+    function loadCompanies(then) {
+      fetch(companiesUrl, { method: "GET", headers: jsonHeaders(), credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          const companies = data.companies || [];
+          clear(companySel);
+          if (companies.length === 0) {
+            emptyEl.classList.remove("hidden");
+            companySel.style.display = "none";
+            newBtn.disabled = true;
+            return;
+          }
+          companies.forEach(function (c) {
+            const opt = document.createElement("option");
+            opt.value = c.id;
+            opt.textContent = c.name;
+            companySel.appendChild(opt);
+          });
+          if (typeof then === "function") { then(); }
+        })
+        .catch(function () { setStatus("Could not load companies."); });
+    }
+
+    // --- actions ----------------------------------------------------------
+    // BUG 1 FIX: create in-place via fetch(POST), append the returned session,
+    // open it, and pushState the /chat/<id>/ URL. NEVER navigate to newUrl.
+    function createNewChat() {
+      const companyId = companySel.value;
+      if (!companyId) { return; }
+      const body = new URLSearchParams();
+      body.append("company", companyId);
+      newBtn.disabled = true;
+      fetch(newUrl, {
+        method: "POST",
+        headers: jsonHeaders({
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        }),
+        credentials: "same-origin",
+        body: body.toString()
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.data.error) {
+            setStatus(res.data.error || "Could not create chat.");
+            return;
+          }
+          loadSessions(function () { loadSession(res.data.id, true); });
+        })
+        .catch(function () { setStatus("Could not create chat."); })
+        .then(function () { newBtn.disabled = false; });
+    }
+
+    newBtn.addEventListener("click", createNewChat);
+
+    companySel.addEventListener("change", function () {
+      currentSessionId = null;
+      renderMessages([]);
+      setComposerEnabled(false);
+      loadSessions();
+    });
+
+    attachBtn.addEventListener("click", function () {
+      if (!currentSessionId) { setStatus("Select or start a chat first."); return; }
+      attachInput.click();
+    });
+
+    attachInput.addEventListener("change", function () {
+      const file = attachInput.files && attachInput.files[0];
+      if (!file || !currentSessionId) { return; }
+      const form = new FormData();
+      form.append("file", file);
+      setStatus("Uploading...");
+      fetch(attachUrlFor(currentSessionId), {
+        method: "POST",
+        headers: jsonHeaders({ "X-CSRFToken": getCookie("csrftoken") }),
+        credentials: "same-origin",
+        body: form
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.data.error) { setStatus(res.data.error || "Upload failed."); return; }
+          addAttachmentChip(res.data);
+          setStatus("");
+        })
+        .catch(function () { setStatus("Upload failed."); })
+        .then(function () { attachInput.value = ""; });
+    });
+
+    sendBtn.addEventListener("click", function () {
+      const question = inputEl.value.trim();
+      if (!question) { return; }
+      if (!currentSessionId) { setStatus("Select or start a chat first."); return; }
+
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      setStatus("Sending...");
+
+      const body = new URLSearchParams();
+      body.append("question", question);
+      body.append("model_name", modelSel.value);
+      pendingAttachmentIds.forEach(function (id) { body.append("attachment_ids", id); });
+
+      fetch(sendUrlFor(currentSessionId), {
+        method: "POST",
+        headers: jsonHeaders({
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        }),
+        credentials: "same-origin",
+        body: body.toString()
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.data.error) { setStatus(res.data.error || "Send failed."); return; }
+          if (emptyStateEl && emptyStateEl.parentNode) { emptyStateEl.parentNode.removeChild(emptyStateEl); }
+          if (res.data.user) { renderMessage(res.data.user); }
+          renderMessage(res.data.assistant);
+          inputEl.value = "";
+          clearAttachmentsUI();
+          setStatus("");
+          // BUG 2: the first send retitled the session server-side; refresh the
+          // list so the meaningful title replaces the placeholder.
+          loadSessions();
+        })
+        .catch(function () { setStatus("Send failed."); })
+        .then(function () { inputEl.disabled = false; sendBtn.disabled = false; });
+    });
+
+    window.addEventListener("popstate", function (ev) {
+      const id = ev.state && ev.state.sessionId;
+      if (id) { loadSession(id, false); }
+    });
+
+    // --- initial load -----------------------------------------------------
+    const wantNew = /[?&]new=1(&|$)/.test(window.location.search);
+    loadCompanies(function () {
+      loadSessions(function () {
+        if (preselectId) {
+          loadSession(preselectId, false);
+        } else if (wantNew) {
+          createNewChat();
+        }
+      });
+    });
+  })();
+  </script>
+</div>
+{% endblock %}
