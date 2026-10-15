@@ -433,3 +433,466 @@ class DocumentAdminHttpTests(TestCase):
             f"/admin/documents/document/{other_doc.pk}/chunks/"
         )
         self.assertEqual(resp.status_code, 404)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (embeddings + RAG) tests
+# ---------------------------------------------------------------------------
+#
+# Every test here sets CHROMA_PATH to a per-test tmp dir (override_settings +
+# tearDown rmtree) and uses a FAKE embeddings client (deterministic vectors) —
+# NEVER touching the real chroma_data and NEVER requiring a live key.
+
+from unittest import mock  # noqa: E402
+
+from django.urls import reverse  # noqa: E402
+
+from basics.llm import LLMConfigurationError  # noqa: E402
+from basics.vectorstore import ChromaVectorStore  # noqa: E402
+
+from .services import VECTOR_COLLECTION, find_relevant_chunks  # noqa: E402
+
+
+class _FakeEmbeddings:
+    """Deterministic 8-dim embeddings keyed off the text hash (no network)."""
+
+    DIM = 8
+
+    def _vector(self, text):
+        seed = abs(hash(text))
+        return [((seed >> (i * 3)) % 97) / 97.0 for i in range(self.DIM)]
+
+    def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text):
+        return self._vector(text)
+
+
+class _FakeLLMClient:
+    """Stand-in for the LLM seam exposing only the embedding methods."""
+
+    def __init__(self, embeddings=None, *, raise_no_key=False):
+        self._embeddings = embeddings or _FakeEmbeddings()
+        self._raise_no_key = raise_no_key
+
+    def _check(self):
+        if self._raise_no_key:
+            raise LLMConfigurationError("LLM API key required to embed documents.")
+
+    def embed_documents(self, texts):
+        self._check()
+        return self._embeddings.embed_documents(texts)
+
+    def embed_query(self, text):
+        self._check()
+        return self._embeddings.embed_query(text)
+
+
+def _fake_client_factory(embeddings=None, *, raise_no_key=False):
+    client = _FakeLLMClient(embeddings, raise_no_key=raise_no_key)
+    return lambda: client
+
+
+class _TmpChromaMixin:
+    """Give each test an isolated tmp CHROMA_PATH, removed on tearDown."""
+
+    def setUp(self):
+        super().setUp()
+        self._chroma_dir = tempfile.mkdtemp(prefix="documents-chroma-")
+        self._chroma_override = override_settings(CHROMA_PATH=self._chroma_dir)
+        self._chroma_override.enable()
+
+    def tearDown(self):
+        self._chroma_override.disable()
+        shutil.rmtree(self._chroma_dir, ignore_errors=True)
+        super().tearDown()
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class VectorStoreTests(_TmpChromaMixin, TestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def test_add_similarity_get_delete_round_trip(self):
+        store = ChromaVectorStore()
+        docs = [
+            {
+                "id": "a",
+                "text": "alpha",
+                "embedding": [1.0, 0.0, 0.0],
+                "metadata": {"company_id": "c1"},
+            },
+            {
+                "id": "b",
+                "text": "beta",
+                "embedding": [0.0, 1.0, 0.0],
+                "metadata": {"company_id": "c1"},
+            },
+        ]
+        ids = store.add_documents(docs, collection=VECTOR_COLLECTION)
+        self.assertEqual(set(ids), {"a", "b"})
+
+        hits = store.similarity_search(
+            [1.0, 0.0, 0.0], collection=VECTOR_COLLECTION, k=2
+        )
+        self.assertEqual(hits[0]["id"], "a")
+
+        got = store.get_embeddings(["a"], collection=VECTOR_COLLECTION)
+        self.assertEqual(len(got["a"]), 3)
+
+        store.delete_documents(["a", "b"], collection=VECTOR_COLLECTION)
+        self.assertEqual(
+            store.similarity_search(
+                [1.0, 0.0, 0.0], collection=VECTOR_COLLECTION, k=2
+            ),
+            [],
+        )
+
+
+class LLMSeamTests(_TmpChromaMixin, TestCase):
+    def test_fake_backend_embeds(self):
+        client = _FakeLLMClient()
+        vectors = client.embed_documents(["one", "two"])
+        self.assertEqual(len(vectors), 2)
+        self.assertEqual(len(vectors[0]), _FakeEmbeddings.DIM)
+        self.assertEqual(len(client.embed_query("one")), _FakeEmbeddings.DIM)
+
+    def test_no_key_raises_configuration_error(self):
+        client = _FakeLLMClient(raise_no_key=True)
+        with self.assertRaises(LLMConfigurationError):
+            client.embed_documents(["x"])
+        with self.assertRaises(LLMConfigurationError):
+            client.embed_query("x")
+
+    def test_real_seam_embeds_require_a_key(self):
+        # The real LLMClient raises LLMConfigurationError when no key is set
+        # (import-safe; builds no backend). Guard against a key leaking in from
+        # the shell by only asserting when none is configured.
+        from django.conf import settings
+
+        if settings.LLM_API_KEY:
+            self.skipTest("A live LLM key is configured in this environment")
+        from basics.llm import get_llm_client
+
+        with self.assertRaises(LLMConfigurationError):
+            get_llm_client().embed_query("hello")
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class ProcessDocumentEmbeddingTests(_TmpChromaMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(email="o@example.com", password="x")
+        cls.company = Company.objects.create(owner=cls.owner, name="C", slug="c")
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def test_library_doc_embeds_and_marks_ready(self):
+        doc = _make_document(self.company, self.owner, "data.csv", _csv_bytes())
+        with mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        ):
+            process_document(doc)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.STATUS_READY)
+        self.assertGreater(doc.chunk_count, 0)
+        # Every chunk vector is written to Chroma, keyed by the chunk ULID.
+        chunk_ids = [
+            str(pk)
+            for pk in DocumentChunk.objects.filter(document=doc).values_list(
+                "id", flat=True
+            )
+        ]
+        stored = ChromaVectorStore().get_embeddings(
+            chunk_ids, collection=VECTOR_COLLECTION
+        )
+        self.assertEqual(set(stored), set(chunk_ids))
+
+    def test_chat_doc_is_not_embedded(self):
+        doc = _make_document(
+            self.company,
+            self.owner,
+            "note.txt",
+            b"The quick brown fox jumps over the dog.",
+            source=Document.SOURCE_CHAT,
+        )
+        # get_llm_client must never be called for a chat-source document.
+        sentinel = mock.Mock(side_effect=AssertionError("chat doc was embedded"))
+        with mock.patch.object(services, "get_llm_client", sentinel):
+            process_document(doc)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.STATUS_READY)
+        self.assertGreater(doc.chunk_count, 0)
+        chunk_ids = [
+            str(pk)
+            for pk in DocumentChunk.objects.filter(document=doc).values_list(
+                "id", flat=True
+            )
+        ]
+        # No vectors were written for a chat doc. Either the 'pdf_chunks'
+        # collection was never created (chat was the only doc processed) or it
+        # exists without these chunk ids — both prove the chat doc is unembedded.
+        try:
+            stored = ChromaVectorStore().get_embeddings(
+                chunk_ids, collection=VECTOR_COLLECTION
+            )
+        except Exception:
+            stored = {}
+        self.assertEqual(stored, {})
+
+    def test_embed_failure_cleans_vectors_and_chunks(self):
+        doc = _make_document(self.company, self.owner, "data.csv", _csv_bytes())
+
+        class _Boom(_FakeLLMClient):
+            def embed_documents(self, texts):
+                raise RuntimeError("provider exploded")
+
+        with mock.patch.object(
+            services, "get_llm_client", lambda: _Boom()
+        ):
+            with self.assertRaises(services.DocumentIndexError):
+                process_document(doc)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.STATUS_FAILED)
+        self.assertEqual(doc.chunk_count, 0)
+        self.assertEqual(DocumentChunk.objects.filter(document=doc).count(), 0)
+
+    def test_no_key_marks_failed_with_message_and_no_partial_state(self):
+        doc = _make_document(self.company, self.owner, "data.csv", _csv_bytes())
+        with mock.patch.object(
+            services,
+            "get_llm_client",
+            _fake_client_factory(raise_no_key=True),
+        ):
+            with self.assertRaises(services.DocumentIndexError) as ctx:
+                process_document(doc)
+        self.assertIn("LLM key required", str(ctx.exception))
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.STATUS_FAILED)
+        self.assertEqual(doc.chunk_count, 0)
+        self.assertEqual(DocumentChunk.objects.filter(document=doc).count(), 0)
+        self.assertIn("LLM key required", doc.processing_error)
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class RetrievalScopingTests(_TmpChromaMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user(email="alice@example.com", password="x")
+        cls.bob = User.objects.create_user(email="bob@example.com", password="x")
+        cls.alice_co = Company.objects.create(
+            owner=cls.alice, name="AC", slug="ac"
+        )
+        cls.bob_co = Company.objects.create(owner=cls.bob, name="BC", slug="bc")
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def _process(self, company, owner, filename, data):
+        doc = _make_document(company, owner, filename, data)
+        with mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        ):
+            process_document(doc)
+        return doc
+
+    def test_owner_only_retrieves_own_company_chunks(self):
+        self._process(self.alice_co, self.alice, "a.csv", _csv_bytes())
+        with mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        ):
+            hits = find_relevant_chunks(self.alice, "Alice", self.alice_co, k=5)
+        self.assertTrue(hits)
+        for chunk in hits:
+            self.assertEqual(chunk.company_id, self.alice_co.id)
+
+    def test_other_owner_excluded_even_if_chroma_returns_ids(self):
+        bob_doc = self._process(self.bob_co, self.bob, "b.csv", _csv_bytes())
+        bob_chunk_ids = [
+            str(pk)
+            for pk in DocumentChunk.objects.filter(document=bob_doc).values_list(
+                "id", flat=True
+            )
+        ]
+        # Chroma returns Bob's chunk ids, but Alice does not own Bob's company,
+        # so the DB re-scope (document__company__owner=alice) drops them all.
+        fake_search = mock.Mock(
+            return_value=[{"id": cid} for cid in bob_chunk_ids]
+        )
+        with mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        ), mock.patch.object(
+            ChromaVectorStore, "similarity_search", fake_search
+        ):
+            hits = find_relevant_chunks(self.alice, "anything", self.bob_co, k=5)
+        self.assertEqual(hits, [])
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class AdminEmbeddingColumnTests(_TmpChromaMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_superuser(
+            email="root-embed@example.com", password="x"
+        )
+        cls.member = User.objects.create_user(
+            email="member@example.com", password="x", is_staff=True
+        )
+        cls.owner = User.objects.create_user(email="o@example.com", password="x")
+        cls.company = Company.objects.create(owner=cls.owner, name="C", slug="c")
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def _embedded_chunk(self):
+        doc = _make_document(self.company, self.owner, "data.csv", _csv_bytes())
+        with mock.patch.object(
+            services, "get_llm_client", _fake_client_factory()
+        ):
+            process_document(doc)
+        return DocumentChunk.objects.filter(document=doc).first()
+
+    def _admin(self):
+        from django.contrib.admin.sites import site
+
+        from .admin import DocumentChunkAdmin
+
+        return DocumentChunkAdmin(DocumentChunk, site)
+
+    def _request(self, user):
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/admin/documents/documentchunk/")
+        request.user = user
+        return request
+
+    def test_superuser_sees_truncated_preview(self):
+        chunk = self._embedded_chunk()
+        admin_obj = self._admin()
+        admin_obj._request = self._request(self.admin)
+        rendered = admin_obj.embedding_preview(chunk)
+        self.assertTrue(rendered.startswith("["))
+        self.assertIn("more", rendered)
+
+    def test_non_superuser_sees_dash(self):
+        chunk = self._embedded_chunk()
+        admin_obj = self._admin()
+        admin_obj._request = self._request(self.member)
+        self.assertEqual(admin_obj.embedding_preview(chunk), "—")
+
+    def test_non_embedded_chunk_sees_dash(self):
+        # A chat-source chunk is never embedded -> get_embeddings returns {}.
+        doc = _make_document(
+            self.company,
+            self.owner,
+            "note.txt",
+            b"hello there world",
+            source=Document.SOURCE_CHAT,
+        )
+        process_document(doc)
+        chunk = DocumentChunk.objects.filter(document=doc).first()
+        admin_obj = self._admin()
+        admin_obj._request = self._request(self.admin)
+        self.assertEqual(admin_obj.embedding_preview(chunk), "—")
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class AdminScopingSecurityTests(_TmpChromaMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user(
+            email="alice-admin@example.com", password="x", is_staff=True
+        )
+        cls.bob = User.objects.create_user(email="bob-admin@example.com", password="x")
+        cls.root = User.objects.create_superuser(
+            email="root-admin@example.com", password="x"
+        )
+        cls.alice_co = Company.objects.create(
+            owner=cls.alice, name="AliceCo", slug="alice-co"
+        )
+        cls.bob_co = Company.objects.create(owner=cls.bob, name="BobCo", slug="bob-co")
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_MEDIA, ignore_errors=True)
+
+    def _admin(self):
+        from django.contrib.admin.sites import site
+
+        from .admin import DocumentAdmin
+
+        return DocumentAdmin(Document, site)
+
+    def _request(self, user):
+        from django.test import RequestFactory
+
+        request = RequestFactory().post("/admin/documents/document/add/")
+        request.user = user
+        return request
+
+    def test_company_choices_limited_to_owned_for_non_superuser(self):
+        from company.models import Company
+
+        admin_obj = self._admin()
+        db_field = Document._meta.get_field("company")
+        request = self._request(self.alice)
+        formfield = admin_obj.formfield_for_foreignkey(db_field, request)
+        choice_ids = {str(c.pk) for c in formfield.queryset}
+        self.assertEqual(choice_ids, {str(self.alice_co.pk)})
+        self.assertNotIn(str(self.bob_co.pk), choice_ids)
+        # Superuser keeps the full queryset.
+        root_formfield = admin_obj.formfield_for_foreignkey(
+            db_field, self._request(self.root)
+        )
+        self.assertEqual(
+            set(root_formfield.queryset), set(Company.objects.all())
+        )
+
+    def test_uploaded_by_is_readonly(self):
+        admin_obj = self._admin()
+        request = self._request(self.alice)
+        self.assertIn("uploaded_by", admin_obj.get_readonly_fields(request))
+
+    def test_save_auto_sets_uploader_and_coerces_tampered_company(self):
+        admin_obj = self._admin()
+        request = self._request(self.alice)
+        # Build an unsaved library doc naming BOB's company + a bogus uploader.
+        doc = Document(
+            company=self.bob_co,
+            uploaded_by=self.bob,
+            source=Document.SOURCE_CHAT,  # chat so save_model skips extraction
+            title="tamper.txt",
+            file=SimpleUploadedFile("tamper.txt", b"hello there world"),
+        )
+        admin_obj.save_model(request, doc, form=None, change=False)
+        doc.refresh_from_db()
+        # Company coerced to Alice's owned company; uploader forced to Alice.
+        self.assertEqual(doc.company_id, self.alice_co.id)
+        self.assertEqual(doc.uploaded_by_id, self.alice.id)
+
+    def test_superuser_may_pick_any_company(self):
+        admin_obj = self._admin()
+        request = self._request(self.root)
+        doc = Document(
+            company=self.bob_co,
+            source=Document.SOURCE_CHAT,
+            title="root.txt",
+            file=SimpleUploadedFile("root.txt", b"hello there world"),
+        )
+        admin_obj.save_model(request, doc, form=None, change=False)
+        doc.refresh_from_db()
+        # Superuser's chosen company is respected (not coerced).
+        self.assertEqual(doc.company_id, self.bob_co.id)
+        # The uploader is still auto-stamped to the acting superuser.
+        self.assertEqual(doc.uploaded_by_id, self.root.id)

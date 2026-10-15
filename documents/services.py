@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
 
@@ -22,6 +23,9 @@ from django.db import transaction
 from docx import Document as WordDocument
 from openpyxl import load_workbook
 from pypdf import PdfReader
+
+from basics.llm import LLMConfigurationError, get_llm_client
+from basics.vectorstore import ChromaVectorStore
 
 from .models import Document, DocumentChunk
 
@@ -36,6 +40,16 @@ CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 180
 TABLE_CHUNK_SIZE = 9_000
 MAX_DOCUMENT_CHUNKS = 10_000
+
+# Embedding/vector constants (ported from OLD docs/services.py). Chunk texts are
+# embedded in offset-ordered batches of EMBEDDING_BATCH_SIZE across
+# EMBEDDING_WORKERS threads, then pushed into Chroma in slices of
+# VECTOR_BATCH_SIZE.
+EMBEDDING_BATCH_SIZE = 96
+EMBEDDING_WORKERS = 4
+VECTOR_BATCH_SIZE = 100
+# Chroma collection every chunk vector lives in (OLD convention).
+VECTOR_COLLECTION = "pdf_chunks"
 SUPPORTED_FILE_TYPES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -468,12 +482,75 @@ def _delete_chunks(document: Document) -> None:
     DocumentChunk.all_objects.filter(document=document).hard_delete()
 
 
-def process_document(document: Document) -> Document:
-    """Validate → extract → persist chunks → mark ready (synchronous, offline).
+def _set_processing_progress(document: Document, stage: str, progress: int) -> None:
+    """Persist an in-flight processing stage/progress update."""
+    document.processing_stage = stage
+    document.processing_progress = progress
+    document.save(
+        update_fields=["processing_stage", "processing_progress", "updated_at"]
+    )
 
-    Phase 1 only: NO embedding, NO vector store, NO async broker. On any
-    extraction/validation error the document is marked ``failed`` (with a
-    user-facing message), partial chunks are removed, and the error is re-raised.
+
+def _embed_chunks(extracted_chunks: list[tuple[int, str, str]]) -> list[list[float]]:
+    """Embed chunk texts in offset-ordered batches across a worker pool.
+
+    Batches of ``EMBEDDING_BATCH_SIZE`` are submitted to a
+    ``ThreadPoolExecutor(max_workers=EMBEDDING_WORKERS)`` and reassembled in
+    offset order so the returned vectors line up 1:1 with ``extracted_chunks``.
+    A short/long batch (provider returned an incomplete result) raises
+    ``DocumentIndexError``.
+    """
+    client = get_llm_client()
+    embedding_batches = [
+        (
+            offset,
+            [
+                text
+                for _page, _location, text in extracted_chunks[
+                    offset : offset + EMBEDDING_BATCH_SIZE
+                ]
+            ],
+        )
+        for offset in range(0, len(extracted_chunks), EMBEDDING_BATCH_SIZE)
+    ]
+    batch_results: dict[int, list[list[float]]] = {}
+    with ThreadPoolExecutor(max_workers=EMBEDDING_WORKERS) as executor:
+        futures = {
+            executor.submit(client.embed_documents, texts): offset
+            for offset, texts in embedding_batches
+        }
+        for future in as_completed(futures):
+            offset = futures[future]
+            batch_embeddings = future.result()
+            expected_count = min(
+                EMBEDDING_BATCH_SIZE, len(extracted_chunks) - offset
+            )
+            if len(batch_embeddings) != expected_count:
+                raise DocumentIndexError(
+                    "The embedding service returned an incomplete result."
+                )
+            batch_results[offset] = batch_embeddings
+    embeddings = [
+        embedding
+        for offset in sorted(batch_results)
+        for embedding in batch_results[offset]
+    ]
+    if len(embeddings) != len(extracted_chunks):
+        raise DocumentIndexError(
+            "The embedding service returned an incomplete result."
+        )
+    return embeddings
+
+
+def process_document(document: Document) -> Document:
+    """Validate → extract → persist chunks → (library) embed+index → mark ready.
+
+    Synchronous and offline (no async broker). Library documents are also
+    embedded and pushed into Chroma; chat-source documents stay store/extract
+    only (never embedded — Phase 3 wires that flow). On any extraction,
+    validation, or embedding error the document is marked ``failed`` (with a
+    user-facing message), partial chunks AND any partial vectors are removed,
+    and the error is re-raised.
     """
     started = time.monotonic()
 
@@ -494,8 +571,24 @@ def process_document(document: Document) -> Document:
         ]
     )
 
+    embed = document.source == Document.SOURCE_LIBRARY
+    vector_store: ChromaVectorStore | None = None
+    vector_ids: list[str] = []
     try:
         extracted_chunks = extract_document_chunks(document)
+
+        # Embed BEFORE persisting rows so a key/provider failure leaves no chunk
+        # rows behind (NO-KEY path surfaces a clear, user-facing message).
+        embeddings: list[list[float]] | None = None
+        if embed:
+            _set_processing_progress(document, "embedding", 10)
+            try:
+                embeddings = _embed_chunks(extracted_chunks)
+            except LLMConfigurationError as exc:
+                raise DocumentIndexError(
+                    "LLM key required to embed library documents. Set "
+                    "OPENAI_API_KEY and retry."
+                ) from exc
 
         chunk_rows = [
             DocumentChunk(
@@ -518,6 +611,37 @@ def process_document(document: Document) -> Document:
             _delete_chunks(document)
             DocumentChunk.objects.bulk_create(chunk_rows)
 
+        if embed:
+            _set_processing_progress(document, "indexing", 85)
+            vector_store = ChromaVectorStore()
+            for offset in range(0, len(chunk_rows), VECTOR_BATCH_SIZE):
+                rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
+                vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
+                vector_ids.extend(
+                    vector_store.add_documents(
+                        [
+                            {
+                                "id": str(chunk.pk),
+                                "text": chunk.content,
+                                "embedding": embedding,
+                                "metadata": {
+                                    "user_id": str(document.uploaded_by_id),
+                                    "company_id": str(document.company_id)
+                                    if document.company_id
+                                    else "",
+                                    "document_id": str(document.pk),
+                                    "chunk_id": str(chunk.pk),
+                                    "page_number": chunk.page_number,
+                                    "source_location": chunk.source_location,
+                                    "file_type": document.file_type,
+                                },
+                            }
+                            for chunk, embedding in zip(rows, vectors, strict=True)
+                        ],
+                        collection=VECTOR_COLLECTION,
+                    )
+                )
+
         document.status = Document.STATUS_READY
         document.processing_stage = "ready"
         document.processing_progress = 100
@@ -537,18 +661,62 @@ def process_document(document: Document) -> Document:
         )
         return document
     except (DocumentValidationError, DocumentIndexError) as exc:
-        _mark_failed(document, str(exc), _elapsed_ms())
+        _mark_failed(document, str(exc), _elapsed_ms(), vector_store, vector_ids)
         raise
     except Exception as exc:
         message = (
             "Document extraction failed. Check that the file is valid and "
             "retry."
         )
-        _mark_failed(document, message, _elapsed_ms())
+        _mark_failed(document, message, _elapsed_ms(), vector_store, vector_ids)
         raise DocumentIndexError(message) from exc
 
 
-def _mark_failed(document: Document, message: str, elapsed_ms: int) -> None:
+def find_relevant_chunks(
+    user, question: str, company, k: int = 5
+) -> list[DocumentChunk]:
+    """Return the top-``k`` chunks most relevant to ``question`` (similarity order).
+
+    Strict owner scope: the query is filtered to ``company`` in Chroma and the
+    returned hit ids are re-scoped against the relational DB with
+    ``document__company__owner=user`` — a user only ever retrieves chunks from
+    companies they own, even if Chroma surfaces an out-of-scope id.
+    """
+    query_embedding = get_llm_client().embed_query(question)
+    hits = ChromaVectorStore().similarity_search(
+        query_embedding,
+        collection=VECTOR_COLLECTION,
+        k=k,
+        filter={"company_id": str(company.id)},
+    )
+    ranked_ids = [hit["id"] for hit in hits]
+    if not ranked_ids:
+        return []
+    chunks = {
+        str(chunk.pk): chunk
+        for chunk in DocumentChunk.objects.filter(
+            id__in=ranked_ids,
+            document__company__owner=user,
+        ).select_related("document")
+    }
+    return [chunks[chunk_id] for chunk_id in ranked_ids if chunk_id in chunks]
+
+
+def _mark_failed(
+    document: Document,
+    message: str,
+    elapsed_ms: int,
+    vector_store: ChromaVectorStore | None = None,
+    vector_ids: list[str] | None = None,
+) -> None:
+    # Best-effort removal of any partial vectors written before the failure.
+    if vector_store is not None and vector_ids:
+        try:
+            vector_store.delete_documents(vector_ids, collection=VECTOR_COLLECTION)
+        except Exception:  # pragma: no cover - best effort
+            logger.exception(
+                "Could not remove partial vectors for document %s", document.pk
+            )
     _delete_chunks(document)
     document.status = Document.STATUS_FAILED
     document.processing_stage = "failed"

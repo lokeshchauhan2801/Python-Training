@@ -30,9 +30,31 @@ from unfold.decorators import action
 from unfold.enums import ActionVariant
 
 from basics.admin import BaseModelAdmin
+from basics.vectorstore import ChromaVectorStore
 
 from .models import Document, DocumentChunk
-from .services import DocumentIndexError, DocumentValidationError, process_document
+from .services import (
+    DocumentIndexError,
+    DocumentValidationError,
+    VECTOR_COLLECTION,
+    process_document,
+)
+
+def _embedding_preview_text(vector):
+    """Render a vector as the screenshot's truncated preview, or '—' when empty.
+
+    Example: ``[-0.0515, 0.0351, -0.1768, 0.0042] … +764 more`` (first 4 dims
+    rounded to 4 places, then ``+N more`` where N = total_dims - 4). A missing or
+    empty vector renders as ``—``.
+    """
+    if not vector:
+        return "—"
+    head = ", ".join(f"{round(float(value), 4)}" for value in vector[:4])
+    remaining = len(vector) - 4
+    if remaining > 0:
+        return f"[{head}] … +{remaining} more"
+    return f"[{head}]"
+
 
 _STATUS_COLORS = {
     Document.STATUS_READY: "#16a34a",  # green
@@ -45,6 +67,11 @@ _STATUS_COLORS = {
 
 @admin.register(Document)
 class DocumentAdmin(BaseModelAdmin):
+    # HOUSE RULE: the uploader is auto-set to request.user and read-only (never
+    # a selectable dropdown) via BaseModelAdmin.actor_field; the company FK is
+    # scoped/defaulted to the user's owned company by CompanyScopedAdminMixin.
+    actor_field = "uploaded_by"
+
     # Per-row purple pills (ActionVariant.PRIMARY). All resolve the row from the
     # scoped queryset; "process" re-runs synchronous extraction, "show" opens
     # the scoped chunk view, "schedule" is a Phase-4 placeholder (no-op).
@@ -197,8 +224,9 @@ class DocumentAdmin(BaseModelAdmin):
         )
 
     def save_model(self, request, obj, form, change):
-        if not change and not obj.uploaded_by_id:
-            obj.uploaded_by = request.user
+        # BaseModelAdmin stamps the actor (uploaded_by=request.user) + enforces
+        # the owned company server-side; this override only adds the Phase-1
+        # synchronous library auto-extract after the row is saved.
         super().save_model(request, obj, form, change)
         # A library document is extracted synchronously on save so its chunks
         # appear immediately (Phase 1 — no async broker). Chat attachments are
@@ -311,6 +339,13 @@ class DocumentChunkAdmin(BaseModelAdmin):
     search_fields = ("document__title", "content")
     list_display_links = ("id_short",)
 
+    def get_queryset(self, request):
+        # Stash the request so embedding_preview (a list_display callable that
+        # receives only ``obj``) can gate on request.user.is_superuser and read
+        # the real vector back from Chroma.
+        self._request = request
+        return super().get_queryset(request)
+
     @admin.display(description="ID")
     def id_short(self, obj):
         return str(obj.pk)[:8]
@@ -326,12 +361,20 @@ class DocumentChunkAdmin(BaseModelAdmin):
 
     @admin.display(description="Embedding")
     def embedding_preview(self, obj):
-        # PHASE 1: no embeddings exist yet. In OLD the vector preview is read
-        # back (superuser-only) from ChromaDB via ChromaVectorStore.get_embeddings
-        # — it is NOT a field on the row. PHASE 2 will wire this column to the
-        # real truncated vector preview ("[-0.05, 0.03, ...] +N more"). Until
-        # then every row shows a clear placeholder so the layout matches.
-        return "Not embedded (Phase 2)"
+        # Superuser-only: read the real vector back from Chroma (collection
+        # 'pdf_chunks'), keyed by the chunk ULID, and render the screenshot's
+        # truncated preview. Non-superusers (and any read failure / non-embedded
+        # chunk) always see '—'. The vector lives in Chroma, not on the row.
+        request = getattr(self, "_request", None)
+        if request is None or not request.user.is_superuser:
+            return "—"
+        try:
+            embeddings = ChromaVectorStore().get_embeddings(
+                [str(obj.pk)], collection=VECTOR_COLLECTION
+            )
+        except Exception:  # noqa: BLE001 - preview is best-effort
+            return "—"
+        return _embedding_preview_text(embeddings.get(str(obj.pk)))
 
     def has_add_permission(self, request):
         return False
