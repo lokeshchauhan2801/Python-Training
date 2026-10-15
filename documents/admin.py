@@ -38,11 +38,18 @@ from .models import Document, DocumentChunk
 from .services import VECTOR_COLLECTION
 from .tasks import dispatch_document_processing
 
-# The backends the "Process with…" confirmation page offers, in display order.
-_BACKEND_CHOICES = (
-    ("celery", "Celery"),
-    ("kafka", "Kafka"),
-    ("temporal", "Temporal"),
+# The four options the single "Schedule" dropdown/chooser offers, in display
+# order. Each maps to how the existing dispatcher is invoked:
+#   * "now"      → dispatch via the document's current/default backend (the old
+#                  "Process now": DEBUG celery inline / synchronous path).
+#   * "celery"   → set processing_backend='celery' and dispatch via celery.
+#   * "kafka"    → set processing_backend='kafka' and dispatch via kafka.
+#   * "temporal" → set processing_backend='temporal' and dispatch via temporal.
+_SCHEDULE_CHOICES = (
+    ("now", "Process now"),
+    ("celery", "Process with Celery"),
+    ("kafka", "Process with Kafka"),
+    ("temporal", "Process with Temporal"),
 )
 # How recently a document must have been updated to appear in the status poll.
 _STATUS_POLL_WINDOW_SECONDS = 600
@@ -86,11 +93,12 @@ class DocumentAdmin(BaseModelAdmin):
     # keeping the house-style/Unfold changelist intact.
     change_list_template = "admin/documents/document/change_list.html"
 
-    # Per-row purple pills (ActionVariant.PRIMARY). All resolve the row from the
-    # scoped queryset; "Process now" dispatches via the document's current/
-    # default backend, "Process with…" opens the backend chooser, "Show" opens
-    # the scoped chunk view.
-    actions_row = ("process_now", "process_with", "show_chunks")
+    # Per-row actions (ActionVariant.PRIMARY). All resolve the row from the
+    # scoped queryset. "Schedule" opens a single CSRF-protected chooser that
+    # expands to the four processing options (Process now / with Celery /
+    # with Kafka / with Temporal), each wired to the existing dispatcher;
+    # "Show" opens the scoped chunk view.
+    actions_row = ("schedule", "show_chunks")
 
     list_display = (
         "id_short",
@@ -183,47 +191,25 @@ class DocumentAdmin(BaseModelAdmin):
             obj.get_status_display(),
         )
 
-    # --- per-row pill actions ----------------------------------------------
+    # --- per-row actions ----------------------------------------------------
     @action(
-        description="Process now",
-        url_path="process-now",
+        description="Schedule",
+        url_path="schedule",
         variant=ActionVariant.PRIMARY,
     )
-    def process_now(self, request, object_id):
-        document = get_object_or_404(self.get_queryset(request), pk=object_id)
-        change_url = reverse("admin:documents_document_change", args=[document.pk])
-        if document.source != Document.SOURCE_LIBRARY:
-            self.message_user(
-                request,
-                "Only library documents can be processed.",
-                level=messages.WARNING,
-            )
-            return redirect(change_url)
-        # Dispatch via the document's current/default backend. In DEBUG the
-        # celery path runs inline on a background thread and completes quickly;
-        # the status poll surfaces the completion notification. Kafka/Temporal
-        # dispatch and return immediately (Queued) for their worker to pick up.
-        self._reset_for_reprocess(document)
-        _job_id, resolved = dispatch_document_processing(str(document.pk))
-        self.message_user(
-            request,
-            f"Queued “{document.title}” for processing via {resolved}.",
-            level=messages.INFO,
-        )
-        return redirect(change_url)
-
-    @action(
-        description="Process with…",
-        url_path="process-with",
-        variant=ActionVariant.PRIMARY,
-    )
-    def process_with(self, request, object_id):
-        # Backend chooser (replaces the Phase-1 "Schedule" no-op). GET renders a
-        # CSRF-protected radio form (default = the document's current backend);
-        # POST records the chosen backend, resets the row to a clean QUEUED
-        # state, and dispatches via that backend. Resolved from the scoped
-        # queryset ONLY (out-of-scope → 404); POST is CSRF-validated by the
-        # admin_view wrapper + the template's {% csrf_token %}.
+    def schedule(self, request, object_id):
+        # The single "Schedule" row control. GET renders a CSRF-protected chooser
+        # page whose four buttons expand the control to {Process now, Process
+        # with Celery, Process with Kafka, Process with Temporal}. POST reads the
+        # chosen option and dispatches via the EXISTING dispatcher seam:
+        #   * "now"      → dispatch via the document's current/default backend
+        #                  (DEBUG celery inline / synchronous path), exactly as
+        #                  the old "Process now".
+        #   * celery/kafka/temporal → record processing_backend and dispatch via
+        #                  that backend.
+        # Resolved from the scoped queryset ONLY (out-of-scope → 404); POST is
+        # CSRF-validated by the admin_view wrapper + the template's
+        # {% csrf_token %}.
         document = get_object_or_404(self.get_queryset(request), pk=object_id)
         change_url = reverse("admin:documents_document_change", args=[document.pk])
         if document.source != Document.SOURCE_LIBRARY:
@@ -235,16 +221,21 @@ class DocumentAdmin(BaseModelAdmin):
             return redirect(change_url)
 
         if request.method == "POST":
-            backend = request.POST.get("backend", "")
-            valid = {value for value, _label in _BACKEND_CHOICES}
-            if backend not in valid:
+            choice = request.POST.get("schedule", "")
+            valid = {value for value, _label in _SCHEDULE_CHOICES}
+            if choice not in valid:
                 self.message_user(
                     request,
-                    "Pick a valid backend (Celery, Kafka, or Temporal).",
+                    "Pick a valid option (Process now, Celery, Kafka, or "
+                    "Temporal).",
                     level=messages.WARNING,
                 )
                 return redirect(request.path)
-            document.processing_backend = backend
+            # "Process now" dispatches via the document's current/default backend
+            # (no explicit backend); the other three set the backend explicitly.
+            backend = None if choice == "now" else choice
+            if backend is not None:
+                document.processing_backend = backend
             self._reset_for_reprocess(document)
             _job_id, resolved = dispatch_document_processing(
                 str(document.pk), backend=backend
@@ -258,17 +249,16 @@ class DocumentAdmin(BaseModelAdmin):
 
         context = {
             **self.admin_site.each_context(request),
-            "title": f"Process with… — {document.title}",
+            "title": f"Schedule — {document.title}",
             "opts": self.model._meta,
             "original": document,
             "document": document,
-            "backends": _BACKEND_CHOICES,
-            "current_backend": document.processing_backend or "celery",
+            "schedule_options": _SCHEDULE_CHOICES,
             "change_url": change_url,
         }
         return TemplateResponse(
             request,
-            "admin/documents/document/process_backend.html",
+            "admin/documents/document/schedule.html",
             context,
         )
 

@@ -334,10 +334,10 @@ class UrlSsrfRejectionTests(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Backend-selection admin action (scoped + CSRF)
+# Single "Schedule" row control → four-option chooser (scoped + CSRF)
 # ---------------------------------------------------------------------------
 @override_settings(MEDIA_ROOT=_MEDIA)
-class ProcessWithAdminTests(TestCase):
+class ScheduleAdminTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.owner = User.objects.create_user(email="owner@example.com", password="x")
@@ -368,39 +368,85 @@ class ProcessWithAdminTests(TestCase):
             email="root@example.com", password="x"
         )
 
-    def _process_with_url(self, doc):
-        return reverse("admin:documents_document_process_with", args=[doc.pk])
+    def _schedule_url(self, doc):
+        return reverse("admin:documents_document_schedule", args=[doc.pk])
 
-    def test_get_renders_unfold_shell(self):
+    def test_changelist_shows_schedule_control(self):
+        # The changelist renders with the Unfold sidebar and the single
+        # "Schedule" row control is wired in (its action URL is referenced).
         self.client.force_login(self.admin)
         doc = _make_document(self.company, self.owner)
-        resp = self.client.get(self._process_with_url(doc))
+        resp = self.client.get("/admin/documents/document/")
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
         self.assertIn("sidebar", body.lower())
-        self.assertIn("Celery", body)
-        self.assertIn("Temporal", body)
+        self.assertIn(f"/admin/documents/document/{doc.pk}/schedule/", body)
 
-    def test_post_sets_backend_and_dispatches(self):
+    def test_get_chooser_renders_four_options_in_unfold_shell(self):
+        self.client.force_login(self.admin)
+        doc = _make_document(self.company, self.owner)
+        resp = self.client.get(self._schedule_url(doc))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        # Unfold shell intact + exactly the four options as submit buttons.
+        self.assertIn("sidebar", body.lower())
+        self.assertIn("Process now", body)
+        self.assertIn("Process with Celery", body)
+        self.assertIn("Process with Kafka", body)
+        self.assertIn("Process with Temporal", body)
+
+    def test_post_process_now_dispatches_default_backend(self):
+        # "Process now" dispatches WITHOUT an explicit backend (the document's
+        # current/default), exactly as the old "Process now".
         self.client.force_login(self.admin)
         doc = _make_document(self.company, self.owner)
         with mock.patch(
             "documents.admin.dispatch_document_processing",
-            return_value=("job-1", "kafka"),
+            return_value=("job-0", "local-background"),
         ) as dispatch:
-            resp = self.client.post(
-                self._process_with_url(doc), {"backend": "kafka"}
-            )
+            resp = self.client.post(self._schedule_url(doc), {"schedule": "now"})
         self.assertEqual(resp.status_code, 302)
         dispatch.assert_called_once()
         _args, kwargs = dispatch.call_args
-        self.assertEqual(kwargs.get("backend"), "kafka")
-        doc.refresh_from_db()
-        self.assertEqual(doc.processing_backend, "kafka")
+        self.assertIsNone(kwargs.get("backend"))
+
+    def test_post_each_backend_sets_and_dispatches(self):
+        # Each of the three explicit options records processing_backend and
+        # dispatches via that backend through the EXISTING seam.
+        for backend in ("celery", "kafka", "temporal"):
+            with self.subTest(backend=backend):
+                self.client.force_login(self.admin)
+                doc = _make_document(self.company, self.owner)
+                with mock.patch(
+                    "documents.admin.dispatch_document_processing",
+                    return_value=(f"job-{backend}", backend),
+                ) as dispatch:
+                    resp = self.client.post(
+                        self._schedule_url(doc), {"schedule": backend}
+                    )
+                self.assertEqual(resp.status_code, 302)
+                dispatch.assert_called_once()
+                _args, kwargs = dispatch.call_args
+                self.assertEqual(kwargs.get("backend"), backend)
+                doc.refresh_from_db()
+                self.assertEqual(doc.processing_backend, backend)
+
+    def test_post_invalid_option_warns(self):
+        self.client.force_login(self.admin)
+        doc = _make_document(self.company, self.owner)
+        with mock.patch(
+            "documents.admin.dispatch_document_processing"
+        ) as dispatch:
+            resp = self.client.post(
+                self._schedule_url(doc), {"schedule": "bogus"}
+            )
+        # Redirects back to the chooser without dispatching.
+        self.assertEqual(resp.status_code, 302)
+        dispatch.assert_not_called()
 
     def test_out_of_scope_404_for_non_superuser(self):
         # A non-superuser staff owner cannot act on another company's document.
         other_doc = _make_document(self.other_co, self.other_owner)
         self.client.force_login(self.owner)
-        resp = self.client.get(self._process_with_url(other_doc))
+        resp = self.client.get(self._schedule_url(other_doc))
         self.assertEqual(resp.status_code, 404)
