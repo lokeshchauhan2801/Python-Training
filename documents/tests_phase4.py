@@ -368,6 +368,18 @@ class ScheduleAdminTests(TestCase):
             email="root@example.com", password="x"
         )
 
+    def _login_admin_on_company(self):
+        """Log the superuser in with ``self.company`` as the ACTIVE company.
+
+        Admin changelists + the dispatch endpoint now scope to the session
+        active company (global switcher), so the superuser must be "viewing"
+        the company whose document the test exercises.
+        """
+        self.client.force_login(self.admin)
+        session = self.client.session
+        session["active_company_id"] = str(self.company.id)
+        session.save()
+
     def _dispatch_url(self, doc):
         return reverse("admin:documents_document_dispatch", args=[doc.pk])
 
@@ -376,7 +388,7 @@ class ScheduleAdminTests(TestCase):
         # "Schedule" column: an "Action" button + an inline dropdown carrying
         # the four options — NOT a link that navigates to a separate /schedule/
         # page (that standalone page is retired).
-        self.client.force_login(self.admin)
+        self._login_admin_on_company()
         doc = _make_document(self.company, self.owner)
         resp = self.client.get("/admin/documents/document/")
         self.assertEqual(resp.status_code, 200)
@@ -412,7 +424,7 @@ class ScheduleAdminTests(TestCase):
     def test_dispatch_process_now_uses_default_backend(self):
         # "Process now" (backend="now") dispatches WITHOUT an explicit backend
         # (the document's current/default), exactly as the old "Process now".
-        self.client.force_login(self.admin)
+        self._login_admin_on_company()
         doc = _make_document(self.company, self.owner)
         with mock.patch(
             "documents.admin.dispatch_document_processing",
@@ -430,7 +442,7 @@ class ScheduleAdminTests(TestCase):
         # that backend through the EXISTING seam, returning JSON (no redirect).
         for backend in ("celery", "kafka", "temporal"):
             with self.subTest(backend=backend):
-                self.client.force_login(self.admin)
+                self._login_admin_on_company()
                 doc = _make_document(self.company, self.owner)
                 with mock.patch(
                     "documents.admin.dispatch_document_processing",
@@ -447,7 +459,7 @@ class ScheduleAdminTests(TestCase):
                 self.assertEqual(doc.processing_backend, backend)
 
     def test_dispatch_invalid_option_400(self):
-        self.client.force_login(self.admin)
+        self._login_admin_on_company()
         doc = _make_document(self.company, self.owner)
         with mock.patch(
             "documents.admin.dispatch_document_processing"

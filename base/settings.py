@@ -65,10 +65,12 @@ ROOT_URLCONF = "base.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        # App-local templates only (APP_DIRS=True, NO central DIRS). This
-        # deliberately diverges from the sibling django-unfold project, which
-        # uses a central templates/ tree.
-        "DIRS": [],
+        # A single project-level templates dir (base/templates/) is required to
+        # override Unfold's header: because `unfold` is FIRST in INSTALLED_APPS,
+        # an app-local unfold/helpers/*.html would NOT win under APP_DIRS — only
+        # a filesystem DIRS entry reliably overrides the stock Unfold template.
+        # APP_DIRS stays True so every app's own templates still load.
+        "DIRS": [BASE_DIR / "base" / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -78,6 +80,9 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 # ChatGPT-style recent-chat history in the Unfold sidebar.
                 "chat.context_processors.admin_chat_history",
+                # Global company switcher: active company + accessible set on
+                # every admin + chat response (session-based, no model change).
+                "company.context_processors.active_company",
             ],
         },
     },

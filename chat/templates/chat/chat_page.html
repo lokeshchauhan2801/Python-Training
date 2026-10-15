@@ -180,7 +180,9 @@ ChatService.process_message), and the JS refreshes the list so it shows.
        data-sessions-url="{% url 'chat:sessions_json' %}"
        data-new-url="{% url 'chat:new_session' %}"
        data-base-url="/chat/"
-       data-preselect="{{ preselect_session_id }}">
+       data-preselect="{{ preselect_session_id }}"
+       data-active-company="{{ active_company.id|default:'' }}"
+       data-set-active-url="{{ set_active_company_url }}">
 
     <p id="chat-empty"
        class="hidden mb-4 text-red-600 text-sm dark:text-red-400">
@@ -343,6 +345,11 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     const newUrl = root.dataset.newUrl;        // POST-only JSON create (BUG 1)
     const baseUrl = root.dataset.baseUrl;      // "/chat/"
     const preselectId = root.dataset.preselect || "";
+    // The GLOBAL active company (session-based) + its setter URL. The chat
+    // company selector is bound to the SAME session key as the header switcher:
+    // it preselects the active company on load and writes back to it on change.
+    const activeCompanyId = root.dataset.activeCompany || "";
+    const setActiveUrl = root.dataset.setActiveUrl || "";
 
     const companySel = document.getElementById("chat-company");
     const emptyEl = document.getElementById("chat-empty");
@@ -883,6 +890,12 @@ ChatService.process_message), and the JS refreshes the list so it shows.
             opt.textContent = c.name;
             companySel.appendChild(opt);
           });
+          // Preselect the GLOBAL active company so the chat surface opens on the
+          // same company the header switcher shows (shared session).
+          if (activeCompanyId) {
+            const match = companies.some(function (c) { return c.id === activeCompanyId; });
+            if (match) { companySel.value = activeCompanyId; }
+          }
           if (typeof then === "function") { then(); }
         })
         .catch(function () { setStatus("Could not load companies."); });
@@ -938,11 +951,31 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       });
     }
 
+    // Persist the chosen company as the GLOBAL active company (same session key
+    // as the header switcher) so switching here follows everywhere. Fire-and-
+    // forget AJAX POST; failures do not block the in-page company switch.
+    function persistActiveCompany(companyId) {
+      if (!setActiveUrl || !companyId) { return; }
+      const body = new URLSearchParams();
+      body.append("company", companyId);
+      fetch(setActiveUrl, {
+        method: "POST",
+        headers: jsonHeaders({
+          "X-CSRFToken": getCookie("csrftoken"),
+          "Content-Type": "application/x-www-form-urlencoded"
+        }),
+        credentials: "same-origin",
+        body: body.toString()
+      }).catch(function () { /* non-blocking */ });
+    }
+
     companySel.addEventListener("change", function () {
       currentSessionId = null;
       renderMessages([]);
       setComposerEnabled(false, false);
       setConversationHeader("Conversation", false);
+      // Mirror the choice into the global active-company session key.
+      persistActiveCompany(companySel.value);
       // When switching companies, open the most-recent session for that
       // company (if any) so the transcript + composer are usable right away.
       loadSessions(function (sessions) {

@@ -73,56 +73,55 @@ class CompanyScopedAdminMixin:
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        if request.user.is_superuser:
-            return qs
         model_field_names = {f.name for f in self.model._meta.get_fields()}
         if "company" in model_field_names:
-            return qs.filter(company__owner=request.user)
+            # Scope every company-scoped changelist to the ACTIVE company (the
+            # session-resolved global switcher value) — for BOTH superusers and
+            # non-superusers, matching the OLD project: a system admin sees the
+            # active company's data, not every company's. When the user has no
+            # accessible company, show nothing (clean empty state, no deref).
+            from company.active import active_company_for_request
+
+            active = active_company_for_request(request)
+            if active is None:
+                return qs.none()
+            return qs.filter(company=active)
+        # Models WITHOUT a company field (notably Company itself) keep the
+        # owner-based scoping so the Companies changelist still lists ALL of the
+        # user's companies to switch between — never filtered to one.
+        if request.user.is_superuser:
+            return qs
         if "owner" in model_field_names:
             return qs.filter(owner=request.user)
         return qs
 
     def _owned_companies(self, request):
-        """Companies the requesting user may PICK from in the form.
+        """Companies the requesting user may PICK from in the add/change form.
 
-        Superusers keep the full queryset (they may choose any company in the
-        change form); everyone else is limited to companies they own. This is
-        the picker scope, NOT the auto-fill default — the default is resolved by
-        ``_resolve_active_company`` from the companies the user actually OWNS.
+        This is the switchable set (owned, or all active for a superuser), the
+        same rule the global switcher uses — NOT the auto-fill default (which is
+        the active company resolved by ``_resolve_active_company``).
         """
-        from company.models import Company
+        from company.active import allowed_companies_for_user
 
-        if request.user.is_superuser:
-            return Company.objects.all()
-        return Company.objects.filter(owner=request.user)
+        return allowed_companies_for_user(request.user)
 
     def _resolve_active_company(self, request):
-        """Resolve the user's active/default owned company for server-side fill.
+        """The single source of truth for the server-side company default.
 
-        Reuses the project's owner-based "active company" rule (the same
-        ``company__owner=request.user`` ownership the chat surfaces use — see
-        ``chat.scope.allowed_companies`` and
-        ``chat.api.serializers.RequiredCompanyResolutionMixin``):
-
-        * exactly one owned company → that company;
-        * several owned companies, no explicit selection → a deterministic
-          default (the most-recently created owned company) rather than erroring,
-          so a required ``company`` is never left null;
-        * no owned company → ``None`` (the caller surfaces a clean admin error).
-
-        This resolves by OWNERSHIP for every user, including superusers, so a
-        superuser who owns a company gets it auto-filled when the hidden-company
-        add form submits no company.
+        Returns the session-resolved active company (from the global switcher),
+        or ``None`` when the user has no accessible company (the caller surfaces
+        a clean admin error).
         """
-        from company.models import Company
+        from company.active import active_company_for_request
 
-        owned = Company.objects.filter(owner=request.user).order_by(
-            "-created_at", "-id"
-        )
-        return owned.first()
+        return active_company_for_request(request)
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        if db_field.name == "company" and not request.user.is_superuser:
+        if db_field.name == "company":
+            # Narrow the picker to the switchable set and default it to the
+            # active company — for superusers too (a superuser may still pick any
+            # accessible company, but the add form defaults to the active one).
             kwargs["queryset"] = self._owned_companies(request)
             active = self._resolve_active_company(request)
             if active is not None:
@@ -150,20 +149,18 @@ class CompanyScopedAdminMixin:
         active = self._resolve_active_company(request)
         if not obj.company_id:
             # No company on the row (hidden add form / tampered POST): stamp the
-            # resolved owned default. Applies to superusers too, so a hidden
-            # company field never leaves company_id null.
+            # active company. Applies to superusers too, so a hidden company
+            # field never leaves company_id null.
             if active is None:
                 raise PermissionDenied(
                     "You must have a company before adding a document."
                 )
             obj.company = active
             return
-        # Superusers may deliberately pick any company in the change form; honor
-        # a company that is already set for them.
-        if request.user.is_superuser:
-            return
-        # A non-superuser submitted a company they do not own: coerce to the
-        # owned default when there is one, else reject.
+        # A submitted company the user may NOT access (not in the accessible
+        # set — owned, or all active for a superuser): coerce to the active
+        # company when there is one, else reject. A superuser's accessible set is
+        # all active companies, so their explicit pick is honored.
         if not self._owned_companies(request).filter(pk=obj.company_id).exists():
             if active is None:
                 raise PermissionDenied(

@@ -24,6 +24,18 @@ def allowed_companies(request):
     return Company.objects.filter(owner=request.user)
 
 
+def active_or_none(request):
+    """The session-resolved active company (global switcher), or ``None``.
+
+    Exposed so the chat views can DEFAULT to the active company (shared-session
+    sync with the global header switcher) without hard-filtering
+    ``scoped_sessions`` itself — the views still accept an explicit ``company``.
+    """
+    from company.active import active_company_for_request
+
+    return active_company_for_request(request)
+
+
 def scoped_sessions(request):
     """Non-deleted sessions visible to the requesting user, newest first.
 

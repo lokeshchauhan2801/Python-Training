@@ -490,6 +490,12 @@ class DocumentAdminHttpTests(_FakeLLMMixin, TestCase):
     def setUp(self):
         super().setUp()
         self.client.force_login(self.admin)
+        # Admin changelists + object views now scope to the session active
+        # company (global switcher). This superuser owns no company, so pin the
+        # active company to the one these tests operate on.
+        session = self.client.session
+        session["active_company_id"] = str(self.company.id)
+        session.save()
 
     def _ready_document(self, company, owner):
         doc = _make_document(company, owner, "data.csv", _csv_bytes())
@@ -916,10 +922,14 @@ class AdminScopingSecurityTests(_TmpChromaMixin, TestCase):
         return DocumentAdmin(Document, site)
 
     def _request(self, user):
+        from django.contrib.sessions.backends.db import SessionStore
         from django.test import RequestFactory
 
         request = RequestFactory().post("/admin/documents/document/add/")
         request.user = user
+        # The active-company resolver reads/writes request.session, so a real
+        # session must be attached (RequestFactory does not add one).
+        request.session = SessionStore()
         return request
 
     def test_company_choices_limited_to_owned_for_non_superuser(self):

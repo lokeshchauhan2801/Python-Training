@@ -328,6 +328,52 @@ resolve to 404.
 
 ---
 
+## Global company switcher (active company)
+
+The project is multi-tenant on an **owner** basis: a company's `owner` FK decides
+access, and a **superuser** may act within any active company. The **active
+company** is the one your admin pages and the `/chat/` surface currently operate
+within. It is pure **session state** — `request.session["active_company_id"]` —
+with **no model/schema change and no migration**.
+
+- **Where it shows.** A company `<select>` is rendered in the **Unfold header**
+  (top-right) on **every** admin page and on `/chat/`, via a project override of
+  Unfold's `unfold/helpers/userlinks.html` (served from `base/templates/`, which is
+  on `TEMPLATES["DIRS"]`) plus the `company.context_processors.active_company`
+  context processor. It only appears when you can access **more than one** company;
+  with exactly one it shows the company name as static text, and with none it shows
+  nothing.
+- **How it resolves** (`company/active.py`):
+  - `allowed_companies_for_user(user)` — the companies you may access: **all active
+    companies** for a superuser, otherwise the **active companies you own**
+    (newest first).
+  - `can_switch_company(user)` — true when that set has more than one company.
+  - `active_company_for_request(request)` — returns the valid session selection, or
+    pops an invalid one and **auto-selects** the most-recent accessible company
+    (writing it back to the session), or `None` when you have no accessible company.
+- **Switching.** Changing the header `<select>` POSTs to
+  **`/company/set-active-company/`** (`company:set_active_company`, login-required,
+  POST-only, CSRF-protected). The view validates that you may access the chosen
+  company before storing it, then reloads the current page (or returns JSON for an
+  AJAX call). You can never switch to a company you cannot access (403).
+- **What follows the active company.**
+  - **Admin changelists** (Documents, Document chunks, Scrape jobs, Chat models)
+    show only the **active company's** rows — for superusers too (a system admin
+    sees the active company's data, not every company's). The **Companies**
+    changelist itself stays owner-scoped so you always see the full set to switch
+    between.
+  - **Add forms** default the (hidden) `company` to the active company and stamp it
+    server-side, preserving the NOT-NULL `company` guarantee.
+  - **`/chat/`** uses the **same session key**: the chat company selector preselects
+    the active company and writes back to it on change, and a **new chat session**
+    is created under the active company.
+- **No accessible company.** Everything degrades cleanly (never a 500): changelists
+  return an empty list, the admin add POST yields a clean `PermissionDenied` (403)
+  instead of an `IntegrityError`, the header switcher renders nothing, and `/chat/`
+  shows its "No companies available" empty state.
+
+---
+
 ## Admin learning map
 
 The admin is the primary UI and follows one house style across apps (a date-drill

@@ -32,7 +32,7 @@ from django.views.decorators.http import require_http_methods
 from basics.llm import LLMBackendError, LLMConfigurationError
 from documents.models import Document
 
-from .scope import allowed_companies, scoped_sessions
+from .scope import active_or_none, allowed_companies, scoped_sessions
 from .services import ChatProviderError, ChatRetrievalError, ChatService
 
 # A ULID is exactly 26 Crockford base32 characters.
@@ -170,7 +170,10 @@ def new_session(request):
         # Re-validate ownership server-side; out-of-scope => 404 (no leak).
         company = get_object_or_404(allowed, pk=company_id)
     else:
-        company = allowed.order_by("name").first()
+        # No explicit company: default to the GLOBAL active company (shared
+        # session with the header switcher), falling back to the first accessible
+        # company only when there is no active company resolved.
+        company = active_or_none(request) or allowed.order_by("name").first()
 
     from .models import ConversationSession
 
