@@ -368,51 +368,66 @@ class ScheduleAdminTests(TestCase):
             email="root@example.com", password="x"
         )
 
-    def _schedule_url(self, doc):
-        return reverse("admin:documents_document_schedule", args=[doc.pk])
+    def _dispatch_url(self, doc):
+        return reverse("admin:documents_document_dispatch", args=[doc.pk])
 
-    def test_changelist_shows_schedule_control(self):
-        # The changelist renders with the Unfold sidebar and the single
-        # "Schedule" row control is wired in (its action URL is referenced).
+    def test_changelist_shows_inline_schedule_dropdown(self):
+        # The changelist renders with the Unfold sidebar and the IN-ROW
+        # "Schedule" column: an "Action" button + an inline dropdown carrying
+        # the four options — NOT a link that navigates to a separate /schedule/
+        # page (that standalone page is retired).
         self.client.force_login(self.admin)
         doc = _make_document(self.company, self.owner)
         resp = self.client.get("/admin/documents/document/")
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
         self.assertIn("sidebar", body.lower())
-        self.assertIn(f"/admin/documents/document/{doc.pk}/schedule/", body)
-
-    def test_get_chooser_renders_four_options_in_unfold_shell(self):
-        self.client.force_login(self.admin)
-        doc = _make_document(self.company, self.owner)
-        resp = self.client.get(self._schedule_url(doc))
-        self.assertEqual(resp.status_code, 200)
-        body = resp.content.decode()
-        # Unfold shell intact + exactly the four options as submit buttons.
-        self.assertIn("sidebar", body.lower())
+        # The in-row control + its four dropdown items are present inline.
+        self.assertIn("schedule-toggle", body)
+        self.assertIn("schedule-menu", body)
+        self.assertIn("Action", body)
         self.assertIn("Process now", body)
-        self.assertIn("Process with Celery", body)
-        self.assertIn("Process with Kafka", body)
-        self.assertIn("Process with Temporal", body)
+        self.assertIn("Celery", body)
+        self.assertIn("Kafka", body)
+        self.assertIn("Temporal", body)
+        self.assertIn(f'data-doc-id="{doc.pk}"', body)
+        for backend in ("now", "celery", "kafka", "temporal"):
+            self.assertIn(f'data-backend="{backend}"', body)
+        # The AJAX dispatch endpoint is wired, and no row navigates to the old
+        # standalone /schedule/ page.
+        self.assertIn(
+            "/admin/documents/document/__PK__/dispatch/", body
+        )
+        self.assertNotIn(
+            f"/admin/documents/document/{doc.pk}/schedule/", body
+        )
 
-    def test_post_process_now_dispatches_default_backend(self):
-        # "Process now" dispatches WITHOUT an explicit backend (the document's
-        # current/default), exactly as the old "Process now".
+    def test_old_schedule_page_is_retired(self):
+        # The standalone /schedule/ page URL no longer resolves.
+        from django.urls import NoReverseMatch
+
+        with self.assertRaises(NoReverseMatch):
+            reverse("admin:documents_document_schedule", args=["x"])
+
+    def test_dispatch_process_now_uses_default_backend(self):
+        # "Process now" (backend="now") dispatches WITHOUT an explicit backend
+        # (the document's current/default), exactly as the old "Process now".
         self.client.force_login(self.admin)
         doc = _make_document(self.company, self.owner)
         with mock.patch(
             "documents.admin.dispatch_document_processing",
             return_value=("job-0", "local-background"),
         ) as dispatch:
-            resp = self.client.post(self._schedule_url(doc), {"schedule": "now"})
-        self.assertEqual(resp.status_code, 302)
+            resp = self.client.post(self._dispatch_url(doc), {"backend": "now"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/json")
         dispatch.assert_called_once()
         _args, kwargs = dispatch.call_args
         self.assertIsNone(kwargs.get("backend"))
 
-    def test_post_each_backend_sets_and_dispatches(self):
-        # Each of the three explicit options records processing_backend and
-        # dispatches via that backend through the EXISTING seam.
+    def test_dispatch_each_backend_sets_and_dispatches(self):
+        # Each explicit option records processing_backend and dispatches via
+        # that backend through the EXISTING seam, returning JSON (no redirect).
         for backend in ("celery", "kafka", "temporal"):
             with self.subTest(backend=backend):
                 self.client.force_login(self.admin)
@@ -422,31 +437,49 @@ class ScheduleAdminTests(TestCase):
                     return_value=(f"job-{backend}", backend),
                 ) as dispatch:
                     resp = self.client.post(
-                        self._schedule_url(doc), {"schedule": backend}
+                        self._dispatch_url(doc), {"backend": backend}
                     )
-                self.assertEqual(resp.status_code, 302)
+                self.assertEqual(resp.status_code, 200)
                 dispatch.assert_called_once()
                 _args, kwargs = dispatch.call_args
                 self.assertEqual(kwargs.get("backend"), backend)
                 doc.refresh_from_db()
                 self.assertEqual(doc.processing_backend, backend)
 
-    def test_post_invalid_option_warns(self):
+    def test_dispatch_invalid_option_400(self):
         self.client.force_login(self.admin)
         doc = _make_document(self.company, self.owner)
         with mock.patch(
             "documents.admin.dispatch_document_processing"
         ) as dispatch:
             resp = self.client.post(
-                self._schedule_url(doc), {"schedule": "bogus"}
+                self._dispatch_url(doc), {"backend": "bogus"}
             )
-        # Redirects back to the chooser without dispatching.
-        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.status_code, 400)
         dispatch.assert_not_called()
 
-    def test_out_of_scope_404_for_non_superuser(self):
+    def test_dispatch_rejects_get(self):
+        # The dispatch endpoint is POST-only.
+        self.client.force_login(self.admin)
+        doc = _make_document(self.company, self.owner)
+        resp = self.client.get(self._dispatch_url(doc))
+        self.assertEqual(resp.status_code, 405)
+
+    def test_dispatch_enforces_csrf(self):
+        # With a CSRF-enforcing client, a POST without the token is rejected.
+        from django.test import Client
+
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+        doc = _make_document(self.company, self.owner)
+        resp = csrf_client.post(self._dispatch_url(doc), {"backend": "now"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_dispatch_out_of_scope_404_for_non_superuser(self):
         # A non-superuser staff owner cannot act on another company's document.
         other_doc = _make_document(self.other_co, self.other_owner)
         self.client.force_login(self.owner)
-        resp = self.client.get(self._schedule_url(other_doc))
+        resp = self.client.post(
+            self._dispatch_url(other_doc), {"backend": "now"}
+        )
         self.assertEqual(resp.status_code, 404)

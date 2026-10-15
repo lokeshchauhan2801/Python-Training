@@ -26,7 +26,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from unfold.decorators import action
 from unfold.enums import ActionVariant
 
@@ -47,9 +47,9 @@ from .tasks import dispatch_document_processing
 #   * "temporal" → set processing_backend='temporal' and dispatch via temporal.
 _SCHEDULE_CHOICES = (
     ("now", "Process now"),
-    ("celery", "Process with Celery"),
-    ("kafka", "Process with Kafka"),
-    ("temporal", "Process with Temporal"),
+    ("celery", "Celery"),
+    ("kafka", "Kafka"),
+    ("temporal", "Temporal"),
 )
 # How recently a document must have been updated to appear in the status poll.
 _STATUS_POLL_WINDOW_SECONDS = 600
@@ -94,11 +94,11 @@ class DocumentAdmin(BaseModelAdmin):
     change_list_template = "admin/documents/document/change_list.html"
 
     # Per-row actions (ActionVariant.PRIMARY). All resolve the row from the
-    # scoped queryset. "Schedule" opens a single CSRF-protected chooser that
-    # expands to the four processing options (Process now / with Celery /
-    # with Kafka / with Temporal), each wired to the existing dispatcher;
-    # "Show" opens the scoped chunk view.
-    actions_row = ("schedule", "show_chunks")
+    # scoped queryset. "Show" opens the scoped chunk view. The processing
+    # backend chooser is NOT a row-action anymore: it is the in-row "Schedule"
+    # column below (an "Action" button + inline dropdown that POSTs to the
+    # AJAX dispatch endpoint — no separate page, no full reload).
+    actions_row = ("show_chunks",)
 
     list_display = (
         "id_short",
@@ -107,6 +107,7 @@ class DocumentAdmin(BaseModelAdmin):
         "status_badge",
         "chunk_count",
         "processing_backend",
+        "schedule_column",
         "created_by",
         "created_at",
     )
@@ -191,75 +192,61 @@ class DocumentAdmin(BaseModelAdmin):
             obj.get_status_display(),
         )
 
-    # --- per-row actions ----------------------------------------------------
-    @action(
-        description="Schedule",
-        url_path="schedule",
-        variant=ActionVariant.PRIMARY,
-    )
-    def schedule(self, request, object_id):
-        # The single "Schedule" row control. GET renders a CSRF-protected chooser
-        # page whose four buttons expand the control to {Process now, Process
-        # with Celery, Process with Kafka, Process with Temporal}. POST reads the
-        # chosen option and dispatches via the EXISTING dispatcher seam:
-        #   * "now"      → dispatch via the document's current/default backend
-        #                  (DEBUG celery inline / synchronous path), exactly as
-        #                  the old "Process now".
-        #   * celery/kafka/temporal → record processing_backend and dispatch via
-        #                  that backend.
-        # Resolved from the scoped queryset ONLY (out-of-scope → 404); POST is
-        # CSRF-validated by the admin_view wrapper + the template's
-        # {% csrf_token %}.
-        document = get_object_or_404(self.get_queryset(request), pk=object_id)
-        change_url = reverse("admin:documents_document_change", args=[document.pk])
-        if document.source != Document.SOURCE_LIBRARY:
-            self.message_user(
-                request,
-                "Only library documents can be processed.",
-                level=messages.WARNING,
+    # --- Schedule column (in-row inline dropdown) ---------------------------
+    @admin.display(description="Schedule")
+    def schedule_column(self, obj):
+        # Renders the in-row "Schedule" control: an "Action" button plus a
+        # hidden dropdown menu (the four processing options). Clicking "Action"
+        # toggles the dropdown open directly below the button; selecting an item
+        # POSTs to the AJAX dispatch endpoint (see schedule_dropdown.js) without
+        # navigating away. Only library documents can be processed, so non-
+        # library rows show a disabled hint instead of the control.
+        #
+        # The markup is a fixed template with ONLY server-controlled values
+        # (pk, backend keys, static labels) interpolated via format_html's auto-
+        # escaping — never raw user text — so nothing here can inject markup.
+        if obj.source != Document.SOURCE_LIBRARY:
+            return format_html(
+                '<span class="text-font-subtle-light '
+                'dark:text-font-subtle-dark text-sm">—</span>'
             )
-            return redirect(change_url)
 
-        if request.method == "POST":
-            choice = request.POST.get("schedule", "")
-            valid = {value for value, _label in _SCHEDULE_CHOICES}
-            if choice not in valid:
-                self.message_user(
-                    request,
-                    "Pick a valid option (Process now, Celery, Kafka, or "
-                    "Temporal).",
-                    level=messages.WARNING,
-                )
-                return redirect(request.path)
-            # "Process now" dispatches via the document's current/default backend
-            # (no explicit backend); the other three set the backend explicitly.
-            backend = None if choice == "now" else choice
-            if backend is not None:
-                document.processing_backend = backend
-            self._reset_for_reprocess(document)
-            _job_id, resolved = dispatch_document_processing(
-                str(document.pk), backend=backend
-            )
-            self.message_user(
-                request,
-                f"Queued “{document.title}” for processing via {resolved}.",
-                level=messages.INFO,
-            )
-            return redirect(change_url)
-
-        context = {
-            **self.admin_site.each_context(request),
-            "title": f"Schedule — {document.title}",
-            "opts": self.model._meta,
-            "original": document,
-            "document": document,
-            "schedule_options": _SCHEDULE_CHOICES,
-            "change_url": change_url,
-        }
-        return TemplateResponse(
-            request,
-            "admin/documents/document/schedule.html",
-            context,
+        items = format_html_join(
+            "",
+            (
+                '<button type="button" role="menuitem" '
+                'class="schedule-menu-item block w-full text-left px-4 py-2 '
+                'text-sm text-font-default-light dark:text-font-default-dark '
+                'hover:bg-primary-50 dark:hover:bg-primary-900/40 '
+                'hover:text-primary-600 dark:hover:text-primary-400 '
+                'cursor-pointer" '
+                'data-doc-id="{}" data-backend="{}">{}</button>'
+            ),
+            (
+                (str(obj.pk), value, label)
+                for value, label in _SCHEDULE_CHOICES
+            ),
+        )
+        return format_html(
+            '<div class="schedule-cell relative inline-block text-left">'
+            '  <button type="button" '
+            '          class="schedule-toggle inline-flex items-center gap-1 '
+            'rounded-default border border-primary-600 bg-primary-600 '
+            'px-3 py-1 text-sm font-medium text-white '
+            'hover:bg-primary-700 cursor-pointer" '
+            '          aria-haspopup="true" aria-expanded="false" '
+            '          data-doc-id="{}">'
+            '    <span>Action</span>'
+            '    <span class="material-symbols-outlined text-base '
+            'leading-none">expand_more</span>'
+            '  </button>'
+            '  <div class="schedule-menu hidden absolute z-50 mt-1 w-44 '
+            'origin-top-left rounded-default border border-base-200 '
+            'dark:border-base-700 bg-white dark:bg-base-800 shadow-lg py-1" '
+            '       role="menu" aria-orientation="vertical">{}</div>'
+            '</div>',
+            str(obj.pk),
+            items,
         )
 
     def _reset_for_reprocess(self, document):
@@ -330,6 +317,11 @@ class DocumentAdmin(BaseModelAdmin):
                 name="documents_document_status_json",
             ),
             path(
+                "<str:pk>/dispatch/",
+                self.admin_site.admin_view(self.dispatch_view),
+                name="documents_document_dispatch",
+            ),
+            path(
                 "<str:pk>/chunks-json/",
                 self.admin_site.admin_view(self.chunks_json_view),
                 name="documents_document_chunks_json",
@@ -372,6 +364,53 @@ class DocumentAdmin(BaseModelAdmin):
                     }
                     for row in rows
                 ]
+            }
+        )
+
+    def dispatch_view(self, request, pk):
+        # AJAX dispatch endpoint for the in-row "Schedule" dropdown. POST only
+        # (GET → 405) and CSRF-protected by the admin_view wrapper. Resolves the
+        # document from the permission-scoped queryset ONLY (out-of-scope → 404)
+        # and dispatches via the EXISTING seam:
+        #   * "now"      → dispatch via the document's current/default backend
+        #                  (DEBUG celery inline / synchronous path), exactly as
+        #                  the old "Process now".
+        #   * celery/kafka/temporal → record processing_backend and dispatch via
+        #                  that backend.
+        # Returns JSON the dropdown JS uses to update the row's status cell;
+        # never navigates and never does a full-page reload.
+        if request.method != "POST":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        document = get_object_or_404(self.get_queryset(request), pk=pk)
+        if document.source != Document.SOURCE_LIBRARY:
+            return JsonResponse(
+                {"detail": "Only library documents can be processed."},
+                status=400,
+            )
+        choice = request.POST.get("backend", "")
+        valid = {value for value, _label in _SCHEDULE_CHOICES}
+        if choice not in valid:
+            return JsonResponse(
+                {"detail": "Pick a valid option (now, celery, kafka, temporal)."},
+                status=400,
+            )
+        # "Process now" dispatches via the document's current/default backend
+        # (no explicit backend); the other three set the backend explicitly.
+        backend = None if choice == "now" else choice
+        if backend is not None:
+            document.processing_backend = backend
+        self._reset_for_reprocess(document)
+        _job_id, resolved = dispatch_document_processing(
+            str(document.pk), backend=backend
+        )
+        document.refresh_from_db()
+        return JsonResponse(
+            {
+                "status": document.status,
+                "status_display": document.get_status_display(),
+                "backend": resolved,
+                "document_id": str(document.pk),
+                "title": document.title,
             }
         )
 

@@ -16,4 +16,15 @@ built from server data.
 <div id="documents-status-poll"
      data-status-url="{% url 'admin:documents_document_status_json' %}"></div>
 <script src="{% static 'documents/js/status_poll.js' %}"></script>
+
+{% comment %}
+In-row "Schedule" column control. The dropdown markup is rendered per row by
+the schedule_column list_display method; this script only wires the toggle +
+the AJAX dispatch. The dispatch URL is a reverse()d template carrying a
+placeholder pk the JS swaps for each row's data-doc-id — so no URL is built
+from server-supplied text. CSRF comes from the admin cookie.
+{% endcomment %}
+<div id="documents-schedule-root"
+     data-dispatch-url-template="{% url 'admin:documents_document_dispatch' '__PK__' %}"></div>
+<script src="{% static 'documents/js/schedule_dropdown.js' %}"></script>
 {% endblock %}
