@@ -146,6 +146,10 @@ class Message(BaseModel, SoftDeleteModel):
     content = models.TextField()
     citations = models.JSONField(default=list, blank=True)
     chart_data = models.JSONField(null=True, blank=True)
+    # Router/graph facts that travel together (tool_used, node_slug,
+    # route_reason, source, trace_id). Empty {} on the RAG fallback path and on
+    # legacy rows, which the chat UI renders with no tool badge.
+    metadata = models.JSONField(default=dict, blank=True)
     documents = models.ManyToManyField(
         "documents.Document",
         related_name="chat_messages",

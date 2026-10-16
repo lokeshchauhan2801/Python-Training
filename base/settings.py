@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "chat",
     "scrapper",
     "documents",
+    "agents",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -142,6 +143,15 @@ LLM_API_KEY = (
     or os.getenv("AI_API_KEY")
     or ""
 )
+
+# Langfuse prompt-management / tracing configuration. Plain env values only; no
+# SDK is imported at settings import. basics.langfuse.LangfuseClient reads these
+# lazily and is a no-op (local prompt fallback, no SDK import, no key logging)
+# unless ALL THREE are present. These live in ~/.bash_profile alongside the LLM
+# keys and may be absent in CI-style runs, so the client must tolerate "".
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "")  # BASE_URL, not HOST
 
 # Vector store (ChromaDB) + embedding configuration. These are plain values
 # only; no Chroma or embedding client is constructed at import. ChromaVectorStore

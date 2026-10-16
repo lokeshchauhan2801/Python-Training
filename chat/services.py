@@ -39,6 +39,7 @@ from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
 from .models import Conversation, ConversationSession, Message
+from .retitle import retitle_if_default
 
 logger = logging.getLogger(__name__)
 
@@ -1158,20 +1159,15 @@ class ChatService:
                 actor=user,
             )
             # Title the session from its first message when it is still the
-            # default placeholder (first ~50 chars).
-            if convo.title == "New session":
-                convo.title = (
-                    completion.title.strip().strip('"\'')[:200]
-                    if completion.title and completion.title.strip().strip('"\'')
-                    else message_text[:50]
-                )
-                convo.save(
-                    actor=user, update_fields=["title", "updated_at", "updated_by"]
-                )
-            else:
-                convo.save(
-                    actor=user, update_fields=["updated_at", "updated_by"]
-                )
+            # default placeholder (first ~50 chars). The retitle-or-audit-touch
+            # (which ALWAYS saves the session) lives in the shared helper so the
+            # graph path reuses the identical semantics.
+            retitle_if_default(
+                convo,
+                llm_title=completion.title,
+                fallback_text=message_text,
+                actor=user,
+            )
         return assistant_message
 
     def _create_session(self, user, message_text, company):
