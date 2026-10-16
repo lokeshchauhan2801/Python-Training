@@ -11,6 +11,10 @@ urlpatterns = [
     # The top-level /chat/ surface (option B) is mounted BEFORE the admin so it
     # lives outside /admin/ while still rendering inside the admin shell.
     path("chat/", include("chat.urls")),
+    # The /agent-builder/ page (React Flow canvas in an iframe) is mounted
+    # BEFORE the admin so it lives outside /admin/ while still rendering inside
+    # the Unfold admin shell (same placement as /chat/).
+    path("agent-builder/", include("agents.urls")),
     # The global company switcher setter — a top-level route (like /chat/) so it
     # is reachable from both admin pages and the chat page. Mounted BEFORE admin.
     path("company/", include("company.urls")),

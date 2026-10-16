@@ -733,3 +733,41 @@ class SeedAgentsCommandTests(TestCase):
         self.assertFalse(graph.is_active)
         step = AgentNode.objects.get(graph=graph, slug="chat_agent")
         self.assertEqual(step.tools.count(), 4)
+
+
+# --------------------------------------------------------------------------- #
+# FEAT-004: the /agent-builder/ page (Unfold shell + same-origin iframe).      #
+# --------------------------------------------------------------------------- #
+class AgentBuilderPageTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(email="ab@example.com", password="pw")
+
+    def test_reverse_resolves_to_agent_builder_url(self):
+        self.assertEqual(reverse("agents:agent_builder"), "/agent-builder/")
+
+    def test_anonymous_is_redirected_to_login(self):
+        client = Client()
+        resp = client.get(reverse("agents:agent_builder"))
+        # @login_required redirects anonymous users to the login page.
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("login", resp["Location"].lower())
+
+    def test_authenticated_renders_unfold_shell_with_iframe(self):
+        client = Client()
+        client.force_login(self.user)
+        resp = client.get(reverse("agents:agent_builder"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "agents/agent_builder.html")
+        body = resp.content.decode()
+        # The content area holds the same-origin canvas iframe.
+        self.assertIn("agent-builder-frame", body)
+        self.assertIn("agents/canvas/index.html", body)
+        # The Unfold shell wraps the page (each_context pulls admin branding).
+        self.assertIn("content-main", body)
+
+    def test_response_is_same_origin_frameable(self):
+        client = Client()
+        client.force_login(self.user)
+        resp = client.get(reverse("agents:agent_builder"))
+        self.assertEqual(resp.headers.get("X-Frame-Options"), "SAMEORIGIN")

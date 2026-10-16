@@ -1,0 +1,90 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Top-level /agent-builder/ page, rendered inside the Unfold admin shell.
+
+The LEFT column is the Unfold admin sidebar (from base_site.html, left
+untouched). The content area holds a single same-origin <iframe> hosting the
+React Flow canvas built/vendored under agents/static/agents/canvas/index.html.
+
+The canvas talks to the DRF api/v1/agents/ endpoints same-origin, authenticated
+by the session cookie. Write requests need the CSRF token, so the page hands it
+to the iframe via the src querystring (?csrf=<token>). The token is read inside
+the iframe's own origin — this is the same origin, so no cross-origin leak.
+
+The iframe is sized to fill the content column with the same "min-height:0 flex
+chain" the chat page uses, so the canvas gets the full viewport height and the
+document itself never scrolls (only the canvas pans/zooms internally).
+{% endcomment %}
+{% load static i18n %}
+
+{% block extrahead %}{{ block.super }}
+  <style>
+    /* The agent-builder page is a fixed app surface: the document must never
+       scroll, only the canvas inside the iframe pans/zooms. Cap html/body to
+       the viewport in case an Unfold wrapper reports extra height. */
+    html:has(body.agentbuilder-fixed-viewport),
+    body.agentbuilder-fixed-viewport {
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+    /* Pin #main to the viewport and let the height constraint flow down the
+       real Unfold ancestor chain (see chat_page.html for the full rationale);
+       every wrapper is given flex + min-height:0 so a default min-content child
+       cannot break the chain. Scoped to this page via the body class. */
+    body.agentbuilder-fixed-viewport #main {
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    body.agentbuilder-fixed-viewport #main > .px-4,
+    body.agentbuilder-fixed-viewport #content,
+    body.agentbuilder-fixed-viewport #content-main {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    body.agentbuilder-fixed-viewport #agent-builder-root {
+      display: flex;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+    body.agentbuilder-fixed-viewport #agent-builder-frame {
+      flex: 1 1 auto;
+      width: 100%;
+      min-height: 0;
+      border: 0;
+      display: block;
+    }
+  </style>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% csrf_token %}
+  {% comment %}
+  Expose the CSRF token to the same-origin iframe via its src querystring so the
+  canvas can set the X-CSRFToken header on its POST/PUT/PATCH/DELETE calls to the
+  api/v1/agents/ endpoints. The token is url-escaped; the iframe reads it back
+  from its own location.search.
+  {% endcomment %}
+  <div id="agent-builder-root">
+    <iframe
+      id="agent-builder-frame"
+      title="LangGraph agent builder"
+      src="{% static 'agents/canvas/index.html' %}?csrf={{ csrf_token|urlencode }}"
+    ></iframe>
+  </div>
+  <script>
+    // Fixed-app surface: bound the page to the viewport (same approach as the
+    // chat page). Only the canvas inside the iframe scrolls/pans.
+    document.body.classList.add("agentbuilder-fixed-viewport");
+  </script>
+</div>
+{% endblock %}

@@ -53,6 +53,11 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+# Allow the Unfold admin shell to frame the same-origin /agent-builder/ canvas
+# iframe. Django's default is "DENY", which would block even same-origin
+# framing; "SAMEORIGIN" only loosens it to this origin.
+X_FRAME_OPTIONS = "SAMEORIGIN"
+
 ROOT_URLCONF = "base.urls"
 
 TEMPLATES = [
@@ -315,7 +320,7 @@ UNFOLD = {
                     {
                         "title": "LangGraph",
                         "icon": "account_tree",
-                        "link": "#",  # placeholder — wired when LangGraph is added
+                        "link": reverse_lazy("agents:agent_builder"),
                     },
                 ],
             },
