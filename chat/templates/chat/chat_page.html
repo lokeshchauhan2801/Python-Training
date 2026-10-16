@@ -567,6 +567,28 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       });
     }
 
+    // Human labels for the tool a LangGraph turn used. Unknown slugs fall back
+    // to the raw slug; absent/empty metadata renders NO badge (legacy RAG-path
+    // messages whose metadata is {} look exactly as before).
+    const TOOL_LABELS = {
+      general_assistant: "General assistant",
+      document_search: "Document search",
+      chat_summarise: "Chat summary",
+      web_search: "Web search",
+    };
+
+    function renderToolBadge(container, metadata) {
+      if (!metadata || !metadata.tool_used) { return; }
+      const slug = metadata.tool_used;
+      const pill = document.createElement("span");
+      // Same token classes the citation chips use, as a small pill at the top
+      // of the assistant bubble. Built with textContent (never innerHTML).
+      pill.className = "inline-block mb-1 border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+      pill.textContent = TOOL_LABELS[slug] || slug;
+      // Pin the badge to the TOP of the bubble (above the answer text).
+      container.insertBefore(pill, container.firstChild);
+    }
+
     function renderMessage(message) {
       const isUser = message.role === "user";
       const wrap = document.createElement("div");
@@ -584,6 +606,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       bubble.appendChild(text);
 
       if (!isUser) {
+        renderToolBadge(bubble, message.metadata);
         renderCitations(bubble, message.citations);
         renderChart(bubble, message.chart_data);
       }

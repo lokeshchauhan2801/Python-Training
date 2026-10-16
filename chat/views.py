@@ -22,6 +22,7 @@ resolve to 404 via the scoped querysets; POSTs are CSRF-protected (no
 """
 
 import json
+import logging
 
 from django.contrib import admin
 from django.contrib.auth.decorators import login_required
@@ -35,6 +36,8 @@ from documents.models import Document
 from .scope import active_or_none, allowed_companies, scoped_sessions
 from .services import ChatProviderError, ChatRetrievalError, ChatService
 
+logger = logging.getLogger(__name__)
+
 # A ULID is exactly 26 Crockford base32 characters.
 _ULID_LEN = 26
 
@@ -42,6 +45,50 @@ _ULID_LEN = 26
 def _chat_service():
     """Build the chat service (lazy, no key at construct). Tests patch this."""
     return ChatService()
+
+
+def _orchestrator_for(company):
+    """Return the service a NEW message runs through.
+
+    ``LangGraphChatService`` when ``company`` has an active, runnable graph
+    (an active ``AgentGraph`` with a START node and at least one STEP node);
+    otherwise the existing ``ChatService`` (``_chat_service()``), so chat is
+    unchanged where no graph is configured.
+
+    Import-safety: ``agents`` is imported LAZILY here so ``chat`` has no
+    import-time dependency on ``agents`` (and none on ``langgraph``). ANY
+    import/lookup error degrades silently to the RAG path — a missing or
+    unrunnable graph is never an error, just a fallback.
+    """
+    try:
+        from agents.models import AgentGraph, AgentNode
+
+        graph = (
+            AgentGraph.objects.filter(company=company, is_active=True)
+            .order_by("-created_at")
+            .first()
+        )
+        if graph is None:
+            return _chat_service()
+        has_start = AgentNode.objects.filter(
+            graph=graph, kind=AgentNode.KIND_START
+        ).exists()
+        has_step = AgentNode.objects.filter(
+            graph=graph, kind=AgentNode.KIND_STEP
+        ).exists()
+        if not (has_start and has_step):
+            return _chat_service()
+
+        from agents.services.graph_service import LangGraphChatService
+        from basics.langfuse import get_langfuse_client
+
+        return LangGraphChatService(
+            chat_service=ChatService(),
+            langfuse=get_langfuse_client(),
+        )
+    except Exception:  # noqa: BLE001 - any failure => existing RAG path
+        logger.debug("agents graph lookup failed; using ChatService", exc_info=True)
+        return _chat_service()
 
 
 def _valid_ulid(value):
@@ -63,6 +110,7 @@ def _message_payload(message):
         "content": message.content,
         "citations": message.citations or [],
         "chart_data": message.chart_data,
+        "metadata": message.metadata or {},
         "model_name": message.model_name,
         "created_at": message.created_at.isoformat(),
     }
@@ -211,7 +259,7 @@ def send(request, session_id):
     attachment_ids = request.POST.getlist("attachment_ids")
 
     try:
-        assistant_message = _chat_service().process_message(
+        assistant_message = _orchestrator_for(session.company).process_message(
             user=request.user,
             message_text=question,
             conversation=session,
