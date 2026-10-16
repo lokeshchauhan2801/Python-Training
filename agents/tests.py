@@ -21,8 +21,10 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.test import Client, TestCase
 from django.urls import reverse
+from rest_framework.test import APIClient
 
 from company.models import Company
 
@@ -496,3 +498,238 @@ class NoGraphFallbackTests(TestCase):
             )
         )
         self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
+
+
+# --------------------------------------------------------------------------- #
+# FEAT-003: DRF API scoping + validation + load/activate actions.             #
+# --------------------------------------------------------------------------- #
+class AgentApiScopingTests(TestCase):
+    """Owner/company scoping: out-of-scope ids resolve to 404."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(email="alice-api@example.com", password="x")
+        self.bob = User.objects.create_user(email="bob-api@example.com", password="x")
+        self.alice_co = Company.objects.create(owner=self.alice, name="Alice Co", slug="alice-api")
+        self.bob_co = Company.objects.create(owner=self.bob, name="Bob Co", slug="bob-api")
+        # Bob owns a graph/node/edge; Alice must not see them.
+        self.bob_tools = _seed_tools(self.bob_co)
+        (
+            self.bob_graph,
+            self.bob_start,
+            self.bob_step,
+            self.bob_end,
+        ) = _seed_active_graph(self.bob_co, self.bob_tools)
+        self.bob_edge = AgentEdge.objects.filter(graph=self.bob_graph).first()
+
+    def test_out_of_scope_graph_is_404(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get(
+            reverse("agent-graph-detail", args=[self.bob_graph.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_out_of_scope_node_is_404(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get(
+            reverse("agent-node-detail", args=[self.bob_step.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_out_of_scope_edge_is_404(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get(
+            reverse("agent-edge-detail", args=[self.bob_edge.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_out_of_scope_load_is_404(self):
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get(
+            reverse("agent-graph-load", args=[self.bob_graph.pk])
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_owner_sees_only_own_graphs(self):
+        self.client.force_authenticate(self.bob)
+        resp = self.client.get(reverse("agent-graph-list"))
+        self.assertEqual(resp.status_code, 200)
+        ids = {row["id"] for row in resp.json()}
+        self.assertIn(str(self.bob_graph.pk), ids)
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get(reverse("agent-graph-list"))
+        self.assertEqual(resp.json(), [])
+
+
+class AgentApiValidationTests(TestCase):
+    """Invalid payloads resolve to 400."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(email="val@example.com", password="x")
+        self.company = Company.objects.create(owner=self.alice, name="Val Co", slug="val-co")
+        self.tools = _seed_tools(self.company)
+        self.graph = AgentGraph(company=self.company, name="G")
+        self.graph.save()
+        self.step = AgentNode(
+            company=self.company, graph=self.graph, slug="step", kind=AgentNode.KIND_STEP
+        )
+        self.step.save()
+        self.other = AgentNode(
+            company=self.company, graph=self.graph, slug="other", kind=AgentNode.KIND_STEP
+        )
+        self.other.save()
+        self.client.force_authenticate(self.alice)
+
+    def test_create_tool_unknown_slug_is_400(self):
+        resp = self.client.post(
+            reverse("tool-list"),
+            {"slug": "not_a_tool", "name": "Nope", "company": str(self.company.pk)},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("slug", resp.json())
+
+    def test_create_node_unknown_tool_id_is_400(self):
+        # A tool id that is not in scope / does not exist.
+        bogus = "0" * 26
+        resp = self.client.post(
+            reverse("agent-node-list"),
+            {
+                "graph": str(self.graph.pk),
+                "slug": "n1",
+                "kind": AgentNode.KIND_STEP,
+                "tools": [bogus],
+                "company": str(self.company.pk),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_create_self_loop_edge_is_400(self):
+        resp = self.client.post(
+            reverse("agent-edge-list"),
+            {
+                "graph": str(self.graph.pk),
+                "source": str(self.step.pk),
+                "target": str(self.step.pk),
+                "company": str(self.company.pk),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_create_cross_graph_edge_is_400(self):
+        other_graph = AgentGraph(company=self.company, name="G2")
+        other_graph.save()
+        other_node = AgentNode(
+            company=self.company, graph=other_graph, slug="x", kind=AgentNode.KIND_STEP
+        )
+        other_node.save()
+        resp = self.client.post(
+            reverse("agent-edge-list"),
+            {
+                "graph": str(self.graph.pk),
+                "source": str(self.step.pk),
+                "target": str(other_node.pk),
+                "company": str(self.company.pk),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_create_node_with_valid_tool_succeeds(self):
+        resp = self.client.post(
+            reverse("agent-node-list"),
+            {
+                "graph": str(self.graph.pk),
+                "slug": "router",
+                "kind": AgentNode.KIND_STEP,
+                "tools": [str(self.tools["document_search"].pk)],
+                "company": str(self.company.pk),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["tools"], [str(self.tools["document_search"].pk)])
+
+
+class AgentApiLoadActivateTests(TestCase):
+    """GET load aggregation + POST activate clear-then-set order."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.alice = User.objects.create_user(email="la@example.com", password="x")
+        self.company = Company.objects.create(owner=self.alice, name="LA Co", slug="la-co")
+        self.tools = _seed_tools(self.company)
+        self.graph, self.start, self.step, self.end = _seed_active_graph(
+            self.company, self.tools
+        )
+        self.client.force_authenticate(self.alice)
+
+    def test_load_returns_aggregated_payload(self):
+        resp = self.client.get(reverse("agent-graph-load", args=[self.graph.pk]))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(set(data.keys()), {"graph", "nodes", "edges", "tools"})
+        self.assertEqual(data["graph"]["id"], str(self.graph.pk))
+        self.assertEqual(len(data["nodes"]), 3)
+        self.assertEqual(len(data["edges"]), 2)
+        self.assertEqual(len(data["tools"]), 4)
+        # Nodes carry position/tools/kind/slug/label/prompt_name.
+        node = data["nodes"][0]
+        for key in ("position", "tools", "kind", "slug", "label", "prompt_name"):
+            self.assertIn(key, node)
+
+    def test_activate_leaves_exactly_one_active_graph(self):
+        # Seed a second graph for the same company; it starts inactive.
+        other = AgentGraph(company=self.company, name="Second")
+        other.save()
+        # The first graph is already active (seeded with is_active=True).
+        resp = self.client.post(reverse("agent-graph-activate", args=[other.pk]))
+        self.assertEqual(resp.status_code, 200)
+        active = AgentGraph.objects.filter(company=self.company, is_active=True)
+        self.assertEqual(active.count(), 1)
+        self.assertEqual(active.first().pk, other.pk)
+
+    def test_activate_out_of_scope_is_404(self):
+        bob = User.objects.create_user(email="bob-act@example.com", password="x")
+        self.client.force_authenticate(bob)
+        resp = self.client.post(reverse("agent-graph-activate", args=[self.graph.pk]))
+        self.assertEqual(resp.status_code, 404)
+
+
+# --------------------------------------------------------------------------- #
+# FEAT-003: seed_agents idempotency.                                          #
+# --------------------------------------------------------------------------- #
+class SeedAgentsCommandTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(email="seed@example.com", password="x")
+        cls.company = Company.objects.create(owner=cls.owner, name="Seed Co", slug="seed-co")
+
+    def test_seed_is_idempotent(self):
+        call_command("seed_agents", company="seed-co")
+        tools_after_first = Tool.objects.filter(company=self.company).count()
+        graphs_after_first = AgentGraph.objects.filter(company=self.company).count()
+        nodes_after_first = AgentNode.objects.filter(company=self.company).count()
+        edges_after_first = AgentEdge.objects.filter(company=self.company).count()
+
+        self.assertEqual(tools_after_first, 4)
+        self.assertEqual(graphs_after_first, 1)
+        self.assertEqual(nodes_after_first, 3)
+        self.assertEqual(edges_after_first, 2)
+
+        # Running again creates no duplicates.
+        call_command("seed_agents", company="seed-co")
+        self.assertEqual(Tool.objects.filter(company=self.company).count(), 4)
+        self.assertEqual(AgentGraph.objects.filter(company=self.company).count(), 1)
+        self.assertEqual(AgentNode.objects.filter(company=self.company).count(), 3)
+        self.assertEqual(AgentEdge.objects.filter(company=self.company).count(), 2)
+
+    def test_seeded_graph_is_inactive_with_tools_attached(self):
+        call_command("seed_agents", company="seed-co")
+        graph = AgentGraph.objects.get(company=self.company, name="Default agent")
+        self.assertFalse(graph.is_active)
+        step = AgentNode.objects.get(graph=graph, slug="chat_agent")
+        self.assertEqual(step.tools.count(), 4)
