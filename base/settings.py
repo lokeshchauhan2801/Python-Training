@@ -209,11 +209,10 @@ UNFOLD = {
                 ],
             },
             {
-                # Per the requirement, Chat lives INSIDE the Company module:
-                # the chat UI links and the chat model changelists are nested
-                # under the single Company group instead of a standalone Chat
-                # section. No models or tables moved — this is admin navigation
-                # structure only.
+                # Company is its OWN top-level group — it holds only the
+                # company changelist. The chat UI links and chat model
+                # changelists are a SEPARATE top-level "Chat" group below
+                # (standalone in the main menu, not nested under Company).
                 "title": "Company",
                 "collapsible": True,
                 "items": [
@@ -222,6 +221,14 @@ UNFOLD = {
                         "icon": "business",
                         "link": reverse_lazy("admin:company_company_changelist"),
                     },
+                ],
+            },
+            {
+                # Standalone top-level Chat section in the main menu. No models
+                # or tables moved — this is admin navigation structure only.
+                "title": "Chat",
+                "collapsible": True,
+                "items": [
                     {
                         "title": "Chat",
                         "icon": "chat",
