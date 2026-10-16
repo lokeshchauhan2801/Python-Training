@@ -17,6 +17,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
 
@@ -450,8 +451,57 @@ def _extract_json(document: Document) -> list[tuple[int, str, str]]:
     )
 
 
+def resolve_file_extension(document: Document) -> str:
+    """Return the document's extraction extension (e.g. ``".pdf"``), robustly.
+
+    The extraction pipeline dispatches by file type, so it needs a RELIABLE
+    extension. Historically this was taken from ``document.title`` — but titles
+    are LLM-derived free text (e.g. "Confirmation of Employment for Mr. Lokesh
+    Chauhan"), and ``Path(title).suffix`` happily returns garbage like
+    ``". Lokesh Chauhan"`` whenever the title contains a dot, or ``""`` when it
+    has no extension at all. Reprocessing such a document then failed with the
+    "Supported files" error even though the underlying file was a valid PDF.
+
+    Resolution order (most to least reliable):
+      1. The uploaded file's own name suffix (``document.file.name``).
+      2. The stored ``document.file_type`` (stamped on first processing / by the
+         URL downloader), normalised to a leading-dot extension.
+      3. The ``source_url`` path suffix for URL-sourced documents.
+      4. The title suffix — only as a last resort, and only when it maps to a
+         known supported type (so free-text titles can't masquerade as one).
+    """
+    # 1. The real uploaded file.
+    if document.file and document.file.name:
+        suffix = Path(document.file.name).suffix.lower()
+        if suffix in SUPPORTED_FILE_TYPES:
+            return suffix
+
+    # 2. The stored file_type (e.g. "pdf", or already ".pdf").
+    stored = (document.file_type or "").strip().lower()
+    if stored:
+        candidate = stored if stored.startswith(".") else f".{stored}"
+        # ".jpg"/".jpeg" and ".tif"/".tiff" are both valid; a bare "pdf" maps to ".pdf".
+        if candidate in SUPPORTED_FILE_TYPES:
+            return candidate
+
+    # 3. URL-sourced documents: the download path's suffix.
+    if document.source_url:
+        from urllib.parse import urlsplit
+
+        url_suffix = Path(urlsplit(document.source_url).path).suffix.lower()
+        if url_suffix in SUPPORTED_FILE_TYPES:
+            return url_suffix
+
+    # 4. Title suffix — last resort, must be a known supported type.
+    title_suffix = Path(document.title or "").suffix.lower()
+    if title_suffix in SUPPORTED_FILE_TYPES:
+        return title_suffix
+
+    return ""
+
+
 def extract_document_chunks(document: Document) -> list[tuple[int, str, str]]:
-    file_type = Path(document.title).suffix.lower()
+    file_type = resolve_file_extension(document)
     if file_type == ".pdf":
         chunks = _extract_pdf(document)
     elif file_type == ".docx":
@@ -564,6 +614,54 @@ def _delete_chunks(document: Document) -> None:
     DocumentChunk.all_objects.filter(document=document).hard_delete()
 
 
+def purge_document(document: Document) -> None:
+    """Permanently remove a document and ALL of its data.
+
+    Unlike the soft delete (which only flips ``is_deleted``), this removes the
+    real, user-visible artefacts so a deleted document actually disappears:
+
+      1. Chroma vectors for every chunk (keyed by the chunk PK) in ``pdf_chunks``.
+      2. Every ``DocumentChunk`` row (incl. soft-deleted ones).
+      3. The uploaded file from storage (best effort).
+      4. The ``Document`` row itself (hard delete — real SQL DELETE).
+
+    Each external cleanup step is best-effort (a missing Chroma collection or an
+    already-removed file never blocks the row deletion), but the DB rows are
+    always removed so the changelist reflects the deletion.
+    """
+    # 1. Remove this document's chunk vectors from Chroma. Vectors are keyed by
+    #    the chunk PK (see process_document's add_documents payload).
+    chunk_ids = list(
+        DocumentChunk.all_objects.filter(document=document).values_list(
+            "pk", flat=True
+        )
+    )
+    if chunk_ids:
+        try:
+            ChromaVectorStore().delete_documents(
+                [str(pk) for pk in chunk_ids], collection=VECTOR_COLLECTION
+            )
+        except Exception:  # pragma: no cover - best effort
+            logger.exception(
+                "Could not remove vectors for document %s during purge", document.pk
+            )
+
+    # 2. Hard-delete chunk rows.
+    _delete_chunks(document)
+
+    # 3. Remove the uploaded file from storage (best effort; URL docs have none).
+    if document.file:
+        try:
+            document.file.delete(save=False)
+        except Exception:  # pragma: no cover - best effort
+            logger.exception(
+                "Could not remove file for document %s during purge", document.pk
+            )
+
+    # 4. Hard-delete the document row itself.
+    document.hard_delete()
+
+
 def _set_processing_progress(document: Document, stage: str, progress: int) -> None:
     """Persist an in-flight processing stage/progress update."""
     document.processing_stage = stage
@@ -573,7 +671,10 @@ def _set_processing_progress(document: Document, stage: str, progress: int) -> N
     )
 
 
-def _embed_chunks(extracted_chunks: list[tuple[int, str, str]]) -> list[list[float]]:
+def _embed_chunks(
+    extracted_chunks: list[tuple[int, str, str]],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
     """Embed chunk texts in offset-ordered batches across a worker pool.
 
     Batches of ``EMBEDDING_BATCH_SIZE`` are submitted to a
@@ -612,6 +713,8 @@ def _embed_chunks(extracted_chunks: list[tuple[int, str, str]]) -> list[list[flo
                     "The embedding service returned an incomplete result."
                 )
             batch_results[offset] = batch_embeddings
+            if progress_callback is not None:
+                progress_callback(len(batch_results), len(embedding_batches))
     embeddings = [
         embedding
         for offset in sorted(batch_results)
@@ -653,28 +756,38 @@ def process_document(document: Document) -> Document:
         ]
     )
 
-    # A user-supplied title is one that is non-blank AND already carries a file
-    # suffix (the admin add form may leave title blank). When it is blank or has
-    # no suffix, fall back to the uploaded file's basename so the suffix-based
-    # dispatch in extract_document_chunks works; the real title is derived from
-    # the extracted text after extraction.
-    user_supplied_title = bool(document.title and Path(document.title).suffix)
-    if not user_supplied_title and document.file:
-        document.title = os.path.basename(document.file.name)
+    # Decide whether the title was supplied by the user (keep it verbatim) or
+    # should be derived from the extracted text. The admin add form may leave
+    # the title blank, in which case the uploaded file's basename is used as a
+    # transient placeholder. A title is treated as user-supplied when it is
+    # non-blank and is NOT just the uploaded file's basename. Dispatch no longer
+    # depends on the title (see resolve_file_extension), so the title is never
+    # mutated before extraction.
+    file_basename = os.path.basename(document.file.name) if document.file else ""
+    user_supplied_title = bool(document.title) and document.title != file_basename
 
     embed = document.source == Document.SOURCE_LIBRARY
     vector_store: ChromaVectorStore | None = None
     vector_ids: list[str] = []
     try:
         extracted_chunks = extract_document_chunks(document)
+        _set_processing_progress(document, "extracting", 25)
 
         # Embed BEFORE persisting rows so a key/provider failure leaves no chunk
         # rows behind (NO-KEY path surfaces a clear, user-facing message).
         embeddings: list[list[float]] | None = None
         if embed:
-            _set_processing_progress(document, "embedding", 10)
+            _set_processing_progress(document, "embedding", 30)
+
+            def update_embedding_progress(completed_batches, total_batches):
+                progress = 30 + int(45 * completed_batches / total_batches)
+                _set_processing_progress(document, "embedding", progress)
+
             try:
-                embeddings = _embed_chunks(extracted_chunks)
+                embeddings = _embed_chunks(
+                    extracted_chunks,
+                    progress_callback=update_embedding_progress,
+                )
             except LLMConfigurationError as exc:
                 raise DocumentIndexError(
                     "LLM key required to embed library documents. Set "
@@ -703,9 +816,15 @@ def process_document(document: Document) -> Document:
             DocumentChunk.objects.bulk_create(chunk_rows)
 
         if embed:
-            _set_processing_progress(document, "indexing", 85)
+            _set_processing_progress(document, "indexing", 75)
             vector_store = ChromaVectorStore()
-            for offset in range(0, len(chunk_rows), VECTOR_BATCH_SIZE):
+            total_batches = max(
+                1,
+                (len(chunk_rows) + VECTOR_BATCH_SIZE - 1) // VECTOR_BATCH_SIZE,
+            )
+            for batch_index, offset in enumerate(
+                range(0, len(chunk_rows), VECTOR_BATCH_SIZE), start=1
+            ):
                 rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
                 vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
                 vector_ids.extend(
@@ -732,16 +851,16 @@ def process_document(document: Document) -> Document:
                         collection=VECTOR_COLLECTION,
                     )
                 )
+                progress = 75 + int(23 * batch_index / total_batches)
+                _set_processing_progress(document, "indexing", progress)
 
-        # Auto-fill file_type from the working filename's suffix when it was
-        # not already set (url_source stamps it for URL docs). Then derive the
-        # title from the extracted text when the user supplied none.
-        working_name = document.title if user_supplied_title else (
-            document.file.name if document.file else document.title
-        )
-        suffix = Path(working_name).suffix.lstrip(".").lower()
-        if suffix:
-            document.file_type = suffix
+        # Auto-fill file_type from the resolved file extension (the uploaded
+        # file, the stored type, or the URL path — never the free-text title).
+        # Then derive the title from the extracted text when the user supplied
+        # none.
+        resolved_suffix = resolve_file_extension(document).lstrip(".").lower()
+        if resolved_suffix:
+            document.file_type = resolved_suffix
         extracted_text = "\n\n".join(
             text for _page, _loc, text in extracted_chunks if text
         ).strip()
@@ -786,11 +905,20 @@ def find_relevant_chunks(
 ) -> list[DocumentChunk]:
     """Return the top-``k`` chunks most relevant to ``question`` (similarity order).
 
-    Strict owner scope: the query is filtered to ``company`` in Chroma and the
-    returned hit ids are re-scoped against the relational DB with
-    ``document__company__owner=user`` — a user only ever retrieves chunks from
-    companies they own, even if Chroma surfaces an out-of-scope id.
+    Active-company scope: the query is filtered to ``company`` in Chroma and the
+    returned hit ids are re-scoped against the relational DB to that same
+    ``company`` — but only after authorizing the user against it on the project's
+    single authorization axis (a **superuser** may act within any active company,
+    otherwise the user must **own** the company). This mirrors admin changelists,
+    the active-company switcher, and the eligibility guard, all of which already
+    treat a superuser as able to act within the resolved active company. The
+    previous ``document__company__owner=user`` re-scope ignored the superuser
+    bypass and silently dropped every Chroma hit for a superuser acting within a
+    company they did not personally own.
     """
+    # Authorize the (already-resolved active) company on the single axis.
+    if not (getattr(user, "is_superuser", False) or company.owner_id == user.pk):
+        return []
     query_embedding = get_llm_client().embed_query(question)
     hits = ChromaVectorStore().similarity_search(
         query_embedding,
@@ -805,7 +933,7 @@ def find_relevant_chunks(
         str(chunk.pk): chunk
         for chunk in DocumentChunk.objects.filter(
             id__in=ranked_ids,
-            document__company__owner=user,
+            document__company=company,
         ).select_related("document")
     }
     return [chunks[chunk_id] for chunk_id in ranked_ids if chunk_id in chunks]

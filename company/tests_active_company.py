@@ -326,31 +326,29 @@ class AdminScopingFollowsActiveCompanyTests(TestCase):
         self.assertEqual(ids, {str(sess_b.id)})
 
     def test_add_document_uses_active_company(self):
-        from documents import services
         from documents.models import Document
 
         self.client.force_login(self.super_owner)
         self._set_active(self.company_b)
 
-        def _inline_dispatch(document_id, backend=None):
-            return "job", "local-background"
-
-        with mock.patch(
-            "documents.admin.dispatch_document_processing",
-            side_effect=_inline_dispatch,
-        ), mock.patch.object(
-            services, "get_llm_client", lambda: mock.Mock()
-        ):
-            resp = self.client.post(
-                "/admin/documents/document/add/",
-                {
-                    "file": SimpleUploadedFile("new.txt", b"hello there world"),
-                    "source_url": "",
-                },
-            )
+        # Adding a document no longer auto-dispatches processing on save: it
+        # lands in the ``uploaded`` state and waits for the user to pick a
+        # backend from the in-row Schedule control. So no dispatch/LLM mock is
+        # needed and no processing runs here.
+        resp = self.client.post(
+            "/admin/documents/document/add/",
+            {
+                "file": SimpleUploadedFile("new.txt", b"hello there world"),
+                "source_url": "",
+            },
+        )
         self.assertEqual(resp.status_code, 302)
         created = Document.objects.order_by("-created_at").first()
         self.assertEqual(created.company_id, self.company_b.id)
+        # It is parked as UPLOADED (not queued/processing): processing starts
+        # only when the user chooses a backend from the Schedule dropdown.
+        self.assertEqual(created.status, Document.STATUS_UPLOADED)
+        self.assertEqual(created.chunk_count, 0)
 
 
 @override_settings(MEDIA_ROOT=_MEDIA)
@@ -382,17 +380,16 @@ class NoCompanyEmptyStateTests(TestCase):
         from documents.models import Document
 
         self.client.force_login(self.user)
-        with mock.patch(
-            "documents.admin.dispatch_document_processing",
-            side_effect=lambda *a, **k: ("job", "local-background"),
-        ):
-            resp = self.client.post(
-                "/admin/documents/document/add/",
-                {
-                    "file": SimpleUploadedFile("x.txt", b"hello there world"),
-                    "source_url": "",
-                },
-            )
+        # No auto-dispatch happens on save anymore, so no dispatch patch is
+        # needed: the add POST yields a clean PermissionDenied (403) in
+        # save_model when the user has no accessible company.
+        resp = self.client.post(
+            "/admin/documents/document/add/",
+            {
+                "file": SimpleUploadedFile("x.txt", b"hello there world"),
+                "source_url": "",
+            },
+        )
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(Document.all_objects.count(), 0)
 

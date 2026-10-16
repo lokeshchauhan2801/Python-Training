@@ -36,12 +36,36 @@ Docker is only needed for Kafka and Temporal. The CELERY backend works with
 ZERO setup in local DEBUG (see OPTION C).
 
 ===============================================================================
+ ONE-COMMAND START — KAFKA, TEMPORAL, AND BOTH WORKERS
+===============================================================================
+
+From the project root, run:
+
+    ./scripts/start_processing.sh
+
+The script starts this project's isolated Kafka and Temporal containers, waits
+for Kafka and Temporal to accept connections, then starts both Django workers.
+Workers run in the background as the current user; Docker is run with sudo only
+when needed. The worker logs and PID files are stored in:
+
+    ~/.local/state/agentic-flow-processing/
+
+Kafka uses localhost:9093, Temporal gRPC uses localhost:7234, and the Temporal
+UI is at http://localhost:8081. To stop the workers and this Compose stack:
+
+    ./scripts/stop_processing.sh
+
+The stop script leaves the processing data volumes intact. Use
+`sudo docker compose -f docker-compose.processing.yml down -v` only for a full
+data reset.
+
+===============================================================================
  OPTION A — PROCESS WITH KAFKA
 ===============================================================================
 
 Open TWO terminals, both in /home/auriga/learnings/agentic-flow.
 
-Terminal 1 — start the Kafka broker (localhost:9092), leave it running:
+Terminal 1 — start the Kafka broker (localhost:9093), leave it running:
     sudo docker compose -f docker-compose.processing.yml up -d kafka
     # wait until STATUS shows "healthy":
     sudo docker compose -f docker-compose.processing.yml ps
@@ -61,7 +85,7 @@ Document chunks admin.
 
 Open TWO terminals, both in /home/auriga/learnings/agentic-flow.
 
-Terminal 1 — start the Temporal server (gRPC :7233) + Web UI (:8080):
+Terminal 1 — start the Temporal server (gRPC :7234) + Web UI (:8081):
     sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
     sudo docker compose -f docker-compose.processing.yml ps
 
@@ -72,7 +96,7 @@ Terminal 2 — start the Temporal worker, leave it running:
 
 Then in the admin, pick a library document and choose "Process with…" →
 Temporal. Inspect runs (workflow id doc-<ulid>) in the Temporal Web UI:
-    http://localhost:8080
+    http://localhost:8081
 
 ===============================================================================
  OPTION C — PROCESS WITH CELERY (default)
@@ -114,7 +138,7 @@ Also delete the data volumes (full reset):
     Both the container AND the worker must run for that backend. For celery in
     DEBUG this cannot happen — it runs inline.
 
-* Port already in use (9092 / 7233 / 8080):
+* Port already in use (9093 / 7234 / 8081):
     Stop the other process, or tear the stack down first.
 
 * Which backend is the default?

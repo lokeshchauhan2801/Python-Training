@@ -114,6 +114,32 @@
     }
   }
 
+  function showNotice(message, isError) {
+    var existing = document.getElementById("documents-dispatch-notice");
+    if (existing) {
+      existing.remove();
+    }
+    var notice = document.createElement("div");
+    notice.id = "documents-dispatch-notice";
+    notice.setAttribute("role", isError ? "alert" : "status");
+    notice.setAttribute("aria-live", isError ? "assertive" : "polite");
+    notice.textContent = message;
+    notice.style.position = "fixed";
+    notice.style.right = "16px";
+    notice.style.top = "16px";
+    notice.style.zIndex = MENU_Z_INDEX;
+    notice.style.maxWidth = "420px";
+    notice.style.padding = "12px 16px";
+    notice.style.borderRadius = "6px";
+    notice.style.color = "#fff";
+    notice.style.background = isError ? "#dc2626" : "#16a34a";
+    notice.style.boxShadow = "0 2px 8px rgba(0,0,0,0.2)";
+    document.body.appendChild(notice);
+    window.setTimeout(function () {
+      notice.remove();
+    }, 6000);
+  }
+
   // Minimal CSS.escape fallback for the ids we embed (ULIDs/UUIDs are safe,
   // but guard anyway for attribute-selector correctness).
   function cssEscape(value) {
@@ -138,18 +164,26 @@
     })
       .then(function (response) {
         return response.json().then(function (data) {
-          return { ok: response.ok, data: data };
+          if (!response.ok) {
+            throw new Error(data.detail || "The request was rejected.");
+          }
+          return data;
         });
       })
-      .then(function (result) {
-        if (result.ok && result.data && result.data.status_display) {
-          updateRowStatus(docId, result.data.status_display);
+      .then(function (data) {
+        if (data && data.status_display) {
+          updateRowStatus(docId, data.status_display);
         }
-        // The completion toast is handled by status_poll.js once the backend
-        // reaches a terminal state; this just reflects the queued transition.
+        showNotice(
+          (data && data.message) || "Task queued for processing.",
+          false
+        );
       })
-      .catch(function () {
-        /* transient error — the user can retry via the dropdown */
+      .catch(function (error) {
+        showNotice(
+          "Could not queue document: " + error.message,
+          true
+        );
       });
     if (menu) {
       hideMenu(menu);

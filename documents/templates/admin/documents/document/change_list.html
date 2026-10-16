@@ -16,6 +16,35 @@ built from server data.
 <div id="documents-status-poll"
      data-status-url="{% url 'admin:documents_document_status_json' %}"></div>
 <script src="{% static 'documents/js/status_poll.js' %}"></script>
+<style>
+  .document-progress { min-width: 180px; }
+  .document-progress-title { font-weight: 600; }
+  .document-progress-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+    color: var(--color-font-subtle, #6b7280);
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+  }
+  .document-progress-track {
+    background: #e5e7eb;
+    border-radius: 9999px;
+    height: 0.375rem;
+    margin-top: 0.25rem;
+    overflow: hidden;
+  }
+  .document-progress-track span {
+    background: #2563eb;
+    display: block;
+    height: 100%;
+    transition: width 0.3s ease;
+  }
+  .document-progress[data-document-id] .document-progress-track[aria-valuenow="100"] span {
+    background: #16a34a;
+  }
+  .dark .document-progress-track { background: #374151; }
+</style>
 
 {% comment %}
 In-row "Schedule" column control. The dropdown markup is rendered per row by

@@ -1,18 +1,3 @@
-"""Documents domain models.
-
-The document library + offline extraction surface, ported from the OLD ``docs``
-app but re-expressed in NEW's conventions:
-
-* ``Document`` / ``DocumentChunk`` each compose ``BaseModel`` (4 audit fields) +
-  ``SoftDeleteModel`` (soft delete) and declare their own ULID ``id`` PK plus a
-  REQUIRED ``company`` FK (the tenant-scoping field every non-auth model carries).
-* Phase 1 is extraction-only: a library upload is validated, chunked, and marked
-  ``ready`` synchronously (see ``documents.services.process_document``). The
-  ``processing_backend`` / ``queued`` / ``processing`` / ``processing_task_id``
-  fields are placeholders the async backends (Phase 4) will drive; Phase 1 never
-  queues anything.
-"""
-
 from django.conf import settings
 from django.db import models
 
@@ -34,12 +19,6 @@ class Document(BaseModel, SoftDeleteModel):
         (STATUS_READY, "Ready"),
         (STATUS_FAILED, "Failed"),
     ]
-
-    # Where the file came from, which decides whether it is auto-processed.
-    #   chat    — attached inside a chat session; stored as chat data only,
-    #             never chunked (Phase 3 wiring).
-    #   library — uploaded from the Documents section; chunked synchronously in
-    #             Phase 1 (embedding is Phase 2).
     SOURCE_CHAT = "chat"
     SOURCE_LIBRARY = "library"
     SOURCE_CHOICES = [
@@ -73,9 +52,6 @@ class Document(BaseModel, SoftDeleteModel):
         db_index=True,
     )
     title = models.CharField(max_length=255)
-    # A library document carries EITHER an uploaded file OR a media URL the
-    # scrapper downloads in the background (exactly one — see clean()). ``file``
-    # is therefore no longer unconditionally required at the DB/form level.
     file = models.FileField(upload_to="documents/%Y/%m/%d/", blank=True)
     source_url = models.URLField(blank=True, default="")
     file_type = models.CharField(max_length=20, default="pdf")
@@ -106,13 +82,6 @@ class Document(BaseModel, SoftDeleteModel):
         return self.title
 
     def clean(self) -> None:
-        """Enforce EXACTLY ONE of file/source_url for library documents.
-
-        Ported from the OLD ``scrapper.Document.clean()`` file-OR-url rule. Chat
-        attachments always carry a file (Phase 3 wiring), so this rule applies
-        only to library documents, where the user chooses an upload OR a media
-        URL to download — never both, never neither.
-        """
         from django.core.exceptions import ValidationError
 
         super().clean()
@@ -138,6 +107,18 @@ class Document(BaseModel, SoftDeleteModel):
         if ms < 1000:
             return f"{ms} ms"
         return f"{ms / 1000:.1f} s"
+
+    @property
+    def processing_progress_display(self) -> int:
+        """Return a progress value consistent with the document's final state."""
+        if self.status == self.STATUS_READY:
+            return 100
+        return min(100, max(0, int(self.processing_progress or 0)))
+
+    @property
+    def processing_remaining_display(self) -> int:
+        """Return the percentage remaining for the displayed progress value."""
+        return 100 - self.processing_progress_display
 
 
 class DocumentChunk(BaseModel, SoftDeleteModel):

@@ -96,6 +96,7 @@ class ChartData(PydanticBaseModel):
 class ChatCompletion(PydanticBaseModel):
     response: str = Field(min_length=1)
     chart: ChartData | None = None
+    title: str | None = Field(default=None, max_length=200)
 
 
 class ChatService:
@@ -369,8 +370,11 @@ class ChatService:
             "{type: pie|bar|line, title, x_axis, y_axis, series: [names], "
             "data: [{label, values: [one number per series in series order]}]}. "
             "Limit chart data "
-            "to 100 points and 6 series. Return a response object containing "
-            "response (answer text) and chart (chart object or null).\n\n"
+            "to 100 points and 6 series. Also provide a concise chat title of "
+            "at most 8 words based on the user's request, without quotes or "
+            "punctuation at the end. Return a response object containing "
+            "response (answer text), title (chat title), and chart (chart "
+            "object or null).\n\n"
             f"Retrieved passages:\n{document_context}\n\n"
             f"Conversation so far:\n{history_text or '(new conversation)'}\n\n"
             f"User: {question}\nAssistant:"
@@ -1156,7 +1160,11 @@ class ChatService:
             # Title the session from its first message when it is still the
             # default placeholder (first ~50 chars).
             if convo.title == "New session":
-                convo.title = message_text[:50]
+                convo.title = (
+                    completion.title.strip().strip('"\'')[:200]
+                    if completion.title and completion.title.strip().strip('"\'')
+                    else message_text[:50]
+                )
                 convo.save(
                     actor=user, update_fields=["title", "updated_at", "updated_by"]
                 )
@@ -1171,7 +1179,7 @@ class ChatService:
         session = ConversationSession(
             company=company,
             user=user,
-            title=message_text[:50] or "New session",
+            title="New session",
         )
         session.save(actor=user)
         return session

@@ -1,11 +1,3 @@
-"""
-Django settings for the agentic-flow project.
-
-Single settings module (no local/prod split). PostgreSQL only. Admin-driven via
-django-unfold with a thin DRF API layer. The project is import-safe with no LLM
-key present (LLMClient is lazy and never built at import time).
-"""
-
 import os
 from pathlib import Path
 
@@ -214,6 +206,22 @@ UNFOLD = {
                         "icon": "home",
                         "link": reverse_lazy("admin:index"),
                     },
+                ],
+            },
+            {
+                # Per the requirement, Chat lives INSIDE the Company module:
+                # the chat UI links and the chat model changelists are nested
+                # under the single Company group instead of a standalone Chat
+                # section. No models or tables moved — this is admin navigation
+                # structure only.
+                "title": "Company",
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Companies",
+                        "icon": "business",
+                        "link": reverse_lazy("admin:company_company_changelist"),
+                    },
                     {
                         "title": "Chat",
                         "icon": "chat",
@@ -227,16 +235,25 @@ UNFOLD = {
                         # new-session endpoint (BUG 1).
                         "link": format_lazy("{}?new=1", reverse_lazy("chat:home")),
                     },
-                ],
-            },
-            {
-                "title": "Company",
-                "collapsible": True,
-                "items": [
                     {
-                        "title": "Companies",
-                        "icon": "business",
-                        "link": reverse_lazy("admin:company_company_changelist"),
+                        "title": "Conversation sessions",
+                        "icon": "forum",
+                        "link": reverse_lazy("admin:chat_conversationsession_changelist"),
+                    },
+                    {
+                        "title": "Conversations",
+                        "icon": "chat_bubble",
+                        "link": reverse_lazy("admin:chat_conversation_changelist"),
+                    },
+                    {
+                        "title": "Messages",
+                        "icon": "mail",
+                        "link": reverse_lazy("admin:chat_message_changelist"),
+                    },
+                    {
+                        "title": "Message versions",
+                        "icon": "history",
+                        "link": reverse_lazy("admin:chat_messageversion_changelist"),
                     },
                 ],
             },
@@ -268,7 +285,9 @@ UNFOLD = {
                     {
                         "title": "Queue messages",
                         "icon": "queue",
-                        "link": "#",  # placeholder — model lands in Phase 3/4
+                        "link": reverse_lazy(
+                            "admin:documents_document_queue"
+                        ),
                     },
                 ],
             },
@@ -280,32 +299,6 @@ UNFOLD = {
                         "title": "LangGraph",
                         "icon": "account_tree",
                         "link": "#",  # placeholder — wired when LangGraph is added
-                    },
-                ],
-            },
-            {
-                "title": "Chat",
-                "collapsible": True,
-                "items": [
-                    {
-                        "title": "Conversation sessions",
-                        "icon": "forum",
-                        "link": reverse_lazy("admin:chat_conversationsession_changelist"),
-                    },
-                    {
-                        "title": "Conversations",
-                        "icon": "chat_bubble",
-                        "link": reverse_lazy("admin:chat_conversation_changelist"),
-                    },
-                    {
-                        "title": "Messages",
-                        "icon": "mail",
-                        "link": reverse_lazy("admin:chat_message_changelist"),
-                    },
-                    {
-                        "title": "Message versions",
-                        "icon": "history",
-                        "link": reverse_lazy("admin:chat_messageversion_changelist"),
                     },
                 ],
             },

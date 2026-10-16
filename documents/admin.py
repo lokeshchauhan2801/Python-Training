@@ -16,12 +16,13 @@ scrapper, chat, company — so the admin looks uniform across services):
     per-row operations, each ``@action``-decorated and operating ONLY on the
     scoped ``self.get_queryset(request)``, with POST paths CSRF-validated.
 
-A library ``Document`` added/changed in the admin is extracted synchronously in
-``save_model`` so its chunks appear immediately (Phase 1 — no async broker).
+A library ``Document`` added in the admin is NOT processed on save: it lands in
+the ``uploaded`` state and waits. The user then chooses a backend from the in-row
+``Schedule`` dropdown (Process now / Celery / Kafka / Temporal) to start it.
 """
 
 from django.contrib import admin, messages
-from django.http import JsonResponse
+from django.http import HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
@@ -35,8 +36,8 @@ from basics.vectorstore import ChromaVectorStore
 
 from .forms import DocumentAdminForm
 from .models import Document, DocumentChunk
-from .services import VECTOR_COLLECTION
-from .tasks import dispatch_document_processing
+from .services import VECTOR_COLLECTION, purge_document
+from .tasks import enqueue_document_processing
 
 # The four options the single "Schedule" dropdown/chooser offers, in display
 # order. Each maps to how the existing dispatcher is invoked:
@@ -89,6 +90,22 @@ class DocumentAdmin(BaseModelAdmin):
     # Add/change form surfaces the file-OR-URL rule as a field error.
     form = DocumentAdminForm
 
+    # --- Real (hard) delete -------------------------------------------------
+    # The base admin's delete does a SOFT delete (flips is_deleted), which left
+    # the row visible in the changelist (which shows all_objects) and never
+    # removed the uploaded file or the Chroma vectors — so "Successfully deleted"
+    # appeared while nothing actually went away. For Documents, delete means
+    # delete: purge_document removes the vectors, the chunk rows, the file on
+    # disk, and the Document row itself. The explicit "Soft delete selected" /
+    # "Restore selected" actions (from BaseModelAdmin) remain available for the
+    # recoverable soft-delete workflow.
+    def delete_model(self, request, obj):
+        purge_document(obj)
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            purge_document(obj)
+
     # Changelist override adds the completion-notification status poller while
     # keeping the house-style/Unfold changelist intact.
     change_list_template = "admin/documents/document/change_list.html"
@@ -102,7 +119,7 @@ class DocumentAdmin(BaseModelAdmin):
 
     list_display = (
         "id_short",
-        "title",
+        "title_with_progress",
         "file_type",
         "status_badge",
         "chunk_count",
@@ -209,6 +226,33 @@ class DocumentAdmin(BaseModelAdmin):
     @admin.display(description="ID")
     def id_short(self, obj):
         return str(obj.pk)[:8]
+
+    @admin.display(description="Title")
+    def title_with_progress(self, obj):
+        progress = obj.processing_progress_display
+        stage = obj.processing_stage or obj.status
+        remaining = 100 - progress
+        return format_html(
+            '<div class="document-progress" data-document-id="{}">'
+            '<div class="document-progress-title">{}</div>'
+            '<div class="document-progress-details" data-progress-details>'
+            '<span data-progress-percent>{}% processed</span>'
+            '<span data-progress-remaining>{}% left</span>'
+            '<span data-progress-stage>{}</span>'
+            '</div>'
+            '<div class="document-progress-track" role="progressbar" '
+            'aria-label="Document processing progress" aria-valuemin="0" '
+            'aria-valuemax="100" aria-valuenow="{}">'
+            '<span data-progress-bar style="width:{}%"></span>'
+            '</div></div>',
+            str(obj.pk),
+            obj.title,
+            progress,
+            remaining,
+            stage.replace("_", " ").title(),
+            progress,
+            progress,
+        )
 
     @admin.display(description="Status", ordering="status")
     def status_badge(self, obj):
@@ -338,27 +382,36 @@ class DocumentAdmin(BaseModelAdmin):
         if not change and form is not None and "source" not in form.fields:
             obj.source = Document.SOURCE_LIBRARY
         # BaseModelAdmin stamps the actor (uploaded_by=request.user) + enforces
-        # the owned company server-side; this override then dispatches library
-        # processing through the backend seam.
+        # the owned company server-side.
         super().save_model(request, obj, form, change)
-        # A library document is dispatched for processing on save (Phase 4). In
-        # DEBUG the default celery path runs inline on a background thread so
-        # chunks appear almost immediately and the status poll surfaces the
-        # completion notification; a URL-sourced document is downloaded first on
-        # that same background path. Kafka/Temporal dispatch and return
-        # immediately (Queued) for their worker to pick up. Chat attachments are
-        # NOT auto-processed (Phase 3 wires that flow).
-        if obj.source == Document.SOURCE_LIBRARY:
-            _job_id, resolved = dispatch_document_processing(str(obj.pk))
+        # A library document is NOT auto-dispatched on save. It lands in the
+        # ``uploaded`` state and waits; the user then chooses WHERE to process it
+        # from the in-row **Schedule** dropdown (Process now / Celery / Kafka /
+        # Temporal). This gives the user explicit control over the backend
+        # instead of silently kicking off extraction the moment they click Save.
+        # Chat attachments were never auto-processed either (Phase 3 wires that
+        # flow), so no dispatch happens here for any source.
+        if obj.source == Document.SOURCE_LIBRARY and not change:
             self.message_user(
                 request,
-                f"Queued “{obj.title}” for processing via {resolved}.",
+                f"“{obj.title}” was added. Choose a backend from the "
+                f"Schedule column to start processing.",
                 level=messages.INFO,
             )
 
     def get_urls(self):
         # Custom URLs BEFORE super().get_urls() so they take precedence.
         custom = [
+            path(
+                "queue/",
+                self.admin_site.admin_view(self.queue_view),
+                name="documents_document_queue",
+            ),
+            path(
+                "queue-json/",
+                self.admin_site.admin_view(self.queue_json_view),
+                name="documents_document_queue_json",
+            ),
             path(
                 "status-json/",
                 self.admin_site.admin_view(self.status_json_view),
@@ -382,6 +435,78 @@ class DocumentAdmin(BaseModelAdmin):
         ]
         return custom + super().get_urls()
 
+    def queue_view(self, request):
+        if not self.has_view_or_change_permission(request):
+            return HttpResponseForbidden()
+        documents = self.get_queryset(request).filter(
+            source=Document.SOURCE_LIBRARY,
+            status__in=(
+                Document.STATUS_QUEUED,
+                Document.STATUS_PROCESSING,
+                Document.STATUS_FAILED,
+            ),
+        )[:500]
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Queue messages",
+            "opts": self.model._meta,
+            "documents": documents,
+            "queue_json_url": reverse(
+                "admin:documents_document_queue_json"
+            ),
+        }
+        return TemplateResponse(
+            request, "admin/documents/document/queue.html", context
+        )
+
+    def queue_json_view(self, request):
+        if request.method != "GET":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        if not self.has_view_or_change_permission(request):
+            return HttpResponseForbidden()
+        rows = (
+            self.get_queryset(request)
+            .filter(
+                source=Document.SOURCE_LIBRARY,
+                status__in=(
+                    Document.STATUS_QUEUED,
+                    Document.STATUS_PROCESSING,
+                    Document.STATUS_FAILED,
+                ),
+            )
+            .values(
+                "id",
+                "title",
+                "status",
+                "processing_stage",
+                "processing_progress",
+                "processing_backend",
+                "processing_task_id",
+                "processing_error",
+                "updated_at",
+            )
+            .order_by("-updated_at")[:500]
+        )
+        status_display = dict(Document.STATUS_CHOICES)
+        return JsonResponse(
+            {
+                "documents": [
+                    {
+                        **row,
+                        "id": str(row["id"]),
+                        "status_display": status_display[row["status"]],
+                        "processing_progress": (
+                            100
+                            if row["status"] == Document.STATUS_READY
+                            else row["processing_progress"]
+                        ),
+                        "updated_at": row["updated_at"].isoformat(),
+                    }
+                    for row in rows
+                ]
+            }
+        )
+
     def status_json_view(self, request):
         # Completion-notification data source: the changelist poller fetches this
         # every few seconds and shows a toast when a document flips to
@@ -397,7 +522,13 @@ class DocumentAdmin(BaseModelAdmin):
             self.get_queryset(request)
             .filter(updated_at__gte=since)
             .values(
-                "id", "title", "status", "chunk_count", "processing_error"
+                "id",
+                "title",
+                "status",
+                "chunk_count",
+                "processing_error",
+                "processing_progress",
+                "processing_stage",
             )[:200]
         )
         return JsonResponse(
@@ -407,8 +538,17 @@ class DocumentAdmin(BaseModelAdmin):
                         "id": str(row["id"]),
                         "title": row["title"],
                         "status": row["status"],
+                        "status_display": dict(Document.STATUS_CHOICES)[
+                            row["status"]
+                        ],
                         "chunk_count": row["chunk_count"],
                         "processing_error": row["processing_error"],
+                        "processing_progress": (
+                            100
+                            if row["status"] == Document.STATUS_READY
+                            else row["processing_progress"]
+                        ),
+                        "processing_stage": row["processing_stage"],
                     }
                     for row in rows
                 ]
@@ -448,18 +588,23 @@ class DocumentAdmin(BaseModelAdmin):
         if backend is not None:
             document.processing_backend = backend
         self._reset_for_reprocess(document)
-        _job_id, resolved = dispatch_document_processing(
+        _job_id, resolved = enqueue_document_processing(
             str(document.pk), backend=backend
         )
-        document.refresh_from_db()
         return JsonResponse(
             {
-                "status": document.status,
-                "status_display": document.get_status_display(),
+                "status": Document.STATUS_QUEUED,
+                "status_display": dict(Document.STATUS_CHOICES)[
+                    Document.STATUS_QUEUED
+                ],
                 "backend": resolved,
                 "document_id": str(document.pk),
                 "title": document.title,
-            }
+                "message": (
+                    f"Task queued for processing via {resolved}."
+                ),
+            },
+            status=202,
         )
 
     def chunks_view(self, request, pk):

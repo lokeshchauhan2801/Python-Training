@@ -68,16 +68,19 @@ class _FakeStructuredLLM:
     provider = "fake"
     model = "fake-model"
 
-    def __init__(self, response="fake answer", chart=None):
+    def __init__(self, response="fake answer", chart=None, title=None):
         self._response = response
         self._chart = chart
+        self._title = title
         self.prompts = []
         self.structured_calls = 0
 
     def generate_structured(self, prompt, schema):
         self.prompts.append(prompt)
         self.structured_calls += 1
-        return schema(response=self._response, chart=self._chart)
+        return schema(
+            response=self._response, chart=self._chart, title=self._title
+        )
 
     def complete(self, messages, *, temperature=None, max_tokens=None):
         return self._response
@@ -611,7 +614,7 @@ class ProcessMessageTests(TestCase):
         self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
 
     def test_first_message_titles_session_bug2(self):
-        """BUG 2: the first send retitles 'New session' from the message."""
+        """The first send titles the session from the message if no LLM title."""
         self.assertEqual(self.session.title, "New session")
         with self._no_chunks():
             self._service().process_message(
@@ -625,6 +628,25 @@ class ProcessMessageTests(TestCase):
             self.session.title, "What is the quarterly revenue breakdown?"[:50]
         )
         self.assertNotEqual(self.session.title, "New session")
+
+    def test_first_message_uses_llm_generated_title(self):
+        session = ConversationSession.objects.create(
+            company=self.company, user=self.user
+        )
+        fake = _FakeStructuredLLM(
+            response="Here is the summary.",
+            title='  "Quarterly Revenue Overview"  ',
+        )
+        with self._no_chunks():
+            ChatService(llm_client=fake).process_message(
+                user=self.user,
+                message_text="Can you summarize the quarterly revenue?",
+                conversation=session,
+                company=self.company,
+            )
+        session.refresh_from_db()
+        self.assertEqual(session.title, "Quarterly Revenue Overview")
+        self.assertIn("concise chat title", fake.prompts[0])
 
     def test_citations_assembled_from_chunks(self):
         document = Document.objects.create(
@@ -1042,7 +1064,9 @@ class ChatUIViewTests(TestCase):
         )
         self.assertEqual(session.title, "New session")
         self.client.force_login(self.alice)
-        fake = ChatService(llm_client=_FakeStructuredLLM(response="ok"))
+        fake = ChatService(
+            llm_client=_FakeStructuredLLM(response="ok", title="Onboarding Policy")
+        )
         with mock.patch("chat.views._chat_service", return_value=fake), mock.patch(
             "chat.services.document_services.find_relevant_chunks",
             return_value=[],
@@ -1054,7 +1078,7 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         session.refresh_from_db()
         self.assertEqual(
-            session.title, "Summarize the onboarding policy please"[:50]
+            session.title, "Onboarding Policy"
         )
         self.assertNotEqual(session.title, "New session")
         self.assertEqual(resp.json()["session"]["title"], session.title)
@@ -1249,53 +1273,54 @@ class ChatUIViewTests(TestCase):
         self.assertIn("flex-none", composer_tag)
         self.assertIn("mt-auto", composer_tag)
 
-    def test_chat_page_title_header_has_top_right_delete_control(self):
-        """The OPEN conversation's title header carries a top-right delete
-        control that REUSES the existing /chat/<id>/delete/ endpoint (no new
-        endpoint). The icon renders as SVG, not the literal word 'delete'."""
+    def test_chat_page_title_header_has_no_top_right_delete_control(self):
+        """The OPEN conversation's title header no longer has a top-right
+        delete control. Per-session deletion is done from the always-visible
+        trash icon on each left-list row, which reuses the same scoped
+        /chat/<id>/delete/ endpoint."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The conversation panel has a title/header row with a delete button.
+        # The conversation panel still has a title/header row...
         header_pos = body.find('id="chat-conv-header"')
         title_pos = body.find('id="chat-conv-title"')
-        delete_pos = body.find('id="chat-conv-delete"')
         self.assertNotEqual(header_pos, -1)
         self.assertNotEqual(title_pos, -1)
-        self.assertNotEqual(delete_pos, -1)
-        # The title header sits ABOVE the messages area (fixed top row), and the
-        # title comes before the delete control (delete is at the top-RIGHT).
         self.assertLess(header_pos, body.find('id="chat-messages"'))
-        self.assertLess(title_pos, delete_pos)
-        # The delete control is NOT the literal ligature word; the icon is
-        # injected as an inline SVG client-side (makeTrashIcon via createElementNS).
-        delete_tag = body[delete_pos:delete_pos + 400]
-        self.assertNotIn(">delete<", delete_tag)
-        self.assertIn("makeTrashIcon", body)
-        # It reuses the shared deleteSession() flow -> the existing delete
-        # endpoint; the per-session delete URL fragment is present in the JS.
-        self.assertIn('chat-conv-delete', body)
+        # ...but the top-right delete control (markup + JS lookup) is gone.
+        self.assertNotIn('id="chat-conv-delete"', body)
+        self.assertNotIn("convDeleteBtn", body)
+        # Deletion still exists via the per-row trash control + shared endpoint.
+        self.assertIn("data-row-delete-session-id", body)
         self.assertIn('"/delete/"', body)
+        # The sidebar history entry has a stable id so the shared delete
+        # handler can remove it as well as the main history-grid row.
+        self.assertIn('item.getAttribute("data-chat-session-id") === id', body)
+        self.assertIn('history.pushState({ sessionId: null }, "", baseUrl)', body)
 
     def test_chat_page_renders_delete_control_wiring(self):
-        """Session rows get a ChatGPT-style per-row '...' control (rendered
-        client-side) that opens a menu with Delete. Assert the page ships the
-        wiring: the per-row menu marker, the menu + Delete flow, and the reused
-        /delete/ endpoint. The '...'/menu click stopPropagation()s so the row
-        body click still loads the session."""
+        """Session rows get an always-visible per-row trash control (rendered
+        client-side) that deletes the session IMMEDIATELY on click — no
+        confirm() popup and no hover-to-reveal menu. Assert the page ships the
+        wiring: the per-row delete marker, the direct deleteSession() flow, the
+        reused /delete/ endpoint, and that NO confirm() popup is used. The
+        delete click stopPropagation()s so the row body click still loads the
+        session."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The per-row '...' trigger marker (ChatGPT-style, hover-revealed).
-        self.assertIn("data-row-menu-session-id", body)
-        # The menu-open helper + the Delete item wired to deleteSession().
-        self.assertIn("openRowMenuFor", body)
+        # The per-row delete trigger marker (always visible trash icon).
+        self.assertIn("data-row-delete-session-id", body)
+        # Clicking it calls deleteSession() directly.
         self.assertIn("deleteSession", body)
         # It reuses the existing soft-delete endpoint (no new endpoint).
         self.assertIn("/delete/", body)
-        # The row body click still loads the session; the menu trigger
+        # The row body click still loads the session; the delete trigger
         # stopPropagation()s so it does NOT also load the session.
         self.assertIn("stopPropagation", body)
-        # Only one row menu open at a time + click-away closes it.
-        self.assertIn("closeRowMenu", body)
+        # No confirmation popup: delete is immediate.
+        self.assertNotIn("window.confirm", body)
+        self.assertNotIn("This cannot be undone", body)
+        # The old hover-reveal '...' menu wiring is gone.
+        self.assertNotIn("data-row-menu-session-id", body)
 
     def test_chat_page_session_rows_are_uniform_grid(self):
         """Every left-list session row shares one uniform row class with a
@@ -1343,8 +1368,10 @@ class ChatUIViewTests(TestCase):
         self.assertIn("fonts/material-symbols/styles.css", body)
 
     def test_company_selector_rendered_in_header_not_chats_column(self):
-        """ADDITION B: the #chat-company select sits in the page header
-        (#chat-header), before the Chats column / session list."""
+        """The #chat-company element lives in the page header (#chat-header),
+        before the Chats column / session list. It is now a HIDDEN JS helper
+        (the only VISIBLE company selector is the Unfold header switcher); the
+        element must still be present so the page JS keeps working."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
         header_pos = body.find('id="chat-header"')
@@ -1353,9 +1380,12 @@ class ChatUIViewTests(TestCase):
         self.assertNotEqual(header_pos, -1)
         self.assertNotEqual(company_pos, -1)
         self.assertNotEqual(list_pos, -1)
-        # The company selector lives inside the header, above the session list.
+        # The company element lives inside the header, above the session list.
         self.assertLess(header_pos, company_pos)
         self.assertLess(company_pos, list_pos)
+        # It is hidden from view (no duplicate visible selector on the page).
+        company_tag = body[company_pos:company_pos + 120]
+        self.assertIn("hidden", company_tag)
 
     # --- ADDITION A: empty/missing vector store must NOT hard-fail --------
     @override_settings(CHROMA_PATH=tempfile.mkdtemp(prefix="chat-empty-chroma-"))

@@ -94,6 +94,46 @@
     }, 10000);
   }
 
+  function updateProgress(doc) {
+    var container = document.querySelector(
+      '.document-progress[data-document-id="' + String(doc.id).replace(/["\\]/g, "\\$&") + '"]'
+    );
+    if (!container) {
+      return;
+    }
+    var progress = doc.status === "ready"
+      ? 100
+      : Math.max(0, Math.min(100, Number(doc.processing_progress) || 0));
+    var remaining = 100 - progress;
+    var percent = container.querySelector("[data-progress-percent]");
+    var left = container.querySelector("[data-progress-remaining]");
+    var stage = container.querySelector("[data-progress-stage]");
+    var bar = container.querySelector("[data-progress-bar]");
+    var track = container.querySelector('[role="progressbar"]');
+    if (percent) { percent.textContent = progress + "% processed"; }
+    if (left) { left.textContent = remaining + "% left"; }
+    if (stage) {
+      stage.textContent = (doc.processing_stage || doc.status || "")
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, function (letter) { return letter.toUpperCase(); });
+    }
+    if (bar) { bar.style.width = progress + "%"; }
+    if (track) { track.setAttribute("aria-valuenow", String(progress)); }
+
+    var row = container.closest("tr");
+    var statusCell = row && row.querySelector(".field-status_badge span");
+    if (statusCell) {
+      statusCell.textContent = doc.status_display || doc.status || "";
+      statusCell.style.color = doc.status === "ready"
+        ? "#16a34a"
+        : doc.status === "failed"
+          ? "#dc2626"
+          : doc.status === "processing" || doc.status === "queued"
+            ? "#d97706"
+            : "#6b7280";
+    }
+  }
+
   function poll() {
     fetch(statusUrl, {
       credentials: "same-origin",
@@ -108,6 +148,7 @@
       .then(function (data) {
         var docs = (data && data.documents) || [];
         docs.forEach(function (doc) {
+          updateProgress(doc);
           var prev = lastStatus[doc.id];
           lastStatus[doc.id] = doc.status;
           // On the first pass we only seed the baseline so we don't toast for

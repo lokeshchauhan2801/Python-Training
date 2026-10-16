@@ -9,24 +9,25 @@
 #
 # Image tags are pinned deliberately — do not change them to `latest`.
 
+name: agentic-flow-processing
+
 services:
   # --- Kafka (KRaft mode, single broker, no ZooKeeper) ----------------------
   kafka:
     image: confluentinc/cp-kafka:7.6.1
-    container_name: processing-kafka
     ports:
-      # Host clients (Django, workers) connect here.
-      - "9092:9092"
+      # Host clients (Django, workers) connect on a dedicated port.
+      - "9093:9092"
     environment:
       # KRaft single-node: this broker is also the controller.
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: "broker,controller"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      # Two listeners: PLAINTEXT advertised to the host as localhost:9092,
+      # Two listeners: PLAINTEXT advertised to the host as localhost:9093,
       # and an internal controller listener on 29093.
       KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9093"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       # Single-broker: everything replicates to 1.
@@ -52,7 +53,6 @@ services:
   # --- Temporal dev server + dependencies -----------------------------------
   temporal-postgresql:
     image: postgres:16.3
-    container_name: processing-temporal-postgres
     environment:
       POSTGRES_USER: temporal
       POSTGRES_PASSWORD: temporal
@@ -68,13 +68,12 @@ services:
 
   temporal:
     image: temporalio/auto-setup:1.24.2
-    container_name: processing-temporal
     depends_on:
       temporal-postgresql:
         condition: service_healthy
     ports:
       # Workers and the Django dispatcher connect to the gRPC frontend here.
-      - "7233:7233"
+      - "7234:7233"
     environment:
       DB: postgres12
       DB_PORT: 5432
@@ -84,15 +83,14 @@ services:
 
   temporal-ui:
     image: temporalio/ui:2.26.2
-    container_name: processing-temporal-ui
     depends_on:
       - temporal
     ports:
-      # Browse workflows at http://localhost:8080
-      - "8080:8080"
+      # Browse workflows at http://localhost:8081
+      - "8081:8080"
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:8080
+      TEMPORAL_CORS_ORIGINS: http://localhost:8081
 
 volumes:
   kafka-data:

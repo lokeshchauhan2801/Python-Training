@@ -69,7 +69,7 @@ to the top-level /chat/<session_id>/ route — never a raw JSON endpoint.
 
                 <ol class="flex flex-col gap-0.5 px-6" x-show="navigationOpen">
                     {% for chat in admin_chat_history %}
-                        <li>
+                        <li class="chat-history-item" data-chat-session-id="{{ chat.id }}">
                             <a href="{{ chat.url }}" title="{{ chat.title }}" class="flex h-[38px] items-center -mx-3 px-3 rounded-default hover:text-primary-600 dark:hover:text-primary-500">
                                 <span class="material-symbols-outlined md-18 mr-3 w-[18px]">chat_bubble</span>
                                 <span class="truncate">{{ chat.title }}</span>

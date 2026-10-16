@@ -1,11 +1,3 @@
-"""The ``company.Company`` model (tenant root).
-
-``Company`` composes ``BaseModel`` (4 audit fields) + ``SoftDeleteModel`` and
-declares its own ULID ``id`` PK. As the tenant root it has an ``owner`` FK but
-NO ``company`` FK (it IS the company), so it is the one domain model without a
-tenant-scoping company field.
-"""
-
 from django.conf import settings
 from django.db import models
 

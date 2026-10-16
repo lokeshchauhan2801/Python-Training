@@ -1,0 +1,62 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+<div id="content-main">
+  <p class="mb-4 text-sm text-font-subtle-light dark:text-font-subtle-dark">
+    Queued and running document jobs update automatically. Failed jobs remain
+    listed here so their error can be inspected.
+  </p>
+  <div id="documents-queue"
+       data-queue-url="{{ queue_json_url }}"
+       aria-live="polite">
+    {% for document in documents %}
+      <article class="document-queue-item mb-3 rounded-default border border-base-200 bg-white p-4 dark:border-base-700 dark:bg-base-900"
+               data-document-id="{{ document.pk }}">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <a class="font-semibold hover:text-primary-600 dark:hover:text-primary-500"
+               href="{% url 'admin:documents_document_change' document.pk %}">
+              {{ document.title }}
+            </a>
+            <div class="mt-1 text-xs text-font-subtle-light dark:text-font-subtle-dark">
+              <span data-queue-status>{{ document.get_status_display }}</span>
+              &middot;
+              <span data-queue-stage>{{ document.processing_stage|default:document.status|capfirst }}</span>
+              &middot;
+              Backend: <span data-queue-backend>{{ document.processing_backend }}</span>
+            </div>
+          </div>
+          <span class="text-xs text-font-subtle-light dark:text-font-subtle-dark">
+            Task: <span data-queue-task>{{ document.processing_task_id|default:"—" }}</span>
+          </span>
+        </div>
+        <div class="mt-3 flex items-center gap-3">
+          <div class="document-progress-track flex-1 rounded-full bg-base-200 dark:bg-base-700"
+               role="progressbar"
+               aria-label="Document processing progress"
+               aria-valuemin="0"
+               aria-valuemax="100"
+               aria-valuenow="{{ document.processing_progress_display }}">
+            <span data-queue-progress-bar
+                  class="block h-1.5 rounded-full bg-primary-600"
+                  style="width: {{ document.processing_progress_display }}%"></span>
+          </div>
+          <span class="w-36 text-right text-xs text-font-subtle-light dark:text-font-subtle-dark"
+                data-queue-progress-text>
+            {{ document.processing_progress_display }}% processed · {{ document.processing_remaining_display }}% left
+          </span>
+        </div>
+        <p class="mt-2 hidden text-sm text-red-600 dark:text-red-400"
+           data-queue-error>{{ document.processing_error }}</p>
+      </article>
+    {% empty %}
+      <p id="documents-queue-empty"
+         class="rounded-default border border-base-200 p-4 text-sm text-font-subtle-light dark:border-base-700 dark:text-font-subtle-dark">
+        No queued, running, or failed document jobs.
+      </p>
+    {% endfor %}
+  </div>
+</div>
+<script src="{% static 'documents/js/queue_poll.js' %}"></script>
+{% endblock %}

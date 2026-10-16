@@ -1,10 +1,3 @@
-"""Scrapper domain model.
-
-``ScrapeJob`` records a single URL fetch and its result. The network/validation
-logic lives in ``scrapper.services.ScrapeService`` (SSRF-safe); the model holds
-only schema + the status state machine's choices.
-"""
-
 from django.db import models
 
 from basics.managers import AllObjectsManager, SoftDeleteManager

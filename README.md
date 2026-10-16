@@ -262,10 +262,24 @@ library row regardless of status, so a `ready` document can be **reprocessed**;
 selecting an option POSTs to a CSRF-protected, owner-scoped endpoint and updates the
 row's status without a page reload. "Process now" uses the row's current/default
 backend; the others set `processing_backend` and dispatch through that backend.
+Each document row shows the current processing stage, percent complete, and
+percent remaining beneath its title; these values refresh automatically while
+the document is running. **Scrapper → Queue messages** opens the scoped live
+queue view for queued/running jobs and recent failures, including backend,
+task ID, progress, and errors.
+The action acknowledges the request immediately with a **Task queued** notice and
+sets the row to **Queued**; broker startup/connection does not block the admin
+click. If dispatch fails, the document changes to **Failed** with the error shown
+on its detail page. The Documents list is the queue view: queued rows show the
+selected backend, and the existing completion notice reports when processing
+finishes.
 
 Kafka and Temporal need their infrastructure and a worker running:
 
 ```bash
+# One command starts both isolated services and both workers in the background.
+./scripts/start_processing.sh
+
 # Kafka: start the broker, then the consumer worker
 sudo docker compose -f docker-compose.processing.yml up -d kafka
 venv/bin/python manage.py kafka_worker
@@ -273,12 +287,21 @@ venv/bin/python manage.py kafka_worker
 # Temporal: start the server + its Postgres + Web UI, then the worker
 sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
 venv/bin/python manage.py temporal_worker
-# Temporal Web UI: http://localhost:8080   (server :7233, Kafka :9092)
+# Temporal Web UI: http://localhost:8081   (server :7234, Kafka :9093)
+
+# Stop the workers and this project's containers (preserves data volumes)
+./scripts/stop_processing.sh
 ```
 
-`docker-compose.processing.yml` provides single-broker KRaft Kafka (`:9092`),
-Temporal auto-setup (`:7233`) with its own Postgres, and the Temporal Web UI
-(`:8080`). See `START_PROCESSING.txt` for the full local walkthrough.
+The all-in-one launcher waits until Kafka and Temporal are reachable before it
+starts the workers. It writes worker logs and PID files under
+`~/.local/state/agentic-flow-processing/`.
+
+`docker-compose.processing.yml` provides a project-scoped, single-broker KRaft
+Kafka (`:9093`), Temporal auto-setup (`:7234`) with its own Postgres, and the
+Temporal Web UI (`:8081`). These dedicated ports and generated container names let
+this stack run alongside other Kafka/Temporal containers. See `START_PROCESSING.txt`
+for the full local walkthrough.
 
 ### Embeddings & RAG
 
@@ -297,6 +320,12 @@ refresh:
 - **Sessions history** on the left as a **uniform, ChatGPT-style list**: every row
   is the same fixed height with consistent padding, a single-line title truncated
   with an ellipsis, and a timestamp line — no row grows or shrinks with its title.
+  The LLM generates the session title from the first message as part of its
+  structured response; if it does not provide a title, the first message is used
+  as a readable fallback.
+  Deleting a chat removes it from both the Chats list and the Unfold sidebar
+  history immediately; reloading also keeps it absent because deleted sessions
+  are excluded from the history query.
   Click a row to load its messages in place; the active row is highlighted and rows
   highlight on hover. **New chat** creates a session (returned as JSON, never a
   redirect).
@@ -679,7 +708,7 @@ DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py temporal_worker
 #   or simply:  python manage.py temporal_worker
 ```
 
-- Temporal Web UI: http://localhost:8080/
+- Temporal Web UI: http://localhost:8081/
 
 #### Shutting down the brokers
 
@@ -699,7 +728,7 @@ flowchart TD
     F --> G{need Kafka/Temporal?}
     G -->|No| H["use Schedule → Process now (inline, no infra)"]
     G -->|Kafka| I["docker compose up -d kafka → manage.py kafka_worker"]
-    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8080"]
+    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8081"]
     I --> K["pick that backend in the Schedule dropdown"]
     J --> K
 ```

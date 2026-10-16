@@ -24,6 +24,7 @@ def admin_chat_history(request):
     sessions = qs.order_by("-updated_at").values_list("pk", "title")[:30]
     history = [
         {
+            "id": str(pk),
             "title": title or "New session",
             "url": reverse("chat:session", args=[pk]),
         }

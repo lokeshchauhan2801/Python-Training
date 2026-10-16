@@ -114,16 +114,6 @@ class Conversation(BaseModel, SoftDeleteModel):
 
 
 class Message(BaseModel, SoftDeleteModel):
-    """A single chat message (user/assistant/system) inside a session.
-
-    The RAG chat UI (Phase 3) persists one ``Message`` per turn side, carrying
-    the answer's citations, an optional structured ``chart_data`` payload, the
-    documents it is grounded in, and the ``context_signature`` the repeated-query
-    cache keys on. Like every chat row it composes ``BaseModel`` + ``SoftDeleteModel``
-    with a ULID PK and a required ``company`` FK, and enforces
-    ``company == conversation.company`` in both ``clean()`` and ``save()``.
-    """
-
     ROLE_USER = "user"
     ROLE_ASSISTANT = "assistant"
     ROLE_SYSTEM = "system"

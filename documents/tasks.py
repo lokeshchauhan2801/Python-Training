@@ -27,6 +27,7 @@ from uuid import uuid4
 from celery import shared_task
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
+from django.db import close_old_connections
 from django.db import transaction
 
 from .models import Document
@@ -38,6 +39,10 @@ _local_executor = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="document-index",
 )
+_dispatch_executor = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="document-dispatch",
+)
 
 
 @shared_task(name="apps.documents.process_document")
@@ -47,13 +52,7 @@ def process_document_task(
     user_id: str | None = None,
     backend: str = "celery",
 ):
-    """Download (if URL-sourced), extract, embed, and index one document.
 
-    ``company_id``/``user_id``/``backend`` exist for signature parity with the
-    event payload and the Kafka/Temporal surface router; the synchronous
-    ``process_document`` service owns all status transitions and the embed/
-    no-key/cleanup contract.
-    """
     try:
         document = Document.objects.get(pk=document_id)
     except ObjectDoesNotExist:
@@ -187,3 +186,67 @@ def dispatch_document_processing(
         )
     )
     return job_id, requested
+
+
+def enqueue_document_processing(
+    document_id: str, backend: str | None = None
+) -> tuple[str, str]:
+    """Persist a queued state and dispatch to its broker outside the request.
+
+    Broker connection and publish calls can block while Kafka or Temporal starts
+    or is unavailable. The admin action uses this entry point so it can confirm
+    the queued state immediately; a dispatch failure is recorded on the
+    document and logged for operators.
+    """
+    requested = (
+        backend or getattr(settings, "DOCUMENT_PROCESSING_BACKEND", "celery")
+    ).lower()
+    task_id = str(uuid4())
+
+    with transaction.atomic():
+        document = Document.objects.select_for_update().get(pk=document_id)
+        document.status = Document.STATUS_QUEUED
+        document.processing_stage = "queued"
+        document.processing_progress = 0
+        document.processing_backend = requested
+        document.processing_task_id = task_id
+        document.processing_error = ""
+        document.save(
+            update_fields=[
+                "status",
+                "processing_stage",
+                "processing_progress",
+                "processing_backend",
+                "processing_task_id",
+                "processing_error",
+                "updated_at",
+            ]
+        )
+        transaction.on_commit(
+            lambda: _dispatch_executor.submit(
+                _dispatch_queued_document, str(document_id), backend
+            )
+        )
+
+    return task_id, requested
+
+
+def _dispatch_queued_document(
+    document_id: str, backend: str | None
+) -> None:
+    """Dispatch a previously queued document and persist transport failures."""
+    close_old_connections()
+    try:
+        dispatch_document_processing(document_id, backend=backend)
+    except Exception as exc:
+        logger.exception("Could not dispatch document %s", document_id)
+        Document.objects.filter(
+            pk=document_id, status=Document.STATUS_QUEUED
+        ).update(
+            status=Document.STATUS_FAILED,
+            processing_stage="failed",
+            processing_progress=0,
+            processing_error=f"Could not queue document for processing: {exc}",
+        )
+    finally:
+        close_old_connections()

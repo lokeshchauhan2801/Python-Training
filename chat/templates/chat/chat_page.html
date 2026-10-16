@@ -189,22 +189,16 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       {% translate "No companies available. You cannot start a chat yet." %}
     </p>
 
-    <!-- Page header row: the Company selector lives here (top-right), NOT
-         inside the Chats column. Keeps the same #chat-company element + change
-         handler + scoping; only its DOM location changed. -->
+    <!-- Page header row. The visible company selector lives ONLY in the Unfold
+         header (top-right) — there is no second in-page selector. We keep a
+         HIDDEN #chat-company element here so the existing page JS (which reads
+         companySel.value and populates its options from the active company)
+         keeps working unchanged; it is never shown to the user. -->
     <div id="chat-header" class="flex flex-wrap items-end justify-between gap-3 mb-4">
       <h1 class="font-semibold text-base text-font-important-light dark:text-font-important-dark">
         {% translate "Chat" %}
       </h1>
-      <div class="flex flex-col">
-        <label for="chat-company"
-               class="block font-semibold mb-1 text-font-subtle-light text-xs uppercase dark:text-font-subtle-dark">
-          {% translate "Company" %}
-        </label>
-        <select id="chat-company"
-                class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
-                style="min-width:14rem;"></select>
-      </div>
+      <select id="chat-company" class="hidden" aria-hidden="true" tabindex="-1"></select>
     </div>
 
     {% comment %}
@@ -259,23 +253,15 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       <div id="chat-panel-col"
            class="flex flex-1 flex-col min-w-0 min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="flex:1 1 24rem;min-width:0;">
-        <!-- Conversation title header (fixed, top). The delete control sits at
-             the TOP-RIGHT corner and deletes the CURRENTLY-OPEN session by
-             reusing the same scoped /chat/<id>/delete/ endpoint the left-list
-             trash button uses. Hidden until a session is open. -->
+        <!-- Conversation title header (fixed, top). Per-session deletion is
+             done from the always-visible trash icon on each left-list row;
+             there is no top-right delete control here. -->
         <div id="chat-conv-header"
              class="flex items-center justify-between gap-2 mb-3 pb-2 border-b border-base-200 dark:border-base-700">
           <h2 id="chat-conv-title"
               class="font-semibold text-sm truncate text-font-important-light dark:text-font-important-dark">
             {% translate "Conversation" %}
           </h2>
-          <button type="button" id="chat-conv-delete"
-                  title="{% translate 'Delete this chat' %}"
-                  aria-label="{% translate 'Delete this chat' %}"
-                  class="flex-none hidden h-8 w-8 items-center justify-center rounded-default cursor-pointer text-font-subtle-light hover:bg-base-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:text-font-subtle-dark dark:hover:bg-base-800">
-            <!-- Icon injected via createElementNS (makeTrashIcon) at init so it
-                 renders as an SVG icon regardless of icon-font loading. -->
-          </button>
         </div>
 
         <div id="chat-messages" class="flex-1 min-h-0 overflow-y-auto">
@@ -359,7 +345,6 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     const emptyStateEl = document.getElementById("chat-empty-state");
     const convHeaderEl = document.getElementById("chat-conv-header");
     const convTitleEl = document.getElementById("chat-conv-title");
-    const convDeleteBtn = document.getElementById("chat-conv-delete");
     const composerEl = document.getElementById("chat-composer");
     const inputEl = document.getElementById("chat-input");
     const sendBtn = document.getElementById("chat-send");
@@ -447,27 +432,6 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       });
       return svg;
     }
-    // Build an inline SVG "..." (horizontal more) icon via createElementNS. Used
-    // for the ChatGPT-style per-row menu trigger; renders as an icon, never the
-    // literal text, regardless of icon-font loading.
-    function makeMoreIcon() {
-      const svg = document.createElementNS(SVG_NS, "svg");
-      svg.setAttribute("width", "18");
-      svg.setAttribute("height", "18");
-      svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("fill", "currentColor");
-      svg.setAttribute("stroke", "none");
-      svg.setAttribute("aria-hidden", "true");
-      [[5, 12], [12, 12], [19, 12]].forEach(function (cxcy) {
-        const circle = document.createElementNS(SVG_NS, "circle");
-        circle.setAttribute("cx", String(cxcy[0]));
-        circle.setAttribute("cy", String(cxcy[1]));
-        circle.setAttribute("r", "1.6");
-        svg.appendChild(circle);
-      });
-      return svg;
-    }
-
     // Only one left-row menu may be open at a time; click-away closes it.
     let openRowMenu = null;
     function closeRowMenu() {
@@ -479,22 +443,11 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     document.addEventListener("click", function () { closeRowMenu(); });
 
     function setStatus(text) { statusEl.textContent = text || ""; }
-    // Update the conversation panel's title header. When a session is open the
-    // title shows and the top-right delete control is enabled + visible; with
-    // no open session the delete control is hidden.
+    // Update the conversation panel's title header. Per-session deletion lives
+    // on each left-list row (always-visible trash icon); there is no top-right
+    // delete control to toggle here.
     function setConversationHeader(title, hasSession) {
       if (convTitleEl) { convTitleEl.textContent = title || "Conversation"; }
-      if (convDeleteBtn) {
-        if (hasSession) {
-          convDeleteBtn.classList.remove("hidden");
-          convDeleteBtn.classList.add("flex");
-          convDeleteBtn.disabled = false;
-        } else {
-          convDeleteBtn.classList.add("hidden");
-          convDeleteBtn.classList.remove("flex");
-          convDeleteBtn.disabled = true;
-        }
-      }
     }
     // The composer stays visible AND usable at all times. On an empty / new
     // state the textarea + Send stay enabled so the user can click and type
@@ -719,53 +672,15 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       });
     }
 
-    // Open the ChatGPT-style per-row menu anchored to its "..." trigger. The
-    // menu is appended to document.body with FIXED positioning (computed from
-    // the trigger's bounding rect) so it is NEVER clipped by the session list's
-    // overflow-y:auto (the earlier "drop down goes under the list line" bug).
-    function openRowMenuFor(triggerBtn, sessionId, li) {
-      closeRowMenu();
-      const menu = document.createElement("div");
-      menu.className = "chat-row-menu fixed z-50 min-w-[9rem] border border-base-200 bg-white rounded-default shadow-lg py-1 text-sm dark:border-base-700 dark:bg-base-900";
-
-      const delItem = document.createElement("button");
-      delItem.type = "button";
-      delItem.className = "flex w-full items-center gap-2 px-3 py-2 cursor-pointer text-left text-red-600 hover:bg-base-100 dark:hover:bg-base-800";
-      const icon = makeTrashIcon();
-      icon.setAttribute("width", "16");
-      icon.setAttribute("height", "16");
-      delItem.appendChild(icon);
-      const label = document.createElement("span");
-      label.textContent = "Delete";
-      delItem.appendChild(label);
-      delItem.addEventListener("click", function (ev) {
-        ev.stopPropagation();
-        closeRowMenu();
-        deleteSession(sessionId, li);
-      });
-      menu.appendChild(delItem);
-
-      // Keep clicks inside the menu from bubbling to the document click-away.
-      menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
-
-      document.body.appendChild(menu);
-      const rect = triggerBtn.getBoundingClientRect();
-      const menuWidth = menu.offsetWidth || 144;
-      let left = rect.right - menuWidth;
-      if (left < 8) { left = 8; }
-      menu.style.left = left + "px";
-      menu.style.top = (rect.bottom + 4) + "px";
-      openRowMenu = menu;
-    }
-
+    // Render the left-list session rows. Each row loads its session on click
+    // and carries an always-visible trash control that deletes it immediately.
     function renderSessions(sessions) {
       clear(sessionListEl);
       (sessions || []).forEach(function (session) {
         const li = document.createElement("li");
         // Uniform row: fixed height, consistent padding, hover/active highlight.
-        // The "relative" + "group" let the hover "..." control pin to the right
-        // edge and appear only on hover (ChatGPT-style).
-        li.className = "chat-session-row group relative mb-1 flex items-center h-14 px-3 rounded-default border border-base-200 bg-white cursor-pointer hover:bg-base-100 dark:border-base-700 dark:bg-base-900 dark:hover:bg-base-800";
+        // "relative" lets the always-visible trash control pin to the right edge.
+        li.className = "chat-session-row relative mb-1 flex items-center h-14 px-3 rounded-default border border-base-200 bg-white cursor-pointer hover:bg-base-100 dark:border-base-700 dark:bg-base-900 dark:hover:bg-base-800";
 
         // The loadable row body (flex-1) carries data-session-id so
         // highlightSession() keeps working; a click on it LOADS the session.
@@ -801,25 +716,25 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         btn.addEventListener("click", function () { loadSession(session.id, true); });
         li.appendChild(btn);
 
-        // ChatGPT-style per-row "..." control pinned to the row's right edge,
-        // revealed on hover. Clicking it opens a small menu with Delete; the
-        // click must NOT bubble to the row-load handler (stopPropagation) and
-        // must NOT trigger the document-level click-away that closes menus.
-        const more = document.createElement("button");
-        more.type = "button";
-        more.setAttribute("data-row-menu-session-id", session.id);
-        more.title = "Chat options";
-        more.setAttribute("aria-label", "Chat options");
-        more.className = "absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-default text-font-subtle-light opacity-0 cursor-pointer hover:bg-base-200 hover:text-font-default-light group-hover:opacity-100 focus:opacity-100 dark:text-font-subtle-dark dark:hover:bg-base-700 dark:hover:text-font-default-dark";
-        more.appendChild(makeMoreIcon());
-        more.addEventListener("click", function (ev) {
+        // ChatGPT-style per-row delete control pinned to the row's right edge.
+        // Always visible (a trash icon), clicking it deletes the session
+        // IMMEDIATELY — no popup/confirm, no hover-to-reveal menu. The click
+        // must NOT bubble to the row-load handler (stopPropagation).
+        const del = document.createElement("button");
+        del.type = "button";
+        del.setAttribute("data-row-delete-session-id", session.id);
+        del.title = "Delete chat";
+        del.setAttribute("aria-label", "Delete chat");
+        del.className = "absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-default cursor-pointer text-font-subtle-light hover:bg-base-200 hover:text-red-600 focus:text-red-600 dark:text-font-subtle-dark dark:hover:bg-base-700 dark:hover:text-red-500";
+        const delIcon = makeTrashIcon();
+        delIcon.setAttribute("width", "16");
+        delIcon.setAttribute("height", "16");
+        del.appendChild(delIcon);
+        del.addEventListener("click", function (ev) {
           ev.stopPropagation();
-          // Toggle: a second click on the same trigger closes the menu.
-          const wasOpen = openRowMenu !== null;
-          closeRowMenu();
-          if (!wasOpen) { openRowMenuFor(more, session.id, li); }
+          deleteSession(session.id, li);
         });
-        li.appendChild(more);
+        li.appendChild(del);
 
         sessionListEl.appendChild(li);
       });
@@ -831,9 +746,6 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     // and open the next most-recent session (or the empty state).
     function deleteSession(id, li) {
       closeRowMenu();
-      if (!window.confirm("Delete this chat? This cannot be undone from here.")) {
-        return;
-      }
       fetch(baseUrl + id + "/delete/", {
         method: "POST",
         headers: jsonHeaders({ "X-CSRFToken": getCookie("csrftoken") }),
@@ -842,8 +754,14 @@ ChatService.process_message), and the JS refreshes the list so it shows.
         .then(function (r) { if (!r.ok) { throw new Error("not ok"); } return r.json(); })
         .then(function () {
           if (li && li.parentNode) { li.parentNode.removeChild(li); }
+          document.querySelectorAll(".chat-history-item").forEach(function (item) {
+            if (item.getAttribute("data-chat-session-id") === id) {
+              item.remove();
+            }
+          });
           if (currentSessionId === id) {
             currentSessionId = null;
+            history.pushState({ sessionId: null }, "", baseUrl);
             renderMessages([]);
             const next = sessionListEl.querySelector("button[data-session-id]");
             if (next) {
@@ -854,6 +772,7 @@ ChatService.process_message), and the JS refreshes the list so it shows.
               setStatus("");
             }
           }
+          loadSessions();
         })
         .catch(function () { setStatus("Could not delete chat."); });
     }
@@ -932,24 +851,6 @@ ChatService.process_message), and the JS refreshes the list so it shows.
     }
 
     newBtn.addEventListener("click", createNewChat);
-
-    // Title-header delete (top-right of the OPEN conversation). It REUSES the
-    // same deleteSession() flow — and therefore the same scoped, CSRF-protected
-    // /chat/<id>/delete/ endpoint — as the left-list per-session trash button,
-    // locating that session's left-list row so it is pruned too. No new
-    // endpoint and no server-logic change.
-    if (convDeleteBtn) {
-      // Render the delete affordance as an SVG icon (never the literal word).
-      convDeleteBtn.appendChild(makeTrashIcon());
-      convDeleteBtn.addEventListener("click", function () {
-        if (!currentSessionId) { return; }
-        const row = sessionListEl.querySelector(
-          'button[data-session-id="' + currentSessionId + '"]'
-        );
-        const li = row ? row.closest("li") : null;
-        deleteSession(currentSessionId, li);
-      });
-    }
 
     // Persist the chosen company as the GLOBAL active company (same session key
     // as the header switcher) so switching here follows everywhere. Fire-and-
