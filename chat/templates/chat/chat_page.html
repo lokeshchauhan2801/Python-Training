@@ -577,16 +577,40 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       web_search: "Web search",
     };
 
-    function renderToolBadge(container, metadata) {
-      if (!metadata || !metadata.tool_used) { return; }
-      const slug = metadata.tool_used;
+    // Decide the human label for the method/tool an assistant reply used.
+    //   * Graph path  -> metadata.tool_used (e.g. document_search, web_search).
+    //   * RAG path with citations -> "Document reference" (answered FROM docs).
+    //   * Otherwise -> "General purpose" (plain LLM answer, no grounding).
+    // Every assistant reply therefore shows a method, not just graph-routed ones.
+    function methodLabel(message) {
+      const meta = message.metadata || {};
+      if (meta.tool_used) {
+        return TOOL_LABELS[meta.tool_used] || meta.tool_used;
+      }
+      if (message.citations && message.citations.length) {
+        return "Document reference";
+      }
+      return "General purpose";
+    }
+
+    function renderToolBadge(container, message) {
+      // A small "Method: <label>" line pinned to the BOTTOM of the assistant
+      // bubble (below the answer text, citations, and any chart). Built with
+      // textContent (never innerHTML). Shown for EVERY assistant reply so the
+      // user always sees whether the answer was general-purpose or a document
+      // reference (and, on the graph path, exactly which tool ran).
+      const row = document.createElement("div");
+      row.className = "mt-2 flex items-center gap-1";
+      const label = document.createElement("span");
+      label.className = "text-xs text-font-subtle-light dark:text-font-subtle-dark";
+      label.textContent = "Method:";
       const pill = document.createElement("span");
-      // Same token classes the citation chips use, as a small pill at the top
-      // of the assistant bubble. Built with textContent (never innerHTML).
-      pill.className = "inline-block mb-1 border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
-      pill.textContent = TOOL_LABELS[slug] || slug;
-      // Pin the badge to the TOP of the bubble (above the answer text).
-      container.insertBefore(pill, container.firstChild);
+      pill.className = "inline-block border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+      pill.textContent = methodLabel(message);
+      row.appendChild(label);
+      row.appendChild(pill);
+      // Append LAST so the badge sits at the bottom of the bubble.
+      container.appendChild(row);
     }
 
     function renderMessage(message) {
@@ -606,9 +630,10 @@ ChatService.process_message), and the JS refreshes the list so it shows.
       bubble.appendChild(text);
 
       if (!isUser) {
-        renderToolBadge(bubble, message.metadata);
         renderCitations(bubble, message.citations);
         renderChart(bubble, message.chart_data);
+        // Method badge LAST so it pins to the bottom of the assistant bubble.
+        renderToolBadge(bubble, message);
       }
 
       wrap.appendChild(bubble);

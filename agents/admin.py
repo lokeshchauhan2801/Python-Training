@@ -1,12 +1,4 @@
-"""Admin registration for the Agents app.
-
-Each ModelAdmin subclasses the reusable ``basics.admin.BaseModelAdmin`` (Unfold
-shell + company scoping + audit stamping + soft-delete visibility) and follows
-the documents house style: a short ID column, the domain columns, trailing
-``created_by``/``created_at``; ``list_filter`` (the Filters button);
-``search_fields`` (the search bar); ``date_hierarchy = "created_at"`` (the date
-drill bar).
-"""
+"""Admin registration for the Agents app (BaseModelAdmin, documents house style)."""
 
 from django.contrib import admin
 

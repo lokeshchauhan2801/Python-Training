@@ -1,31 +1,30 @@
-"""Top-level ``/agent-builder/`` surface.
-
-A single Django view rendered inside the Unfold admin shell (it pulls
-``admin.site.each_context`` so the LEFT sidebar + branding match the admin,
-exactly like ``chat.views.chat_home``). The content area is one same-origin
-``<iframe>`` hosting the React Flow canvas (built/vendored under
-``agents/static/agents/canvas/``). The canvas talks to the DRF
-``api/v1/agents/`` endpoints same-origin with the session cookie + the CSRF
-token the page exposes to the iframe via its ``src`` querystring.
-
-Security: ``login_required`` gates the page; ``xframe_options_sameorigin``
-stamps ``X-Frame-Options: SAMEORIGIN`` on the response so the Unfold shell may
-frame the same-origin canvas (the project-wide default is SAMEORIGIN too, but
-the decorator makes the intent explicit on this view).
-"""
+"""The ``/agent-builder/`` page: the React Flow canvas inside the Unfold shell."""
 
 from django.contrib import admin
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import render
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 
+from company.active import active_company_for_request
+
 
 @login_required
 @xframe_options_sameorigin
 def agent_builder_page(request):
-    """GET /agent-builder/ — the React Flow canvas inside the Unfold shell."""
+    """GET /agent-builder/ — the React Flow canvas inside the Unfold shell.
+
+    The active company (same session key the header switcher and ``/chat/`` use)
+    is resolved here and handed to the iframe canvas via its ``src``
+    querystring, so the canvas can scope its ``api/v1/agents/`` reads and stamp
+    the right ``company`` on create. Without it a multi-company user hits a 400
+    ("ambiguous; specify a company") because the API cannot guess which company
+    a new graph belongs to.
+    """
+    active_company = active_company_for_request(request)
     context = {
         **admin.site.each_context(request),
         "title": "LangGraph",
+        "active_company_id": str(active_company.id) if active_company else "",
+        "active_company_name": active_company.name if active_company else "",
     }
     return render(request, "agents/agent_builder.html", context)

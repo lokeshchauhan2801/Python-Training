@@ -1,15 +1,10 @@
-"""Data model for the admin-configurable LangGraph agent builder.
+"""Models for the admin-configurable LangGraph agent builder.
 
-Every model composes ``BaseModel`` + ``SoftDeleteModel`` + ``id = ULIDField()``
-+ ``objects``/``all_objects`` managers + an explicit ``db_table`` — identical to
-every existing model. ONE deviation: the ``company`` FK is NULLABLE here (to
-allow a future global/template graph); the runtime always scopes by a concrete
-company, so a null-company graph is simply never selected by the chat path.
-
-Single-table rules are partial ``UniqueConstraint``s with
-``condition=Q(is_deleted=False)``. Cross-table invariants live in ``clean()``
-AND are re-checked in ``save()`` (the same pattern as
-``chat.models.Message._validate_company_matches_conversation``).
+Tool / AgentGraph / AgentNode / AgentEdge. Like every model: ULID PK,
+BaseModel + SoftDeleteModel, explicit db_table. One deviation: company is
+NULLABLE (to allow a future global/template graph); the runtime always scopes
+by a concrete company. Single-table rules are partial unique constraints;
+cross-table invariants live in clean() and are re-checked in save().
 """
 
 from __future__ import annotations

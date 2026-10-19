@@ -1,12 +1,4 @@
-"""``web_search`` tool — STUB.
-
-The seam for a real web-search provider, deliberately not wired to any paid
-dependency, API key, or network call in this phase. It returns a graceful
-``ToolResult(ok=False, ...)`` rather than raising, so a turn routed here still
-produces a user-visible assistant message (with the ``web_search`` badge)
-instead of a 502. The handler body is the single place a real provider is wired
-later.
-"""
+"""``web_search`` tool — STUB seam for a real provider (wire it in handle)."""
 
 from __future__ import annotations
 
@@ -15,6 +7,8 @@ from .base import ToolContext, ToolResult, register
 
 @register("web_search")
 def handle(ctx: ToolContext) -> ToolResult:
+    # Graceful failure (ok=False), not an exception, so the turn still produces
+    # a message with the web_search badge. Wire a real provider here later.
     return ToolResult(
         content="Web search is not configured on this server.",
         ok=False,

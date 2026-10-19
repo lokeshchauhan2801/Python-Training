@@ -1,12 +1,3 @@
-"""Context processors for the chat app.
-
-``admin_chat_history`` feeds the Unfold sidebar a ChatGPT-style list of the
-signed-in user's recent chat sessions (title + a link to the top-level
-``/chat/<session_id>/`` route). Scope is re-derived server-side: a superuser
-sees every non-deleted session, everyone else only their own owned-company
-sessions — the same rule the ``/chat/`` views enforce.
-"""
-
 from django.urls import reverse
 
 from .models import ConversationSession

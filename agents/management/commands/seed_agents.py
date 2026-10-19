@@ -1,17 +1,5 @@
-"""Idempotent seeding of the built-in tools and a default agent graph.
-
-For every company (or a single ``--company``), this creates:
-
-* the four built-in ``Tool`` rows (``general_assistant``, ``document_search``,
-  ``chat_summarise``, ``web_search``; ``web_search`` is enabled-but-stubbed),
-  keyed on ``company + slug``;
-* a default ``AgentGraph`` named "Default agent" (``is_active=False``) with a
-  START -> ``chat_agent`` STEP (all four tools attached) -> END and the two
-  edges, keyed on ``company + name`` and ``graph + slug`` / ``source + target``.
-
-It is invoked manually (NOT at migrate), and running it twice creates no
-duplicate rows. The default graph is left inactive so chat keeps using the RAG
-path until an admin activates it.
+"""seed_agents — idempotently create the built-in tools + a default (inactive)
+START -> chat_agent -> END graph per company. Run manually, not at migrate.
 """
 
 from __future__ import annotations

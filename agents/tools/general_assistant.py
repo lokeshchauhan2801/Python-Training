@@ -1,13 +1,4 @@
-"""``general_assistant`` tool — a plain LLM answer with no retrieval.
-
-The default / direct-answer handler. It assembles the provider-neutral message
-list from the conversation's prior ``Message`` history (excluding ``system``
-rows, exactly as the RAG path does) plus the current user turn, then calls
-``LLMClient.complete`` and returns the completion text.
-
-All chat/LLM imports are lazy (inside the function) to avoid import cycles and
-keep ``agents.tools`` import-safe.
-"""
+"""``general_assistant`` tool — a plain LLM answer, no retrieval."""
 
 from __future__ import annotations
 
@@ -16,8 +7,10 @@ from .base import ToolContext, ToolResult, register
 
 @register("general_assistant")
 def handle(ctx: ToolContext) -> ToolResult:
+    # Lazy imports keep agents.tools import-safe and cycle-free.
     from chat.models import Message
 
+    # Exclude system rows, exactly as the RAG path does.
     history = (
         ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM)
         .order_by("created_at")

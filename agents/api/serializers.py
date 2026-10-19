@@ -1,26 +1,4 @@
-"""Serializers for the agents API.
-
-Each serializer composes ``chat.api.serializers.RequiredCompanyResolutionMixin``
-+ ``basics.api.serializers.AuditReadOnlySerializerMixin`` +
-``serializers.ModelSerializer``, mirroring ``documents.DocumentSerializer``:
-``company`` is writable on create (validated against request-user ownership),
-read-only on update, and ``required=False`` (omission resolves to the single
-owned company). Audit fields are read-only.
-
-Per-field validation (design.md "Input validation"):
-
-* ``AgentGraph.name`` required non-blank on create (<=200).
-* ``AgentNode.slug`` required <=64, unique within graph; ``kind`` in choices;
-  ``tools`` a list of in-scope ``Tool`` ids; ``position`` optional dict;
-  ``prompt_name`` optional <=120.
-* ``AgentEdge.source``/``target`` required **Node** ids (never Tool ids), in
-  scope and in the same graph; self-loop rejected.
-* ``Tool.slug`` required and in ``agents.tools.available_slugs()``;
-  ``is_enabled`` boolean; ``config`` optional dict.
-
-Out-of-scope ids resolve to 404 at the viewset layer; invalid payloads here
-resolve to 400.
-"""
+"""Serializers for the agents API (per-field validation; 400 on bad payloads)."""
 
 from rest_framework import serializers
 
@@ -44,6 +22,23 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
             self.fields["company"].read_only = True
         if "company" in self.fields:
             self.fields["company"].required = False
+
+        # Drop DRF's auto-generated UniqueTogetherValidators. Our models use
+        # PARTIAL unique constraints (``condition=Q(is_deleted=False)``), which
+        # DRF turns into a validator whose ``condition_fields`` include
+        # ``is_deleted``. On a PARTIAL update (PATCH) ``is_deleted`` is not in
+        # the submitted data, so the validator raises ``KeyError: 'is_deleted'``
+        # (DRF validators.py line 191) and 500s when you Save a node. Uniqueness
+        # is still enforced two other ways: our own per-graph slug check in
+        # ``AgentNodeSerializer.validate`` and the DB partial unique constraints
+        # themselves. So removing only these auto-built validators is safe.
+        from rest_framework.validators import UniqueTogetherValidator
+
+        self.validators = [
+            v
+            for v in self.validators
+            if not isinstance(v, UniqueTogetherValidator)
+        ]
 
     def validate_company(self, value):
         return self._resolve_company(value)
@@ -201,6 +196,15 @@ class AgentNodeSerializer(
     def validate(self, attrs):
         attrs = super().validate(attrs)
         graph = attrs.get("graph") or (self.instance and self.instance.graph)
+        # A node's company is ALWAYS its graph's company. The shared mixin
+        # defaults an omitted company to the user's ACTIVE/single company, which
+        # is wrong for a multi-company user (it picks a company unrelated to the
+        # chosen graph and then trips the mismatch check below). So on create,
+        # override the resolved company with the graph's company before the
+        # check runs — the client never needs to send a correct company for a
+        # node, and a stale active-company guess can't block creation.
+        if self.instance is None and graph is not None:
+            attrs["company"] = graph.company
         company = self._scoped_company(attrs)
         # The node's company must match its graph's company (model invariant;
         # surfaced here as a 400 rather than a 500 on save).
@@ -290,6 +294,12 @@ class AgentEdgeSerializer(
         source = attrs.get("source") or (self.instance and self.instance.source)
         target = attrs.get("target") or (self.instance and self.instance.target)
         graph = attrs.get("graph") or (self.instance and self.instance.graph)
+        # An edge's company is ALWAYS its graph's company (same reasoning as
+        # AgentNode.validate): override the mixin's active-company default on
+        # create so a multi-company user's stale active company can't block
+        # wiring an edge.
+        if self.instance is None and graph is not None:
+            attrs["company"] = graph.company
         # Self-loop rejected.
         if source is not None and target is not None and source.pk == target.pk:
             raise serializers.ValidationError(

@@ -1,14 +1,4 @@
-"""``document_search`` tool — the RAG/document path reused as a tool.
-
-Reuses ``ChatService`` internals so behaviour is identical to the existing RAG
-pipeline: ``_find_relevant_chunks`` (which owns the empty-collection guard and
-the ``ChatRetrievalError`` wrapping — never the lower-level
-``documents.services.find_relevant_chunks`` directly), then ``_build_prompt`` +
-``generate_structured(prompt, ChatCompletion)``. Returns the cited, optionally
-charted answer.
-
-All chat/LLM imports are lazy to keep ``agents.tools`` import-safe.
-"""
+"""``document_search`` tool — the RAG/document path reused as a tool."""
 
 from __future__ import annotations
 
@@ -17,6 +7,9 @@ from .base import ToolContext, ToolResult, register
 
 @register("document_search")
 def handle(ctx: ToolContext) -> ToolResult:
+    # Reuse ChatService internals so behaviour matches the RAG pipeline exactly
+    # (_find_relevant_chunks owns the empty-collection guard + retrieval-error
+    # wrapping). Lazy import keeps agents.tools import-safe.
     from chat.services import ChatCompletion, ChatService
 
     service = ChatService()

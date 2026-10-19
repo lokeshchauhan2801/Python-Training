@@ -1,9 +1,4 @@
-"""URLs for the top-level ``/agent-builder/`` surface.
-
-Mounted at ``/agent-builder/`` in ``base.urls`` BEFORE the admin include so the
-page lives outside ``/admin/`` while still rendering inside the admin shell
-(same placement as ``/chat/``).
-"""
+"""URL for the top-level ``/agent-builder/`` page (mounted in base.urls)."""
 
 from django.urls import path
 

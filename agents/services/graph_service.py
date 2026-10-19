@@ -1,27 +1,10 @@
-"""The LangGraph chat runtime: ``LangGraphChatService``.
+"""LangGraphChatService — runs one new message through a company's graph.
 
-Runs ONE new user message through a company's active ``AgentGraph``. The public
-entry point mirrors ``ChatService.process_message`` so ``chat.views.send`` can
-call either service interchangeably and the surrounding view code is unchanged.
-
-Shape of a turn:
-
-1. **route** — resolve the active graph's single STEP (router) node and compute
-   its ``enabled_tools`` (intersection of the node's attached tools, globally
-   ``is_enabled`` tools, and registry-resolvable slugs).
-2. **router** — one structured LLM call (``RouterDecision``) picks exactly one
-   enabled slug or the sentinel ``__direct__``. An unknown/hallucinated slug is
-   coerced to ``__direct__``. The chosen handler runs, producing a ``ToolResult``.
-3. **respond (END)** — the ``ToolResult`` is finalised for persistence.
-
-The graph is built generically from ``AgentNode``/``AgentEdge`` rows (so extra
-STEP nodes work later), with deterministic edge ordering by
-``(source_slug, target_slug)`` and a ``visited`` + ``MAX_HOPS`` cycle guard that
-guarantees termination regardless of how an admin wires the canvas.
-
-Import-safety: ``langgraph`` is imported LAZILY inside ``_build_graph`` so merely
-importing this module (which ``chat.views`` does lazily) never pulls the SDK.
-``chat.*`` never imports ``agents``; this module imports ``chat`` freely.
+A turn: resolve the active graph's STEP (router) node and its enabled tools ->
+one structured LLM call picks a tool slug (or __direct__) -> run the handler ->
+persist. The public entry point mirrors ChatService.process_message so
+chat.views.send can call either interchangeably. langgraph is imported lazily
+inside _build_graph so importing this module never pulls the SDK.
 """
 
 from __future__ import annotations

@@ -130,15 +130,31 @@ def chat_home(request):
 
 @login_required
 def chat_session(request, session_id):
-    """GET /chat/<ulid>/ — same page, auto-opening the given session."""
+    """GET /chat/<ulid>/ — same page, auto-opening the given session.
+
+    The session is auto-opened ONLY when it belongs to the request's ACTIVE
+    company (the global header switcher). Owning the session is not enough: a
+    user owns sessions across every company they own, so after switching the
+    active company the URL may still carry a session from the PREVIOUS company.
+    Auto-opening it then would show the same conversation under a different
+    company. When the session is out of the active company we fall through to a
+    blank page (like ``chat_home``) so the panel resets to a New Chat and the
+    left list reflects the newly active company.
+    """
     if not _valid_ulid(session_id):
         raise Http404("Invalid session id.")
     # Confirm the session is in scope before rendering (out-of-scope => 404).
     session = get_object_or_404(scoped_sessions(request), pk=session_id)
+
+    # Only preselect when the session is in the ACTIVE company; otherwise reset.
+    active = active_or_none(request)
+    in_active_company = active is not None and session.company_id == active.id
+    preselect = str(session.id) if in_active_company else ""
+
     context = {
         **admin.site.each_context(request),
         "title": "New Chat",
-        "preselect_session_id": str(session.id),
+        "preselect_session_id": preselect,
     }
     return render(request, "chat/chat_page.html", context)
 
@@ -258,9 +274,19 @@ def send(request, session_id):
     model_name = (request.POST.get("model_name") or "").strip() or None
     attachment_ids = request.POST.getlist("attachment_ids")
 
+    # Run the pipeline AS THE SESSION'S OWNER, not request.user. The session is
+    # already authorization-scoped by _resolve_session, but scoped_sessions lets
+    # a SUPERUSER see (and open) sessions owned by OTHER users. Passing
+    # request.user into process_message then trips its owner-match guard
+    # ("Conversation does not belong to the signed-in user") and 500s. For a
+    # non-superuser, scoped_sessions already limits to their OWN sessions, so
+    # session.user == request.user and nothing changes; only the superuser case
+    # is corrected, and the turn stays attributed to the session's owner.
+    chat_user = session.user
+
     try:
         assistant_message = _orchestrator_for(session.company).process_message(
-            user=request.user,
+            user=chat_user,
             message_text=question,
             conversation=session,
             company=session.company,
@@ -273,6 +299,10 @@ def send(request, session_id):
         return JsonResponse({"error": "LLM request failed"}, status=502)
     except ChatRetrievalError:
         return JsonResponse({"error": "Document retrieval failed"}, status=502)
+    except ValueError:
+        # Owner/company mismatch inside process_message. Scoping should already
+        # have prevented this; degrade to a clean 400 rather than a raw 500.
+        return JsonResponse({"error": "This chat is not available."}, status=400)
 
     user_message = (
         session.messages.filter(role="user").order_by("-created_at").first()

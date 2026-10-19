@@ -1,20 +1,4 @@
-"""Views for the agents API.
-
-Four owner/company-scoped viewsets (``ScopedModelViewSet``) back the canvas:
-``AgentGraphViewSet``, ``AgentNodeViewSet``, ``AgentEdgeViewSet``, and
-``ToolViewSet``. Scoping means out-of-scope ids resolve to **404** (superuser
-sees all; everyone else sees rows whose ``company.owner`` is the request user),
-exactly like ``documents``/``chat``.
-
-``AgentGraphViewSet`` adds two extra actions:
-
-* ``GET /graph/{id}/load/`` — the aggregated canvas payload
-  ``{graph, nodes, edges, tools}`` in one response.
-* ``POST /graph/{id}/activate/`` — set this graph active. Inside
-  ``transaction.atomic()`` the company's currently-active graph is cleared
-  FIRST, then the target is set active, so the partial unique constraint
-  (``agents_one_active_graph_per_company``) is never transiently violated.
-"""
+"""Agents API viewsets backing the canvas (owner/company-scoped, 404 out-of-scope)."""
 
 from django.db import transaction
 from rest_framework import status
@@ -38,6 +22,7 @@ class AgentGraphViewSet(ScopedModelViewSet):
 
     @action(detail=True, methods=["get"])
     def load(self, request, pk=None):
+        # GET /graph/{id}/load/ — the whole canvas payload in one response.
         """Return the aggregated canvas payload for this graph."""
         graph = self.get_object()
         nodes = graph.nodes.order_by("created_at")

@@ -1,4 +1,4 @@
-"""URLConf for the agents API, mounted at ``api/v1/agents/``."""
+"""Agents API router, mounted at ``api/v1/agents/``."""
 
 from rest_framework.routers import SimpleRouter
 

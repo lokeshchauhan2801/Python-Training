@@ -900,6 +900,31 @@ def process_document(document: Document) -> Document:
         raise DocumentIndexError(message) from exc
 
 
+# Maximum cosine distance for a Chroma hit to count as RELEVANT. The
+# ``pdf_chunks`` collection uses cosine space (``hnsw:space=cosine``), so a hit's
+# ``distance`` is ``1 - cosine_similarity`` (0.0 == identical direction, 1.0 ==
+# orthogonal/unrelated, up to 2.0 == opposite). ``similarity_search`` ALWAYS
+# returns the k nearest vectors even for a totally off-topic question, so without
+# this cutoff an unrelated question (e.g. "do you know about MrBeast?") still
+# pulls back whatever happens to be closest (an employment letter, etc.) and
+# renders those as citations. Hits at or below this distance are kept; anything
+# farther is dropped, so an off-topic question yields NO chunks (hence no
+# citations) and the caller answers from general knowledge instead. Overridable
+# via ``settings.RAG_RELEVANCE_MAX_DISTANCE``.
+RAG_RELEVANCE_MAX_DISTANCE = 0.60
+
+
+def _relevance_max_distance() -> float:
+    from django.conf import settings
+
+    try:
+        return float(
+            getattr(settings, "RAG_RELEVANCE_MAX_DISTANCE", RAG_RELEVANCE_MAX_DISTANCE)
+        )
+    except (TypeError, ValueError):
+        return RAG_RELEVANCE_MAX_DISTANCE
+
+
 def find_relevant_chunks(
     user, question: str, company, k: int = 5
 ) -> list[DocumentChunk]:
@@ -915,6 +940,12 @@ def find_relevant_chunks(
     previous ``document__company__owner=user`` re-scope ignored the superuser
     bypass and silently dropped every Chroma hit for a superuser acting within a
     company they did not personally own.
+
+    RELEVANCE FILTER: Chroma returns the k NEAREST vectors regardless of whether
+    any are actually on-topic, so hits whose cosine ``distance`` exceeds
+    ``_relevance_max_distance()`` are discarded here. An off-topic question thus
+    returns ``[]`` (no spurious citations) and the caller falls back to a general
+    answer; a genuinely relevant question keeps its close hits unchanged.
     """
     # Authorize the (already-resolved active) company on the single axis.
     if not (getattr(user, "is_superuser", False) or company.owner_id == user.pk):
@@ -926,7 +957,15 @@ def find_relevant_chunks(
         k=k,
         filter={"company_id": str(company.id)},
     )
-    ranked_ids = [hit["id"] for hit in hits]
+    # Drop hits that are not actually close (see RAG_RELEVANCE_MAX_DISTANCE). A
+    # missing/None distance is treated as relevant so a vector-store backend that
+    # does not report distances never silently drops every hit.
+    max_distance = _relevance_max_distance()
+    ranked_ids = [
+        hit["id"]
+        for hit in hits
+        if hit.get("distance") is None or hit["distance"] <= max_distance
+    ]
     if not ranked_ids:
         return []
     chunks = {
