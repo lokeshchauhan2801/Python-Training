@@ -273,19 +273,60 @@
         return out;
       }
 
+      // Node box + layout geometry. COL_GAP must exceed NODE_W so adjacent
+      // columns never overlap (the earlier layout put every STEP in the same
+      // column, so multiple steps stacked on top of each other).
+      const NODE_W = 230;
+      const COL_GAP = 320;   // horizontal distance between columns (> NODE_W)
+      const ROW_GAP = 240;   // vertical distance when two nodes share a column
+      const ORIGIN_X = 60;
+      const ORIGIN_Y = 80;
+
+      // Deterministic left-to-right ordering for nodes WITHOUT a saved position:
+      // START first, END last, STEP nodes in between (by creation order). Each
+      // node gets its OWN column so none overlap. Computed once per render.
+      function computeAutoColumns() {
+        const starts = state.nodes.filter((n) => n.kind === "start");
+        const steps = state.nodes.filter((n) => n.kind === "step");
+        const ends = state.nodes.filter((n) => n.kind === "end");
+        const ordered = starts.concat(steps, ends);
+        const colOf = {};
+        ordered.forEach((n, i) => { colOf[n.id] = i; });
+        return colOf;
+      }
+
+      let _autoCols = {};
+
       function nodePos(node, index) {
         const p = node.position || {};
         if (typeof p.x === "number" && typeof p.y === "number") return { x: p.x, y: p.y };
-        // default layout: START, STEP, END spread left-to-right
-        const order = { start: 0, step: 1, end: 2 };
-        const col = order[node.kind] != null ? order[node.kind] : (index + 1);
-        return { x: 60 + col * 300, y: 180 };
+        // No saved position: place each node in its OWN column so they never
+        // overlap. _autoCols is filled at the top of render().
+        const col = _autoCols[node.id];
+        const column = typeof col === "number" ? col : (index + 1);
+        return { x: ORIGIN_X + column * COL_GAP, y: ORIGIN_Y };
+      }
+
+      // A free slot for a newly created node: one column to the right of the
+      // current rightmost node (using resolved positions, saved or auto), so it
+      // never spawns on top of an existing node.
+      function nextFreePosition() {
+        _autoCols = computeAutoColumns();
+        let maxX = ORIGIN_X;
+        state.nodes.forEach((n, i) => {
+          const pos = nodePos(n, i);
+          if (pos.x > maxX) maxX = pos.x;
+        });
+        return { x: maxX + COL_GAP, y: ORIGIN_Y };
       }
 
       // ---- rendering ----
       function render() {
         // remove existing node elements (keep the svg)
         canvas.querySelectorAll(".node").forEach((el) => el.remove());
+
+        // Assign each unsaved node its own column so nodes never overlap.
+        _autoCols = computeAutoColumns();
 
         state.nodes.forEach((node, index) => {
           const pos = nodePos(node, index);
@@ -384,7 +425,7 @@
 
       function portPoints(node) {
         const p = node._pos || nodePos(node, 0);
-        const w = 230, h = 150;
+        const w = NODE_W, h = 150;
         return {
           out: { x: p.x + w, y: p.y + 40 },
           in: { x: p.x, y: p.y + 40 },
@@ -797,7 +838,9 @@
             kind: "step",
             slug: slug,
             label: "New step",
-            position: { x: 60 + state.nodes.length * 290, y: 180 },
+            // Spawn to the RIGHT of the rightmost existing node so a new node
+            // never lands on top of another.
+            position: nextFreePosition(),
           });
           state.nodes.push(node);
           render();

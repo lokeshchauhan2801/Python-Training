@@ -46,8 +46,23 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if self.instance is None and "company" not in attrs:
-            attrs["company"] = self._resolve_company(None)
+            # Resolve an omitted company via the hook so subclasses that derive
+            # it from a parent (node/edge -> graph.company) are not forced
+            # through _resolve_company(None), which raises "ambiguous; specify a
+            # company" for a multi-company user. The default keeps the original
+            # behaviour (graph/tool serializers still resolve the active/single
+            # owned company).
+            attrs["company"] = self._default_company(attrs)
         return attrs
+
+    def _default_company(self, attrs):
+        """Company to use when the client omits one on create.
+
+        Default: the user's active/single owned company (``_resolve_company``).
+        Subclasses whose company is determined by a parent row override this
+        (see AgentNodeSerializer / AgentEdgeSerializer -> the graph's company).
+        """
+        return self._resolve_company(None)
 
     def _scoped_company(self, attrs):
         """Resolve the effective company for cross-field validation.
@@ -193,6 +208,17 @@ class AgentNodeSerializer(
                 )
         return value
 
+    def _default_company(self, attrs):
+        # A node's company is its graph's company — never the user's active
+        # company. This is what lets the canvas create a node without sending a
+        # company, and avoids the "ambiguous; specify a company" error for a
+        # multi-company user (which fired even on the FIRST node of an empty
+        # graph, because the mixin resolved the active company too early).
+        graph = attrs.get("graph")
+        if graph is not None:
+            return graph.company
+        return super()._default_company(attrs)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         graph = attrs.get("graph") or (self.instance and self.instance.graph)
@@ -288,6 +314,15 @@ class AgentEdgeSerializer(
         if not self._in_scope_nodes().filter(pk=value.pk).exists():
             raise serializers.ValidationError("not found or not owned")
         return value
+
+    def _default_company(self, attrs):
+        # An edge's company is its graph's company (same reasoning as the node
+        # serializer) — avoids "ambiguous; specify a company" for multi-company
+        # users.
+        graph = attrs.get("graph")
+        if graph is not None:
+            return graph.company
+        return super()._default_company(attrs)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
