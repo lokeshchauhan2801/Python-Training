@@ -117,6 +117,7 @@ class ToolSerializer(
             "description",
             "is_enabled",
             "config",
+            "prompt_name",
             "company",
             "created_at",
             "updated_at",

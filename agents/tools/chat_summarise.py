@@ -19,9 +19,34 @@ def handle(ctx: ToolContext) -> ToolResult:
         )
     )
     conversation_context = service._build_conversation_context(history)
-    messages = [
-        {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
-        {"role": "user", "content": conversation_context},
-    ]
+
+    # Resolve the system prompt from Langfuse, falling back to the hard-coded
+    # prompt when the tool/langfuse seam is absent or unconfigured.
+    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
+    sys = (
+        ctx.langfuse.get_prompt(name, fallback=_SUMMARY_SYSTEM_PROMPT)
+        if ctx.langfuse
+        else _SUMMARY_SYSTEM_PROMPT
+    )
+
+    try:
+        # A managed prompt may template the context in itself; if so, inline it
+        # and send a single system message. Otherwise keep today's shape.
+        if "{{conversation}}" in sys or "{{history}}" in sys:
+            system_content = sys.replace(
+                "{{conversation}}", conversation_context
+            ).replace("{{history}}", conversation_context)
+            messages = [{"role": "system", "content": system_content}]
+        else:
+            messages = [
+                {"role": "system", "content": sys},
+                {"role": "user", "content": conversation_context},
+            ]
+    except Exception:  # noqa: BLE001 - any substitution issue degrades to fallback
+        messages = [
+            {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": conversation_context},
+        ]
+
     content = ctx.llm.complete(messages)
     return ToolResult(content=content, tool_used="chat_summarise")

@@ -69,6 +69,9 @@ class Tool(BaseModel, SoftDeleteModel):
     description = models.TextField(blank=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
     config = models.JSONField(default=dict, blank=True)
+    # Langfuse prompt pointer (the managed prompt's NAME, not its text). Blank
+    # => the handler uses its hard-coded fallback prompt.
+    prompt_name = models.CharField(max_length=200, blank=True, default="")
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()

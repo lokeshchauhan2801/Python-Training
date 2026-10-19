@@ -10,12 +10,12 @@ from django.db import transaction
 from agents.models import AgentEdge, AgentGraph, AgentNode, Tool
 from company.models import Company
 
-# (slug, display name, is_enabled) for the four built-in tools.
+# (slug, display name, is_enabled, langfuse prompt name) for the built-in tools.
 _TOOL_SPECS = [
-    ("general_assistant", "General assistant", True),
-    ("document_search", "Document search", True),
-    ("chat_summarise", "Chat summary", True),
-    ("web_search", "Web search", True),
+    ("general_assistant", "General assistant", True, "tool_general_assistant"),
+    ("document_search", "Document search", True, "tool_document_search"),
+    ("chat_summarise", "Chat summary", True, "tool_chat_summarise"),
+    ("web_search", "Web search", True, "tool_web_search"),
 ]
 
 _DEFAULT_GRAPH_NAME = "Default agent"
@@ -61,11 +61,17 @@ class Command(BaseCommand):
 
     def _seed_company(self, company):
         tools = {}
-        for slug, name, is_enabled in _TOOL_SPECS:
+        for slug, name, is_enabled, prompt_name in _TOOL_SPECS:
+            # prompt_name in defaults => set only on create; a re-seed never
+            # clobbers a value the user edited in the canvas/Langfuse.
             tool, created = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
-                defaults={"name": name, "is_enabled": is_enabled},
+                defaults={
+                    "name": name,
+                    "is_enabled": is_enabled,
+                    "prompt_name": prompt_name,
+                },
             )
             tools[slug] = tool
             if created:

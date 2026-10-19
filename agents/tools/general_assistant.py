@@ -18,5 +18,12 @@ def handle(ctx: ToolContext) -> ToolResult:
     messages = [{"role": m.role, "content": m.content} for m in history]
     messages.append({"role": "user", "content": ctx.message_text})
 
+    # Optional Langfuse system prompt; empty fallback => behave exactly as
+    # before (no system message prepended).
+    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_general_assistant"
+    sys = ctx.langfuse.get_prompt(name, fallback="") if ctx.langfuse else ""
+    if sys.strip():
+        messages.insert(0, {"role": "system", "content": sys})
+
     content = ctx.llm.complete(messages)
     return ToolResult(content=content, tool_used="general_assistant")
