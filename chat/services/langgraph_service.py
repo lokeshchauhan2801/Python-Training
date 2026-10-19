@@ -231,11 +231,20 @@ class LangGraphChatService:
             """Run the handler for ``slug`` (or the direct handler) -> ToolResult."""
             handler_slug = _DIRECT_HANDLER_SLUG if slug == DIRECT else slug
             handler = get_handler(handler_slug)
+            tool_row = tool_rows.get(handler_slug)
             if handler is None:
-                # Should not happen (enabled_tools is registry-filtered), but be
-                # safe: fall back to the direct handler.
-                handler = get_handler(_DIRECT_HANDLER_SLUG)
-            result = handler(_ctx(tool_rows.get(handler_slug)))
+                # An unregistered slug that is flagged prompt_only runs through
+                # the generic prompt_tool handler (its Langfuse prompt_name
+                # drives the answer); otherwise fall back to the direct handler.
+                prompt_only = (
+                    tool_row is not None
+                    and isinstance(tool_row.config, dict)
+                    and tool_row.config.get("kind") == "prompt_only"
+                )
+                handler = get_handler(
+                    "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
+                )
+            result = handler(_ctx(tool_row))
             # Stamp the slug the ROUTER selected (so __direct__ records
             # general_assistant, web_search records web_search, etc.).
             if not result.tool_used:
@@ -487,7 +496,13 @@ class LangGraphChatService:
         enabled = []
         seen = set()
         for tool in step_node.tools.filter(is_enabled=True):
-            if tool.slug in slugs and tool.slug not in seen:
+            # Keep a prompt-only tool even when its slug has no registered
+            # handler: the runtime routes it through prompt_tool below.
+            prompt_only = (
+                isinstance(tool.config, dict)
+                and tool.config.get("kind") == "prompt_only"
+            )
+            if (tool.slug in slugs or prompt_only) and tool.slug not in seen:
                 enabled.append(tool.slug)
                 seen.add(tool.slug)
         return step_node, enabled

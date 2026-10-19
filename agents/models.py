@@ -98,7 +98,14 @@ class Tool(BaseModel, SoftDeleteModel):
         # the registry at module load.
         from agents.tools import available_slugs
 
-        if self.slug not in available_slugs():
+        # prompt-only tools (config kind=prompt_only) are created from a Langfuse
+        # prompt and run through the generic prompt_tool handler, so their slug
+        # need not match a registered handler.
+        prompt_only = (
+            isinstance(self.config, dict)
+            and self.config.get("kind") == "prompt_only"
+        )
+        if self.slug not in available_slugs() and not prompt_only:
             raise ValidationError(
                 {"slug": f"Unknown tool slug '{self.slug}' (no handler registered)."}
             )

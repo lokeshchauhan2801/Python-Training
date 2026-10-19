@@ -10,6 +10,7 @@ from . import general_assistant  # noqa: E402,F401
 from . import document_search  # noqa: E402,F401
 from . import chat_summarise  # noqa: E402,F401
 from . import web_search  # noqa: E402,F401
+from . import prompt_tool  # noqa: E402,F401
 
 
 def get_handler(slug: str):

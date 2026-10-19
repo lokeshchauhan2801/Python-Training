@@ -1,6 +1,7 @@
 """Agents API viewsets backing the canvas (owner/company-scoped, 404 out-of-scope)."""
 
 from django.db import transaction
+from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -71,3 +72,45 @@ class AgentEdgeViewSet(ScopedModelViewSet):
 class ToolViewSet(ScopedModelViewSet):
     queryset = Tool.objects.all()
     serializer_class = ToolSerializer
+
+    @action(detail=False, methods=["post"])
+    def sync_langfuse(self, request):
+        """Upsert prompt-only Tools from client-posted Langfuse prompt names.
+
+        langfuse 4.18.0 has NO prompt-listing API, so the posted-names path is
+        the only viable one: the canvas sends the prompt names it knows about.
+        With no names this is a graceful no-op returning the company's current
+        tools. Each name becomes an idempotent prompt-only Tool (existing rows
+        are left untouched).
+        """
+        context = self.get_serializer_context()
+        company = ToolSerializer(context=context)._resolve_company(None)
+
+        names = request.data.get("prompt_names") or []
+        if isinstance(names, str):
+            names = [names]
+
+        with transaction.atomic():
+            for raw in names:
+                name = (raw or "").strip()
+                if not name:
+                    continue
+                slug = slugify(name)[:64]
+                if not slug:
+                    continue
+                Tool.objects.get_or_create(
+                    company=company,
+                    slug=slug,
+                    defaults={
+                        "name": name,
+                        "prompt_name": name,
+                        "is_enabled": True,
+                        "config": {"source": "langfuse", "kind": "prompt_only"},
+                        "created_by": request.user,
+                        "updated_by": request.user,
+                    },
+                )
+
+        tools_qs = Tool.objects.filter(company=company).order_by("slug")
+        data = ToolSerializer(tools_qs, many=True, context=context).data
+        return Response(data, status=status.HTTP_200_OK)

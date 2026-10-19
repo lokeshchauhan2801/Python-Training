@@ -395,7 +395,7 @@
                 chip.appendChild(lab);
                 const pill = document.createElement("span");
                 pill.className = "pill";
-                pill.textContent = TOOL_PILL[t.slug] || "tool";
+                pill.textContent = TOOL_PILL[t.slug] || (t.config && t.config.kind === "prompt_only" ? "prompt_only" : "tool");
                 chip.appendChild(pill);
                 toolsWrap.appendChild(chip);
               });
@@ -678,7 +678,7 @@
             row.appendChild(name);
             const pill = document.createElement("span");
             pill.className = "pill";
-            pill.textContent = TOOL_PILL[t.slug] || "tool";
+            pill.textContent = TOOL_PILL[t.slug] || (t.config && t.config.kind === "prompt_only" ? "prompt_only" : "tool");
             row.appendChild(pill);
             toolsField.appendChild(row);
           });
@@ -739,10 +739,69 @@
           row.appendChild(name);
           const pill = document.createElement("span");
           pill.className = "pill";
-          pill.textContent = TOOL_PILL[t.slug] || "tool";
+          // prompt-only tools created from Langfuse carry a kind=prompt_only
+          // config but no built-in TOOL_PILL entry.
+          pill.textContent = TOOL_PILL[t.slug] || (t.config && t.config.kind === "prompt_only" ? "prompt_only" : "tool");
           row.appendChild(pill);
+          // Editable Langfuse prompt-name pointer, saved on change.
+          const promptInput = document.createElement("input");
+          promptInput.type = "text";
+          promptInput.placeholder = "langfuse prompt name";
+          promptInput.value = t.prompt_name || "";
+          promptInput.title = "Langfuse prompt name";
+          promptInput.style.marginLeft = "8px";
+          promptInput.addEventListener("change", async () => {
+            try {
+              const updated = await api("PATCH", "tool/" + t.id + "/", { prompt_name: promptInput.value.trim() });
+              Object.assign(t, updated);
+              showStatus("Prompt name saved.", "ok");
+            } catch (e) { showStatus(e.message, "err"); }
+          });
+          row.appendChild(promptInput);
           inspectorBody.appendChild(row);
         });
+
+        // Inline hint explaining where the prompt text actually lives.
+        const hint = document.createElement("div");
+        hint.className = "note";
+        hint.appendChild(document.createTextNode(
+          "Prompt TEXT is edited in Langfuse under this name; prompt-only tools answer via the general assistant using that prompt."
+        ));
+        inspectorBody.appendChild(hint);
+
+        // "Add Langfuse tool" affordance: creates a prompt-only tool from a
+        // Langfuse prompt name.
+        const addRow = document.createElement("div");
+        addRow.className = "tool-row";
+        const addInput = document.createElement("input");
+        addInput.type = "text";
+        addInput.placeholder = "Langfuse prompt name";
+        addRow.appendChild(addInput);
+        const addBtn = document.createElement("button");
+        addBtn.className = "btn";
+        addBtn.textContent = "Add Langfuse tool";
+        addBtn.style.marginLeft = "8px";
+        addBtn.addEventListener("click", async () => {
+          const promptName = addInput.value.trim();
+          if (!promptName) { showStatus("Enter a Langfuse prompt name.", "err"); return; }
+          try {
+            const tools = await api("POST", "tool/sync_langfuse/", { prompt_names: [promptName] });
+            if (Array.isArray(tools)) {
+              const byId = {};
+              state.tools.forEach((x) => { byId[x.id] = x; });
+              tools.forEach((x) => {
+                if (byId[x.id]) { Object.assign(byId[x.id], x); }
+                else { state.tools.push(x); }
+              });
+            }
+            addInput.value = "";
+            render();
+            renderInspector();
+            showStatus("Langfuse tool added.", "ok");
+          } catch (e) { showStatus(e.message, "err"); }
+        });
+        addRow.appendChild(addBtn);
+        inspectorBody.appendChild(addRow);
       }
 
       async function saveNode(node, typeSelect, nameInput, slugInput, toolChecks) {

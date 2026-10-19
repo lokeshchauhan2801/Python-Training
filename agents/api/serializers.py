@@ -127,19 +127,30 @@ class ToolSerializer(
             "deleted_at",
         ]
 
-    def validate_slug(self, value):
-        if value not in available_slugs():
-            raise serializers.ValidationError(
-                f"Unknown tool slug '{value}' (no handler registered)."
-            )
-        return value
-
     def validate_config(self, value):
         if value is None:
             return {}
         if not isinstance(value, dict):
             raise serializers.ValidationError("config must be an object.")
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Slug validation lives here (not in validate_slug) so it can see the
+        # resolved config: a prompt-only tool (config kind=prompt_only) runs
+        # through the generic prompt_tool handler, so an arbitrary slug is fine.
+        slug = attrs.get("slug") or (self.instance and self.instance.slug)
+        config = attrs.get("config")
+        if config is None and self.instance is not None:
+            config = self.instance.config
+        prompt_only = (
+            isinstance(config, dict) and config.get("kind") == "prompt_only"
+        )
+        if slug and slug not in available_slugs() and not prompt_only:
+            raise serializers.ValidationError(
+                {"slug": f"Unknown tool slug '{slug}' (no handler registered)."}
+            )
+        return attrs
 
 
 class AgentNodeSerializer(

@@ -50,18 +50,20 @@ Dirs crossed: `chat`, `documents`, `basics` (3 app dirs; `chat` is entered twice
 ### 2. Chat turn through the LangGraph flow — **5 dirs**
 
 ```
-chat/ → agents/services/ → agents/tools/ → chat/services + documents/ → basics/
+chat/ → chat/services/ → agents/tools/ → chat/services + documents/ → basics/
 ```
 
 1. `chat/views.py::send` → `_orchestrator_for(company)`
-2. active graph found → `agents/services/graph_service.py::LangGraphChatService.process_message`
-3. graph build + router: `agents/services/graph_service.py` (+ `agents/services/state.py`), reads `agents/models.py`
+2. active graph found → `chat/services/langgraph_service.py::LangGraphChatService.process_message`
+3. graph build + router: `chat/services/langgraph_service.py` (+ `chat/services/graph_state.py`), reads `agents/models.py` for the graph DATA model
 4. router picks a tool → `agents/tools/__init__.py::get_handler` → one of `agents/tools/*.py`
-5. the chosen handler calls back into `chat/services.py::ChatService` (document_search/chat_summarise) and/or `documents/services.py`, with `basics/llm.py` for the LLM call
+5. the chosen handler calls back into `chat/services/chat_service.py::ChatService` (document_search/chat_summarise) and/or `documents/services.py`, with `basics/llm.py` for the LLM call
 
-Dirs crossed: `chat`, `agents/services`, `agents/tools`, `documents`, `basics`.
-The graph runtime lives under `agents/` today; the intended target is to move it
-into `chat/services/langgraph_service.py` so steps 1–4 stay within `chat/`.
+Dirs crossed: `chat`, `agents/tools`, `documents`, `basics`.
+The runtime now stays within `chat/` — it hops to `agents/` only for the graph
+DATA model (`agents/models.py`) and the tool registry (`agents/tools/`). Thin
+re-export shims remain at `agents/services/graph_service.py` and
+`agents/services/state.py` for back-compat.
 
 ### 3. Building/editing a flow in the canvas — **3 dirs**
 
@@ -104,10 +106,11 @@ company/ → (every page via context processor)
   nodes, wire edges, pick each node's tools, Save, then **Activate graph**.
 - **Flow definition (data):** `agents/models.py` — `AgentGraph` (one active per
   company), `AgentNode` (START/STEP/END), `AgentEdge`, `Tool`.
-- **Flow runtime (execution):** `agents/services/graph_service.py`
-  (`LangGraphChatService`) + `agents/services/state.py`. A new chat message for a
-  company with an **active** graph runs through it; otherwise chat falls back to
-  the normal RAG path.
+- **Flow runtime (execution):** `chat/services/langgraph_service.py`
+  (`LangGraphChatService`) + `chat/services/graph_state.py`, with thin re-export
+  shims left at `agents/services/graph_service.py` and `agents/services/state.py`.
+  A new chat message for a company with an **active** graph runs through it;
+  otherwise chat falls back to the normal RAG path.
 - **Tools a node can call:** `agents/tools/` — `general_assistant`,
   `document_search`, `chat_summarise`, `web_search` (stub). The registry is
   `agents/tools/base.py` + `agents/tools/__init__.py`.
@@ -123,6 +126,23 @@ Each assistant reply shows a **"Method:"** badge at the bottom of the bubble
 (`chat/templates/chat/chat_page.html`): the graph tool used when routed through a
 flow, else "Document reference" when citations exist, else "General purpose".
 
+### Tool prompts via Langfuse
+
+- `Tool.prompt_name` is a POINTER (a Langfuse prompt NAME), not the prompt text.
+  The prompt TEXT is authored and edited in the Langfuse Prompts UI under that
+  name; the canvas Tools section edits only the pointer per tool.
+- **Prompt-only tools** carry `config = {"source": "langfuse", "kind":
+  "prompt_only"}`. They need no registered handler: the runtime routes an
+  unregistered-but-prompt-only slug through the generic `prompt_tool` handler
+  (`agents/tools/prompt_tool.py`), which answers like the general assistant but
+  forces the tool's Langfuse prompt as the system message. Create one from the
+  canvas ("Add Langfuse tool") — it POSTs `tool/sync_langfuse/` with the prompt
+  name (langfuse 4.18.0 has no prompt-listing API, so the client supplies the
+  names).
+- Every path falls back to the hard-coded prompt when Langfuse is unconfigured:
+  `basics/langfuse.py::get_prompt` returns the supplied fallback, so an
+  empty/absent managed prompt degrades to today's behaviour.
+
 ---
 
 ## Route reference
@@ -133,5 +153,5 @@ flow, else "Document reference" when citations exist, else "General purpose".
 | `/chat/<id>/send/` | `chat/views.py::send` | run one turn (graph or RAG) |
 | `/agent-builder/` | `agents/views.py` | the flow builder canvas (iframe) |
 | `/company/set-active-company/` | `company/views.py` | switch active company |
-| `api/v1/agents/graph|node|edge|tool/` | `agents/api/views.py` | canvas CRUD + `graph/<id>/load/` + `graph/<id>/activate/` |
+| `api/v1/agents/graph|node|edge|tool/` | `agents/api/views.py` | canvas CRUD + `graph/<id>/load/` + `graph/<id>/activate/` + `tool/sync_langfuse/` |
 | `api/v1/chat/...`, `api/v1/documents/...` | each app's `api/` | thin DRF surface |
