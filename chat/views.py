@@ -79,7 +79,7 @@ def _orchestrator_for(company):
         if not (has_start and has_step):
             return _chat_service()
 
-        from agents.services.graph_service import LangGraphChatService
+        from chat.services.langgraph_service import LangGraphChatService
         from basics.langfuse import get_langfuse_client
 
         return LangGraphChatService(

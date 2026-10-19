@@ -38,8 +38,8 @@ from basics.llm import LLMClient
 from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
-from .models import Conversation, ConversationSession, Message
-from .retitle import retitle_if_default
+from chat.models import Conversation, ConversationSession, Message
+from chat.retitle import retitle_if_default
 
 logger = logging.getLogger(__name__)
 
