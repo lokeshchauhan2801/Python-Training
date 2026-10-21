@@ -109,12 +109,30 @@
       .node .tools { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
       .node .tool-chip { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
       .node .tool-chip .pill { font-size: 9px; padding: 1px 6px; border-radius: 999px; background: #26224a; color: #c3b7ff; }
+      /* Ports are pinned at a FIXED top offset (40px) that matches the edge
+         attach point in portPoints() (p.y + 40). Previously the CSS used
+         top:50% (center of a tall STEP node) while edges attached near the top,
+         so the dot and the thread were in different places and the input dot
+         looked missing. A larger dot + an invisible padded hit area make it easy
+         to grab and drop onto. */
       .node .dot {
-        position: absolute; right: -8px; top: 50%; transform: translateY(-50%);
-        width: 14px; height: 14px; border-radius: 50%; background: var(--accent-2);
-        border: 2px solid #0a0f1e; cursor: crosshair;
+        position: absolute; right: -9px; top: 40px; transform: translateY(-50%);
+        width: 16px; height: 16px; border-radius: 50%; background: var(--accent-2);
+        border: 2px solid #0a0f1e; cursor: crosshair; z-index: 3;
+        box-shadow: 0 0 0 3px rgba(79,124,255,0.25);
       }
-      .node .dot.in { left: -8px; right: auto; background: var(--muted); cursor: default; }
+      /* Invisible 12px hit halo so the dot is forgiving to grab. */
+      .node .dot::after {
+        content: ""; position: absolute; inset: -12px; border-radius: 50%;
+      }
+      .node .dot.out:hover { background: #7c5cff; box-shadow: 0 0 0 4px rgba(124,92,255,0.4); }
+      /* The INPUT port — clearly visible on the left edge, a ring so it reads
+         as a drop target. */
+      .node .dot.in {
+        left: -9px; right: auto; cursor: default;
+        background: #0a0f1e; border-color: var(--accent-2);
+        box-shadow: 0 0 0 3px rgba(79,124,255,0.18);
+      }
       .node .inactive-badge { font-size: 9px; color: #0a0f1e; background: var(--muted); padding: 1px 6px; border-radius: 999px; }
 
       /* Right inspector */
@@ -165,8 +183,7 @@
         <button class="btn ok" id="btn-activate">Activate graph</button>
       </div>
       <div id="hint">
-        Nothing is connected by default. Drag from a node's right-side dot onto another node to wire an edge.
-        Click any edge's × marker to remove it. Click a node to edit it.
+        To connect two nodes: press and hold the <b>blue dot on a node's RIGHT edge</b>, drag the line across, and release anywhere over the target node. A green thread appears with an × to remove it. Drag a node's header to move it; click a node to edit it.
       </div>
       <div id="body">
         <div id="canvas-wrap">

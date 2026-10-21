@@ -1,12 +1,3 @@
-"""User managers composed from Django's ``UserManager`` and soft-delete.
-
-``UserManager`` keeps the full Django user-management API (``create_user`` /
-``create_superuser`` / ``normalize_email``) while hiding soft-deleted users from
-normal queries. ``AllUsersManager`` keeps the same API but returns every row
-(used by admin restore / recovery). ``User`` deliberately does NOT reuse
-``basics.AllObjectsManager`` because that lacks the Django user API.
-"""
-
 from django.contrib.auth.models import UserManager as DjangoUserManager
 
 from basics.managers import SoftDeleteQuerySet

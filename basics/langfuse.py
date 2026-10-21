@@ -1,18 +1,3 @@
-"""Import-safe Langfuse wrapper.
-
-A thin adaptation layer around the Langfuse SDK that NEVER touches the SDK at
-import time and is a complete no-op when Langfuse is not configured. This is the
-single place that absorbs SDK v2/v3 API differences; its public surface
-(``get_prompt``, ``trace``, ``flush``) is version-independent, so the rest of
-the project is unaffected by whichever SDK major resolves.
-
-Configuration: ``settings.LANGFUSE_SECRET_KEY`` / ``LANGFUSE_PUBLIC_KEY`` /
-``LANGFUSE_BASE_URL``. If ANY is missing the wrapper is a no-op:
-``get_prompt`` returns the ``fallback``, ``trace`` yields a no-op context
-manager, ``flush`` does nothing, and the SDK is NEVER imported. Only key
-PRESENCE is ever logged — never a key value.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -90,6 +75,31 @@ class LangfuseClient:
         if isinstance(text, str):
             return text
         return fallback
+
+    def create_prompt(self, name: str, text: str, *, labels=None) -> bool:
+        """Create/version a TEXT prompt in Langfuse. Returns True on success.
+
+        A no-op returning False when Langfuse is unconfigured or the SDK errors
+        (so a push command degrades gracefully offline). Labels default to
+        ["production"] so the created version is the one get_prompt() serves.
+        """
+        client = self._ensure_client()
+        if client is None:
+            return False
+        create = getattr(client, "create_prompt", None)
+        if not callable(create):
+            return False
+        try:
+            create(
+                name=name,
+                prompt=text,
+                type="text",
+                labels=list(labels) if labels is not None else ["production"],
+            )
+            return True
+        except Exception:  # noqa: BLE001 - network/SDK error -> caller reports
+            logger.debug("langfuse create_prompt(%s) failed", name)
+            return False
 
     @contextlib.contextmanager
     def trace(self, name: str, **kw):
