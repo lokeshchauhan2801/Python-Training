@@ -157,3 +157,62 @@ class DocumentChunk(BaseModel, SoftDeleteModel):
             f"{self.document.title} · page {self.page_number} "
             f"· chunk {self.chunk_index}"
         )
+
+
+class DocumentStage(BaseModel, SoftDeleteModel):
+    """Per-document processing stage row for the resumable Temporal pipeline.
+
+    One row per canonical stage (see ``documents.services.DOCUMENT_STAGES``); a
+    stage completed on a prior run short-circuits on resume, so a workflow that
+    failed mid-pipeline restarts at the first non-completed stage.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = ULIDField()
+    company = models.ForeignKey(
+        "company.Company",
+        on_delete=models.CASCADE,
+        related_name="%(app_label)s_%(class)s_set",
+        db_index=True,
+    )
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="stages",
+    )
+    name = models.CharField(max_length=40)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    detail = models.TextField(blank=True)
+    order = models.PositiveSmallIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    objects = SoftDeleteManager()
+    all_objects = AllObjectsManager()
+
+    class Meta:
+        db_table = "documents_document_stage"
+        ordering = ["document", "order"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "name"],
+                name="documents_stage_name_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.document_id} · {self.name} · {self.status}"

@@ -22,6 +22,7 @@ from io import BytesIO, TextIOWrapper
 from pathlib import Path
 
 from django.db import transaction
+from django.utils import timezone
 from docx import Document as WordDocument
 from openpyxl import load_workbook
 from pypdf import PdfReader
@@ -33,7 +34,7 @@ from basics.llm import (
 )
 from basics.vectorstore import ChromaVectorStore
 
-from .models import Document, DocumentChunk
+from .models import Document, DocumentChunk, DocumentStage
 
 try:  # Optional OCR dependency (needs the poppler system package).
     from pdf2image import convert_from_bytes
@@ -620,7 +621,8 @@ def purge_document(document: Document) -> None:
     Unlike the soft delete (which only flips ``is_deleted``), this removes the
     real, user-visible artefacts so a deleted document actually disappears:
 
-      1. Chroma vectors for every chunk (keyed by the chunk PK) in ``pdf_chunks``.
+      1. Chroma vectors for every chunk (keyed by the deterministic per-chunk id
+         ``f"{document_id}:{chunk_index}"``) in ``pdf_chunks``.
       2. Every ``DocumentChunk`` row (incl. soft-deleted ones).
       3. The uploaded file from storage (best effort).
       4. The ``Document`` row itself (hard delete — real SQL DELETE).
@@ -630,16 +632,18 @@ def purge_document(document: Document) -> None:
     always removed so the changelist reflects the deletion.
     """
     # 1. Remove this document's chunk vectors from Chroma. Vectors are keyed by
-    #    the chunk PK (see process_document's add_documents payload).
-    chunk_ids = list(
-        DocumentChunk.all_objects.filter(document=document).values_list(
-            "pk", flat=True
-        )
-    )
-    if chunk_ids:
+    #    the deterministic per-chunk id (see process_document's add_documents
+    #    payload): f"{document.pk}:{chunk_index}".
+    vector_ids = [
+        f"{document.pk}:{chunk_index}"
+        for chunk_index in DocumentChunk.all_objects.filter(
+            document=document
+        ).values_list("chunk_index", flat=True)
+    ]
+    if vector_ids:
         try:
             ChromaVectorStore().delete_documents(
-                [str(pk) for pk in chunk_ids], collection=VECTOR_COLLECTION
+                vector_ids, collection=VECTOR_COLLECTION
             )
         except Exception:  # pragma: no cover - best effort
             logger.exception(
@@ -831,7 +835,10 @@ def process_document(document: Document) -> Document:
                     vector_store.add_documents(
                         [
                             {
-                                "id": str(chunk.pk),
+                                # Deterministic per-chunk id: enables idempotent
+                                # upsert on re-index and re-map by metadata
+                                # chunk_id on retrieval.
+                                "id": f"{document.pk}:{chunk.chunk_index}",
                                 "text": chunk.content,
                                 "embedding": embedding,
                                 "metadata": {
@@ -961,10 +968,15 @@ def find_relevant_chunks(
     # missing/None distance is treated as relevant so a vector-store backend that
     # does not report distances never silently drops every hit.
     max_distance = _relevance_max_distance()
+    # Vector ids are deterministic (``f"{document_id}:{chunk_index}"``), so the
+    # chunk PK is carried in ``metadata["chunk_id"]``; re-map by it (skipping any
+    # hit missing the metadata/key). Ranking order of surviving hits is kept.
     ranked_ids = [
-        hit["id"]
+        hit["metadata"]["chunk_id"]
         for hit in hits
-        if hit.get("distance") is None or hit["distance"] <= max_distance
+        if (hit.get("distance") is None or hit["distance"] <= max_distance)
+        and hit.get("metadata")
+        and hit["metadata"].get("chunk_id")
     ]
     if not ranked_ids:
         return []
@@ -1011,3 +1023,524 @@ def _mark_failed(
             "updated_at",
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Resumable per-stage pipeline (Temporal path).
+#
+# The monolithic ``process_document`` above stays the synchronous/celery path.
+# The Temporal workflow drives the pipeline one stage at a time: each stage is
+# an idempotent ``stage_<slug>(document_id)`` function backed by a
+# ``DocumentStage`` row, so a workflow that failed mid-pipeline resumes at the
+# first non-completed stage (a completed stage short-circuits).
+# ---------------------------------------------------------------------------
+
+# Canonical stage slugs. Single source of truth — the Temporal workflow
+# re-declares the same slugs locally and MUST stay in lockstep with this order.
+STAGE_MARK_PROCESSING = "mark_processing"
+STAGE_EXTRACT_TEXT = "extract_text"
+STAGE_CHUNK_TEXT = "chunk_text"
+STAGE_DELETE_EXISTING_CHUNKS = "delete_existing_chunks"
+STAGE_EMBED_AND_STORE_CHUNKS = "embed_and_store_chunks"
+STAGE_MARK_COMPLETED = "mark_completed"
+STAGE_NOTIFY_COMPLETED = "notify_completed"
+
+DOCUMENT_STAGES = (
+    STAGE_MARK_PROCESSING,
+    STAGE_EXTRACT_TEXT,
+    STAGE_CHUNK_TEXT,
+    STAGE_DELETE_EXISTING_CHUNKS,
+    STAGE_EMBED_AND_STORE_CHUNKS,
+    STAGE_MARK_COMPLETED,
+    STAGE_NOTIFY_COMPLETED,
+)
+
+
+def _ensure_stages(document: Document) -> None:
+    """Idempotently create the canonical DocumentStage rows for a document.
+
+    Only creates rows that do not already exist (so it is safe to call on every
+    stage entry); never resets existing rows.
+    """
+    existing = set(
+        DocumentStage.all_objects.filter(document=document).values_list(
+            "name", flat=True
+        )
+    )
+    missing = [
+        DocumentStage(
+            company=document.company,
+            document=document,
+            name=name,
+            order=order,
+        )
+        for order, name in enumerate(DOCUMENT_STAGES)
+        if name not in existing
+    ]
+    if missing:
+        DocumentStage.objects.bulk_create(missing)
+
+
+def _reset_stages(document: Document) -> None:
+    """Re-arm ALL stage rows to pending, clearing started/finished/detail.
+
+    Called by ``stage_mark_processing`` on (re)entry so a reprocess restarts the
+    whole pipeline from a clean slate.
+    """
+    DocumentStage.objects.filter(document=document).update(
+        status=DocumentStage.STATUS_PENDING,
+        detail="",
+        started_at=None,
+        finished_at=None,
+        updated_at=timezone.now(),
+    )
+
+
+def _touch_document_stage(
+    document: Document, stage: str, progress: int | None = None
+) -> None:
+    """Disjoint-update ONLY Document.processing_stage/processing_progress."""
+    fields = {"processing_stage": stage, "updated_at": timezone.now()}
+    if progress is not None:
+        fields["processing_progress"] = progress
+    Document.objects.filter(pk=document.pk).update(**fields)
+
+
+def _stage_start(
+    document: Document, name: str, progress: int | None = None
+) -> None:
+    """Mark a stage running. Disjoint queryset update + document stage touch."""
+    DocumentStage.objects.filter(document=document, name=name).update(
+        status=DocumentStage.STATUS_RUNNING,
+        detail="",
+        started_at=timezone.now(),
+        finished_at=None,
+        updated_at=timezone.now(),
+    )
+    _touch_document_stage(document, name, progress)
+
+
+def _stage_complete(
+    document: Document,
+    name: str,
+    detail: str = "",
+    progress: int | None = None,
+) -> None:
+    """Mark a stage completed. Disjoint queryset update + document stage touch."""
+    DocumentStage.objects.filter(document=document, name=name).update(
+        status=DocumentStage.STATUS_COMPLETED,
+        detail=detail,
+        finished_at=timezone.now(),
+        updated_at=timezone.now(),
+    )
+    _touch_document_stage(document, name, progress)
+
+
+def _stage_fail(document: Document, name: str, detail: str) -> None:
+    """Mark a stage failed. Disjoint queryset update (does NOT touch Document)."""
+    DocumentStage.objects.filter(document=document, name=name).update(
+        status=DocumentStage.STATUS_FAILED,
+        detail=detail[:2000],
+        finished_at=timezone.now(),
+        updated_at=timezone.now(),
+    )
+
+
+def _mark_document_failed(document: Document, message: str) -> None:
+    """Flip ONLY the Document failure fields (no chunk/stage cleanup).
+
+    The Temporal path deliberately avoids ``_mark_failed``'s blanket cleanup:
+    chunk rows and other stages are left intact so a resume can short-circuit
+    the stages that already completed.
+    """
+    Document.objects.filter(pk=document.pk).update(
+        status=Document.STATUS_FAILED,
+        processing_stage="failed",
+        processing_error=message[:2000],
+        updated_at=timezone.now(),
+    )
+
+
+def _stage_is_completed(document: Document, name: str) -> bool:
+    return DocumentStage.objects.filter(
+        document=document, name=name, status=DocumentStage.STATUS_COMPLETED
+    ).exists()
+
+
+def stage_mark_processing(document_id: str) -> dict:
+    """Stage 1: re-arm stages, download any URL source, flip to PROCESSING.
+
+    EXEMPT from the completed short-circuit (decision 2): it always re-arms ALL
+    DocumentStage rows via ``_reset_stages`` so a resume/reprocess starts clean.
+    ``_record_attempt`` is NOT called here — the activity wrapper owns it.
+
+    Dispatch-ordering note (decision 2): the admin runs ``_reset_for_reprocess``
+    and the QUEUED flip BEFORE the async workflow starts, so this stage only
+    re-arms the DocumentStage rows, not ``Document.status``/``processing_stage``
+    (beyond flipping to PROCESSING below).
+    """
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    _reset_stages(document)
+
+    # URL-sourced documents have no stored file yet: download it first (SSRF
+    # safe) and persist the file before extraction (mirrors process_document_task).
+    if document.source_url and not document.file:
+        from .url_source import UrlSourceError, download_source_to_document
+
+        try:
+            download_source_to_document(document)
+        except UrlSourceError as exc:
+            _stage_fail(document, STAGE_MARK_PROCESSING, str(exc))
+            _mark_document_failed(document, str(exc))
+            raise DocumentIndexError(str(exc)) from exc
+        document.save(
+            update_fields=[
+                "file",
+                "title",
+                "file_type",
+                "content_type",
+                "file_size",
+                "updated_at",
+            ]
+        )
+
+    _stage_start(document, STAGE_MARK_PROCESSING, progress=5)
+    try:
+        Document.objects.filter(pk=document.pk).update(
+            status=Document.STATUS_PROCESSING,
+            processing_error="",
+            updated_at=timezone.now(),
+        )
+    except Exception as exc:
+        logger.exception(
+            "stage_mark_processing failed for document %s", document_id
+        )
+        _stage_fail(document, STAGE_MARK_PROCESSING, str(exc))
+        raise DocumentIndexError(str(exc)) from exc
+    _stage_complete(document, STAGE_MARK_PROCESSING, progress=5)
+    return {"ok": True}
+
+
+def stage_extract_text(document_id: str) -> dict:
+    """Stage 2: extract + persist the authoritative DocumentChunk rows."""
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_EXTRACT_TEXT):
+        return {"skipped": True, "chunk_count": document.chunks.count()}
+
+    _stage_start(document, STAGE_EXTRACT_TEXT, progress=25)
+    try:
+        extracted_chunks = extract_document_chunks(document)
+        chunk_rows = [
+            DocumentChunk(
+                company=document.company,
+                document=document,
+                chunk_index=index,
+                page_number=page_number,
+                source_location=source_location,
+                content=text,
+            )
+            for index, (page_number, source_location, text) in enumerate(
+                extracted_chunks
+            )
+        ]
+        with transaction.atomic():
+            _delete_chunks(document)
+            DocumentChunk.objects.bulk_create(chunk_rows)
+    except (DocumentValidationError, DocumentIndexError) as exc:
+        _stage_fail(document, STAGE_EXTRACT_TEXT, str(exc))
+        raise
+    except Exception as exc:
+        logger.exception(
+            "stage_extract_text failed for document %s", document_id
+        )
+        message = (
+            "Document extraction failed. Check that the file is valid and retry."
+        )
+        _stage_fail(document, STAGE_EXTRACT_TEXT, message)
+        raise DocumentIndexError(message) from exc
+    _stage_complete(
+        document,
+        STAGE_EXTRACT_TEXT,
+        detail=f"{len(chunk_rows)} chunks",
+        progress=30,
+    )
+    return {"chunk_count": len(chunk_rows)}
+
+
+def stage_chunk_text(document_id: str) -> dict:
+    """Stage 3: thin verify stage.
+
+    Chunking is inseparable from extraction today (``split_page_text`` runs
+    inside ``extract_document_chunks``), so this stage only verifies that chunk
+    rows exist and records the count; it does no additional work. The workflow
+    ignores the return value.
+    """
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_CHUNK_TEXT):
+        return {"skipped": True, "chunk_count": document.chunks.count()}
+
+    _stage_start(document, STAGE_CHUNK_TEXT, progress=35)
+    try:
+        chunk_count = document.chunks.count()
+        if chunk_count == 0:
+            raise DocumentIndexError(
+                "No chunks were produced during extraction."
+            )
+    except DocumentIndexError as exc:
+        _stage_fail(document, STAGE_CHUNK_TEXT, str(exc))
+        raise
+    except Exception as exc:
+        logger.exception(
+            "stage_chunk_text failed for document %s", document_id
+        )
+        _stage_fail(document, STAGE_CHUNK_TEXT, str(exc))
+        raise DocumentIndexError(str(exc)) from exc
+    _stage_complete(
+        document,
+        STAGE_CHUNK_TEXT,
+        detail=f"{chunk_count} chunks",
+        progress=40,
+    )
+    return {"chunk_count": chunk_count}
+
+
+def stage_delete_existing_chunks(document_id: str) -> dict:
+    """Stage 4: vector cleanup ONLY (never chunk rows).
+
+    Deletes the deterministic vector ids for the CURRENT chunk set so a re-index
+    starts clean. The embed stage re-adds the SAME ids (upsert), so this never
+    creates duplicates; it never deletes ``DocumentChunk`` rows.
+    """
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_DELETE_EXISTING_CHUNKS):
+        return {"skipped": True}
+
+    _stage_start(document, STAGE_DELETE_EXISTING_CHUNKS, progress=45)
+    try:
+        vector_ids = [
+            f"{document.pk}:{chunk_index}"
+            for chunk_index in document.chunks.values_list(
+                "chunk_index", flat=True
+            )
+        ]
+        if vector_ids:
+            try:
+                ChromaVectorStore().delete_documents(
+                    vector_ids, collection=VECTOR_COLLECTION
+                )
+            except Exception:  # pragma: no cover - best effort (missing collection)
+                logger.exception(
+                    "Could not remove existing vectors for document %s",
+                    document_id,
+                )
+    except Exception as exc:
+        logger.exception(
+            "stage_delete_existing_chunks failed for document %s", document_id
+        )
+        _stage_fail(document, STAGE_DELETE_EXISTING_CHUNKS, str(exc))
+        raise DocumentIndexError(str(exc)) from exc
+    _stage_complete(document, STAGE_DELETE_EXISTING_CHUNKS, progress=50)
+    return {"ok": True}
+
+
+def stage_embed_and_store_chunks(document_id: str) -> dict:
+    """Stage 5: embed chunk rows and upsert their deterministic vectors.
+
+    Only library documents are embedded; chat attachments short-circuit. On
+    failure only the vectors pushed THIS run are removed (scoped partial cleanup).
+    """
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_EMBED_AND_STORE_CHUNKS):
+        return {"skipped": True}
+
+    if document.source != Document.SOURCE_LIBRARY:
+        _stage_complete(document, STAGE_EMBED_AND_STORE_CHUNKS, progress=75)
+        return {"skipped": True}
+
+    _stage_start(document, STAGE_EMBED_AND_STORE_CHUNKS, progress=55)
+    vector_store: ChromaVectorStore | None = None
+    pushed_ids: list[str] = []
+    try:
+        chunk_rows = list(
+            DocumentChunk.objects.filter(document=document).order_by("chunk_index")
+        )
+        extracted_chunks = [
+            (chunk.page_number, chunk.source_location, chunk.content)
+            for chunk in chunk_rows
+        ]
+        try:
+            embeddings = _embed_chunks(extracted_chunks)
+        except LLMConfigurationError as exc:
+            raise DocumentIndexError(
+                "LLM key required to embed library documents. Set "
+                "OPENAI_API_KEY and retry."
+            ) from exc
+
+        vector_store = ChromaVectorStore()
+        total_batches = max(
+            1, (len(chunk_rows) + VECTOR_BATCH_SIZE - 1) // VECTOR_BATCH_SIZE
+        )
+        for batch_index, offset in enumerate(
+            range(0, len(chunk_rows), VECTOR_BATCH_SIZE), start=1
+        ):
+            rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
+            vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
+            pushed_ids.extend(
+                vector_store.add_documents(
+                    [
+                        {
+                            # Deterministic per-chunk id: idempotent upsert +
+                            # re-map by metadata chunk_id on retrieval.
+                            "id": f"{document.pk}:{chunk.chunk_index}",
+                            "text": chunk.content,
+                            "embedding": embedding,
+                            "metadata": {
+                                "user_id": str(document.uploaded_by_id),
+                                "company_id": str(document.company_id)
+                                if document.company_id
+                                else "",
+                                "document_id": str(document.pk),
+                                "chunk_id": str(chunk.pk),
+                                "page_number": chunk.page_number,
+                                "source_location": chunk.source_location,
+                                "file_type": document.file_type,
+                            },
+                        }
+                        for chunk, embedding in zip(rows, vectors, strict=True)
+                    ],
+                    collection=VECTOR_COLLECTION,
+                )
+            )
+            progress = 55 + int(20 * batch_index / total_batches)
+            _touch_document_stage(
+                document, STAGE_EMBED_AND_STORE_CHUNKS, progress
+            )
+    except (DocumentValidationError, DocumentIndexError) as exc:
+        if vector_store is not None and pushed_ids:
+            try:
+                vector_store.delete_documents(
+                    pushed_ids, collection=VECTOR_COLLECTION
+                )
+            except Exception:  # pragma: no cover - best effort
+                logger.exception(
+                    "Could not remove partial vectors for document %s",
+                    document_id,
+                )
+        _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, str(exc))
+        raise
+    except Exception as exc:
+        logger.exception(
+            "stage_embed_and_store_chunks failed for document %s", document_id
+        )
+        if vector_store is not None and pushed_ids:
+            try:
+                vector_store.delete_documents(
+                    pushed_ids, collection=VECTOR_COLLECTION
+                )
+            except Exception:  # pragma: no cover - best effort
+                logger.exception(
+                    "Could not remove partial vectors for document %s",
+                    document_id,
+                )
+        message = "Embedding/indexing failed. Retry once the LLM provider is reachable."
+        _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, message)
+        raise DocumentIndexError(message) from exc
+    _stage_complete(
+        document,
+        STAGE_EMBED_AND_STORE_CHUNKS,
+        detail=f"{len(pushed_ids)} vectors",
+        progress=75,
+    )
+    return {"chunks_stored": len(pushed_ids)}
+
+
+def stage_mark_completed(document_id: str) -> dict:
+    """Stage 6: derive title, stamp file_type, flip to READY.
+
+    The completed short-circuit returns the LIVE ``document.chunk_count``
+    (decision 3): that count stays authoritative because the only later stage
+    (``notify_completed``) never mutates chunk rows.
+    """
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_MARK_COMPLETED):
+        return {"chunk_count": document.chunk_count}
+
+    _stage_start(document, STAGE_MARK_COMPLETED, progress=90)
+    try:
+        chunk_rows = list(
+            DocumentChunk.objects.filter(document=document).order_by("chunk_index")
+        )
+        extracted_text = "\n\n".join(
+            chunk.content for chunk in chunk_rows if chunk.content
+        ).strip()
+        file_basename = (
+            os.path.basename(document.file.name) if document.file else ""
+        )
+        user_supplied_title = (
+            bool(document.title) and document.title != file_basename
+        )
+        document.title = derive_document_title(
+            document, extracted_text, user_supplied_title
+        )
+        resolved_suffix = resolve_file_extension(document).lstrip(".").lower()
+        if resolved_suffix:
+            document.file_type = resolved_suffix
+        document.status = Document.STATUS_READY
+        document.processing_stage = "ready"
+        document.processing_progress = 100
+        document.chunk_count = document.chunks.count()
+        document.processing_error = ""
+        document.save(
+            update_fields=[
+                "title",
+                "file_type",
+                "status",
+                "processing_stage",
+                "processing_progress",
+                "chunk_count",
+                "processing_error",
+                "updated_at",
+            ]
+        )
+    except Exception as exc:
+        logger.exception(
+            "stage_mark_completed failed for document %s", document_id
+        )
+        _stage_fail(document, STAGE_MARK_COMPLETED, str(exc))
+        raise DocumentIndexError(str(exc)) from exc
+    _stage_complete(document, STAGE_MARK_COMPLETED, progress=100)
+    return {"chunk_count": document.chunk_count}
+
+
+def stage_notify_completed(document_id: str) -> dict:
+    """Stage 7: notification hook (no-op); mark completed and return result."""
+    document = Document.objects.get(pk=document_id)
+    _ensure_stages(document)
+    if _stage_is_completed(document, STAGE_NOTIFY_COMPLETED):
+        return {
+            "status": "ready",
+            "chunk_count": document.chunk_count,
+            "error_message": "",
+        }
+
+    _stage_start(document, STAGE_NOTIFY_COMPLETED, progress=100)
+    try:
+        pass
+    except Exception as exc:  # pragma: no cover - hook has no work today
+        logger.exception(
+            "stage_notify_completed failed for document %s", document_id
+        )
+        _stage_fail(document, STAGE_NOTIFY_COMPLETED, str(exc))
+        raise DocumentIndexError(str(exc)) from exc
+    _stage_complete(document, STAGE_NOTIFY_COMPLETED, progress=100)
+    return {
+        "status": "ready",
+        "chunk_count": document.chunk_count,
+        "error_message": "",
+    }

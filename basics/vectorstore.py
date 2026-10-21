@@ -84,6 +84,9 @@ class ChromaVectorStore:
         return self._client
 
     def add_documents(self, documents: list[dict], collection: str) -> list[str]:
+        # Callers pass a deterministic per-chunk id (``f"{document_id}:{chunk_index}"``);
+        # ``col.add(ids=...)`` upserts by id, so re-adding the same ids overwrites
+        # in place (no duplicate vectors).
         col = self.client.get_or_create_collection(
             collection,
             metadata={"hnsw:space": "cosine"},
