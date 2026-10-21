@@ -34,8 +34,10 @@ from unfold.enums import ActionVariant
 from basics.admin import BaseModelAdmin
 from basics.vectorstore import ChromaVectorStore
 
+from infrastructure.processing.temporal_backend import TemporalProcessingBackend
+
 from .forms import DocumentAdminForm
-from .models import Document, DocumentChunk
+from .models import Document, DocumentChunk, DocumentStage
 from .services import VECTOR_COLLECTION, purge_document
 from .tasks import enqueue_document_processing
 
@@ -115,7 +117,7 @@ class DocumentAdmin(BaseModelAdmin):
     # backend chooser is NOT a row-action anymore: it is the in-row "Schedule"
     # column below (an "Action" button + inline dropdown that POSTs to the
     # AJAX dispatch endpoint — no separate page, no full reload).
-    actions_row = ("show_chunks",)
+    actions_row = ("show_chunks", "info_action")
 
     list_display = (
         "id_short",
@@ -371,6 +373,27 @@ class DocumentAdmin(BaseModelAdmin):
             reverse("admin:documents_document_chunks", args=[document.pk])
         )
 
+    @action(
+        description="Info",
+        url_path="temporal-info-pill",
+        variant=ActionVariant.PRIMARY,
+    )
+    def info_action(self, request, object_id):
+        # The per-row "Info" pill. Unfold's actions_row expects every entry to
+        # be an @action, but this one never navigates: temporal_info.js
+        # intercepts the click (preventDefault) and opens the polling modal
+        # instead. The returned button carries data-doc-id and the 'info-action'
+        # class the JS delegates on. object_id is a server-controlled pk
+        # interpolated via format_html's auto-escaping — no raw user text.
+        return format_html(
+            '<button type="button" class="info-action '
+            'inline-flex items-center gap-1 rounded-default border '
+            'border-primary-600 bg-primary-600 px-3 py-1 text-sm '
+            'font-medium text-white hover:bg-primary-700 cursor-pointer" '
+            'data-doc-id="{}">Info</button>',
+            str(object_id),
+        )
+
     def save_model(self, request, obj, form, change):
         # The minimal ADD form omits ``source``; a document added through that
         # form is always a library upload, so stamp it BEFORE super().save_model
@@ -402,6 +425,11 @@ class DocumentAdmin(BaseModelAdmin):
     def get_urls(self):
         # Custom URLs BEFORE super().get_urls() so they take precedence.
         custom = [
+            path(
+                "<str:pk>/temporal-info/",
+                self.admin_site.admin_view(self.temporal_info_view),
+                name="documents_document_temporal_info",
+            ),
             path(
                 "queue/",
                 self.admin_site.admin_view(self.queue_view),
@@ -554,6 +582,70 @@ class DocumentAdmin(BaseModelAdmin):
                 ]
             }
         )
+
+    def temporal_info_view(self, request, pk):
+        # Data source for the per-row "Info" modal (temporal_info.js). GET only
+        # (405 otherwise); CSRF is irrelevant for a read. Resolve from the
+        # permission-scoped queryset ONLY (out-of-scope → 404). The Stages table
+        # is built from the document's DocumentStage rows ordered by `order`,
+        # with a single synthetic fallback row derived from the document's own
+        # processing_stage/status when no stage rows exist yet (e.g. a document
+        # that has never been dispatched, or processed by a non-Temporal
+        # backend). The live Temporal workflow describe() is only consulted when
+        # processing_backend == "temporal"; for any other backend we return
+        # status "n/a" + a note and never touch Temporal.
+        if request.method != "GET":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        document = get_object_or_404(self.get_queryset(request), pk=pk)
+
+        stages = list(
+            DocumentStage.objects.filter(document=document)
+            .order_by("order")
+            .values("name", "status", "detail")
+        )
+        if not stages:
+            # Synthetic single-entry fallback: surface the document's own
+            # coarse progress so the modal always shows something meaningful.
+            stage_name = document.processing_stage or document.status
+            stages = [
+                {
+                    "name": stage_name or "processing",
+                    "status": document.status,
+                    "detail": document.processing_error or "",
+                }
+            ]
+
+        workflow_id = f"doc-{document.pk}"
+        if document.processing_backend == "temporal":
+            info = TemporalProcessingBackend().get_status(workflow_id)
+            payload = {
+                "workflow_id": workflow_id,
+                "status": info.get("status", "unknown"),
+                "run_id": info.get("run_id"),
+                "started": info.get("started"),
+                "closed": info.get("closed"),
+                "result": info.get("result"),
+                "degraded": info.get("degraded", False),
+                "note": "",
+                "stages": stages,
+            }
+        else:
+            # Non-Temporal backend: never touch Temporal.
+            payload = {
+                "workflow_id": workflow_id,
+                "status": "n/a",
+                "run_id": None,
+                "started": None,
+                "closed": None,
+                "result": None,
+                "degraded": False,
+                "note": (
+                    "This document is processed by the "
+                    f"'{document.processing_backend}' backend, not Temporal."
+                ),
+                "stages": stages,
+            }
+        return JsonResponse(payload)
 
     def dispatch_view(self, request, pk):
         # AJAX dispatch endpoint for the in-row "Schedule" dropdown. POST only

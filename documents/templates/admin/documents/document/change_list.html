@@ -56,4 +56,15 @@ from server-supplied text. CSRF comes from the admin cookie.
 <div id="documents-schedule-root"
      data-dispatch-url-template="{% url 'admin:documents_document_dispatch' '__PK__' %}"></div>
 <script src="{% static 'documents/js/schedule_dropdown.js' %}"></script>
+
+{% comment %}
+Per-row "Info" modal. The info_action pill (rendered by DocumentAdmin) carries
+data-doc-id + class="info-action"; temporal_info.js intercepts the click and
+opens a polling modal built entirely with createElement/textContent (never
+innerHTML). The temporal-info endpoint URL is a reverse()d template carrying a
+placeholder pk the JS swaps per row — so no URL is built from server text.
+{% endcomment %}
+<div id="documents-temporal-info-root"
+     data-info-url-template="{% url 'admin:documents_document_temporal_info' '__PK__' %}"></div>
+<script src="{% static 'documents/js/temporal_info.js' %}"></script>
 {% endblock %}
