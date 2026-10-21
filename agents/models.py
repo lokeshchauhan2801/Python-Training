@@ -96,7 +96,7 @@ class Tool(BaseModel, SoftDeleteModel):
         # is a cross-reference to CODE (not another table), so it lives in model
         # validation. Imported lazily so importing agents.models never imports
         # the registry at module load.
-        from agents.tools import available_slugs
+        from chat.services.langgraph_service import available_slugs
 
         # prompt-only tools (config kind=prompt_only) are created from a Langfuse
         # prompt and run through the generic prompt_tool handler, so their slug

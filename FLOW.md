@@ -47,23 +47,22 @@ chat/ → chat/ → documents/ → basics/
 Dirs crossed: `chat`, `documents`, `basics` (3 app dirs; `chat` is entered twice
 — view then service).
 
-### 2. Chat turn through the LangGraph flow — **5 dirs**
+### 2. Chat turn through the LangGraph flow — **4 dirs**
 
 ```
-chat/ → chat/services/ → agents/tools/ → chat/services + documents/ → basics/
+chat/ → chat/services/ → chat/services + documents/ → basics/
 ```
 
 1. `chat/views.py::send` → `_orchestrator_for(company)`
 2. active graph found → `chat/services/langgraph_service.py::LangGraphChatService.process_message`
-3. graph build + router: `chat/services/langgraph_service.py` (+ `chat/services/graph_state.py`), reads `agents/models.py` for the graph DATA model
-4. router picks a tool → `agents/tools/__init__.py::get_handler` → one of `agents/tools/*.py`
+3. graph build + router + GraphState: all in `chat/services/langgraph_service.py`, which reads `agents/models.py` for the graph DATA model
+4. router picks a tool → the slug->handler registry (`get_handler`) and the five tool handlers are defined IN-FILE in `chat/services/langgraph_service.py`
 5. the chosen handler calls back into `chat/services/chat_service.py::ChatService` (document_search/chat_summarise) and/or `documents/services.py`, with `basics/llm.py` for the LLM call
 
-Dirs crossed: `chat`, `agents/tools`, `documents`, `basics`.
+Dirs crossed: `chat`, `documents`, `basics`.
 The runtime now stays within `chat/` — it hops to `agents/` only for the graph
-DATA model (`agents/models.py`) and the tool registry (`agents/tools/`). Thin
-re-export shims remain at `agents/services/graph_service.py` and
-`agents/services/state.py` for back-compat.
+DATA model (`agents/models.py`). The registry, GraphState, and all five tool
+handlers live in the single file `chat/services/langgraph_service.py`.
 
 ### 3. Building/editing a flow in the canvas — **3 dirs**
 
@@ -107,13 +106,14 @@ company/ → (every page via context processor)
 - **Flow definition (data):** `agents/models.py` — `AgentGraph` (one active per
   company), `AgentNode` (START/STEP/END), `AgentEdge`, `Tool`.
 - **Flow runtime (execution):** `chat/services/langgraph_service.py`
-  (`LangGraphChatService`) + `chat/services/graph_state.py`, with thin re-export
-  shims left at `agents/services/graph_service.py` and `agents/services/state.py`.
-  A new chat message for a company with an **active** graph runs through it;
-  otherwise chat falls back to the normal RAG path.
-- **Tools a node can call:** `agents/tools/` — `general_assistant`,
-  `document_search`, `chat_summarise`, `web_search` (stub). The registry is
-  `agents/tools/base.py` + `agents/tools/__init__.py`.
+  (`LangGraphChatService`), which also holds the GraphState TypedDict, the tool
+  registry, and all five tool handlers — one single file. A new chat message for
+  a company with an **active** graph runs through it; otherwise chat falls back
+  to the normal RAG path.
+- **Tools a node can call:** defined IN-FILE in
+  `chat/services/langgraph_service.py` — `general_assistant`, `document_search`,
+  `chat_summarise`, `web_search` (stub), `prompt_tool`. The registry
+  (`register`/`get_handler`/`available_slugs`) lives in the same file.
 - **Prompts + tracing:** `basics/langfuse.py` (import-safe; reads
   `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` from the
   environment, local fallback when absent).
@@ -134,7 +134,8 @@ flow, else "Document reference" when citations exist, else "General purpose".
 - **Prompt-only tools** carry `config = {"source": "langfuse", "kind":
   "prompt_only"}`. They need no registered handler: the runtime routes an
   unregistered-but-prompt-only slug through the generic `prompt_tool` handler
-  (`agents/tools/prompt_tool.py`), which answers like the general assistant but
+  (in `chat/services/langgraph_service.py`), which answers like the general
+  assistant but
   forces the tool's Langfuse prompt as the system message. Create one from the
   canvas ("Add Langfuse tool") — it POSTs `tool/sync_langfuse/` with the prompt
   name (langfuse 4.18.0 has no prompt-listing API, so the client supplies the

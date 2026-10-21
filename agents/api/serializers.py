@@ -6,7 +6,6 @@ from basics.api.serializers import AuditReadOnlySerializerMixin
 from chat.api.serializers import RequiredCompanyResolutionMixin
 
 from ..models import AgentEdge, AgentGraph, AgentNode, Tool
-from ..tools import available_slugs
 
 
 class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
@@ -146,6 +145,10 @@ class ToolSerializer(
         prompt_only = (
             isinstance(config, dict) and config.get("kind") == "prompt_only"
         )
+        # Lazy import avoids an import cycle (serializers -> langgraph_service ->
+        # chat.services) at module load.
+        from chat.services.langgraph_service import available_slugs
+
         if slug and slug not in available_slugs() and not prompt_only:
             raise serializers.ValidationError(
                 {"slug": f"Unknown tool slug '{slug}' (no handler registered)."}
