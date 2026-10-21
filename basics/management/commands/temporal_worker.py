@@ -21,7 +21,13 @@ class Command(BaseCommand):
 
         from infrastructure.temporal.document_workflow import (
             DocumentProcessingWorkflow,
-            process_document_activity,
+            stage_chunk_text_activity,
+            stage_delete_existing_chunks_activity,
+            stage_embed_and_store_chunks_activity,
+            stage_extract_text_activity,
+            stage_mark_completed_activity,
+            stage_mark_processing_activity,
+            stage_notify_completed_activity,
         )
 
         client = await Client.connect(settings.TEMPORAL_HOST)
@@ -29,7 +35,15 @@ class Command(BaseCommand):
             client,
             task_queue="document-processing",
             workflows=[DocumentProcessingWorkflow],
-            activities=[process_document_activity],
+            activities=[
+                stage_mark_processing_activity,
+                stage_extract_text_activity,
+                stage_chunk_text_activity,
+                stage_delete_existing_chunks_activity,
+                stage_embed_and_store_chunks_activity,
+                stage_mark_completed_activity,
+                stage_notify_completed_activity,
+            ],
         )
         self.stdout.write(
             "Starting Temporal worker on task queue 'document-processing'"

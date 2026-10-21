@@ -33,5 +33,39 @@ class TemporalProcessingBackend(ProcessingBackend):
         )
         return handle.id
 
-    def get_status(self, job_id: str) -> str:
-        return "RUNNING"
+    def get_status(self, job_id: str) -> dict:
+        # Tolerant poll: any failure (Temporal unreachable, unknown workflow,
+        # transport error) degrades to a safe dict and never raises.
+        import asyncio
+
+        try:
+            return asyncio.run(self._status_async(job_id))
+        except Exception:  # noqa: BLE001 — status polling must never raise
+            return {
+                "status": "unknown",
+                "degraded": True,
+                "run_id": None,
+                "started": None,
+                "closed": None,
+                "result": None,
+            }
+
+    async def _status_async(self, job_id: str) -> dict:
+        import temporalio.client as tc
+        from django.conf import settings
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        handle = client.get_workflow_handle(job_id)
+        # Describe only — never await handle.result() on the poll path (it would
+        # block until the workflow finishes).
+        desc = await handle.describe()
+        return {
+            "status": desc.status.name if desc.status else "unknown",
+            "degraded": False,
+            "run_id": desc.run_id,
+            "started": desc.start_time.isoformat() if desc.start_time else None,
+            "closed": desc.close_time.isoformat() if desc.close_time else None,
+            "result": None,
+        }

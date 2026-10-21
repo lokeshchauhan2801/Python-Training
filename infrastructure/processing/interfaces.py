@@ -19,5 +19,5 @@ class ProcessingBackend(ABC):
         """Dispatch a processing request. Return a job/task ID."""
 
     @abstractmethod
-    def get_status(self, job_id: str) -> str:
-        """Return current job status."""
+    def get_status(self, job_id: str) -> dict | str:
+        """Return current job status (celery/kafka return str; temporal a dict)."""
