@@ -22,15 +22,7 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
         if "company" in self.fields:
             self.fields["company"].required = False
 
-        # Drop DRF's auto-generated UniqueTogetherValidators. Our models use
-        # PARTIAL unique constraints (``condition=Q(is_deleted=False)``), which
-        # DRF turns into a validator whose ``condition_fields`` include
-        # ``is_deleted``. On a PARTIAL update (PATCH) ``is_deleted`` is not in
-        # the submitted data, so the validator raises ``KeyError: 'is_deleted'``
-        # (DRF validators.py line 191) and 500s when you Save a node. Uniqueness
-        # is still enforced two other ways: our own per-graph slug check in
-        # ``AgentNodeSerializer.validate`` and the DB partial unique constraints
-        # themselves. So removing only these auto-built validators is safe.
+
         from rest_framework.validators import UniqueTogetherValidator
 
         self.validators = [
@@ -45,12 +37,8 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if self.instance is None and "company" not in attrs:
-            # Resolve an omitted company via the hook so subclasses that derive
-            # it from a parent (node/edge -> graph.company) are not forced
-            # through _resolve_company(None), which raises "ambiguous; specify a
-            # company" for a multi-company user. The default keeps the original
-            # behaviour (graph/tool serializers still resolve the active/single
-            # owned company).
+
+
             attrs["company"] = self._default_company(attrs)
         return attrs
 
@@ -96,7 +84,7 @@ class AgentGraphSerializer(
         ]
 
     def validate_name(self, value):
-        # Required non-blank on create (<=200 is enforced by the model field).
+
         if self.instance is None and not (value or "").strip():
             raise serializers.ValidationError("This field may not be blank.")
         return value
@@ -135,9 +123,8 @@ class ToolSerializer(
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        # Slug validation lives here (not in validate_slug) so it can see the
-        # resolved config: a prompt-only tool (config kind=prompt_only) runs
-        # through the generic prompt_tool handler, so an arbitrary slug is fine.
+
+
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
         config = attrs.get("config")
         if config is None and self.instance is not None:
@@ -145,8 +132,8 @@ class ToolSerializer(
         prompt_only = (
             isinstance(config, dict) and config.get("kind") == "prompt_only"
         )
-        # Lazy import avoids an import cycle (serializers -> langgraph_service ->
-        # chat.services) at module load.
+
+
         from chat.services.langgraph_service import available_slugs
 
         if slug and slug not in available_slugs() and not prompt_only:
@@ -224,11 +211,8 @@ class AgentNodeSerializer(
         return value
 
     def _default_company(self, attrs):
-        # A node's company is its graph's company — never the user's active
-        # company. This is what lets the canvas create a node without sending a
-        # company, and avoids the "ambiguous; specify a company" error for a
-        # multi-company user (which fired even on the FIRST node of an empty
-        # graph, because the mixin resolved the active company too early).
+
+
         graph = attrs.get("graph")
         if graph is not None:
             return graph.company
@@ -237,25 +221,20 @@ class AgentNodeSerializer(
     def validate(self, attrs):
         attrs = super().validate(attrs)
         graph = attrs.get("graph") or (self.instance and self.instance.graph)
-        # A node's company is ALWAYS its graph's company. The shared mixin
-        # defaults an omitted company to the user's ACTIVE/single company, which
-        # is wrong for a multi-company user (it picks a company unrelated to the
-        # chosen graph and then trips the mismatch check below). So on create,
-        # override the resolved company with the graph's company before the
-        # check runs — the client never needs to send a correct company for a
-        # node, and a stale active-company guess can't block creation.
+
+
         if self.instance is None and graph is not None:
             attrs["company"] = graph.company
         company = self._scoped_company(attrs)
-        # The node's company must match its graph's company (model invariant;
-        # surfaced here as a 400 rather than a 500 on save).
+
+
         if graph is not None and company is not None and graph.company_id != getattr(
             company, "pk", None
         ):
             raise serializers.ValidationError(
                 {"company": "node company must match graph company"}
             )
-        # Every attached tool must belong to the same company as the node.
+
         tools = attrs.get("tools")
         if tools is not None and company is not None:
             for tool in tools:
@@ -263,8 +242,8 @@ class AgentNodeSerializer(
                     raise serializers.ValidationError(
                         {"tools": "every tool must belong to the node's company"}
                     )
-        # Unique slug within the graph (serializer-level; the DB partial unique
-        # constraint is the backstop).
+
+
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
         if graph is not None and slug:
             clash = AgentNode.objects.filter(graph=graph, slug=slug)
@@ -331,9 +310,8 @@ class AgentEdgeSerializer(
         return value
 
     def _default_company(self, attrs):
-        # An edge's company is its graph's company (same reasoning as the node
-        # serializer) — avoids "ambiguous; specify a company" for multi-company
-        # users.
+
+
         graph = attrs.get("graph")
         if graph is not None:
             return graph.company
@@ -344,18 +322,16 @@ class AgentEdgeSerializer(
         source = attrs.get("source") or (self.instance and self.instance.source)
         target = attrs.get("target") or (self.instance and self.instance.target)
         graph = attrs.get("graph") or (self.instance and self.instance.graph)
-        # An edge's company is ALWAYS its graph's company (same reasoning as
-        # AgentNode.validate): override the mixin's active-company default on
-        # create so a multi-company user's stale active company can't block
-        # wiring an edge.
+
+
         if self.instance is None and graph is not None:
             attrs["company"] = graph.company
-        # Self-loop rejected.
+
         if source is not None and target is not None and source.pk == target.pk:
             raise serializers.ValidationError(
                 {"target": "an edge cannot connect a node to itself"}
             )
-        # Source/target must be in the same graph (no cross-graph edge).
+
         if (
             source is not None
             and target is not None
@@ -364,7 +340,7 @@ class AgentEdgeSerializer(
             raise serializers.ValidationError(
                 {"target": "an edge must connect nodes of the same graph"}
             )
-        # The edge's graph must match the endpoints' graph.
+
         if graph is not None and source is not None and source.graph_id != graph.pk:
             raise serializers.ValidationError(
                 {"graph": "edge graph must match the source/target graph"}

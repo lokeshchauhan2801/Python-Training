@@ -20,8 +20,7 @@ async def stage_mark_processing_activity(params: dict) -> dict:
     from documents.services import stage_mark_processing
     from infrastructure.processing.handlers import _record_attempt
 
-    # The activity wrapper owns attempt bookkeeping (recorded once per run with
-    # Temporal's own attempt counter); the stage function deliberately does not.
+
     await sync_to_async(_record_attempt, thread_sensitive=False)(
         params.get("surface", "documents"),
         params["document_id"],
@@ -98,8 +97,6 @@ async def stage_notify_completed_activity(params: dict) -> dict:
     )
 
 
-# Static (slug, activity) sequence — the single source of execution order. The
-# workflow body stays deterministic by iterating this constant list only.
 _STAGE_SEQUENCE = (
     ("mark_processing", stage_mark_processing_activity),
     ("extract_text", stage_extract_text_activity),
@@ -114,7 +111,7 @@ _STAGE_SEQUENCE = (
 @workflow.defn(name="DocumentProcessingWorkflow")
 class DocumentProcessingWorkflow:
     def __init__(self) -> None:
-        # Determinism: __init__ sets per-run state only, nothing side-effecting.
+
         self._stages: dict = {}
 
     @workflow.run

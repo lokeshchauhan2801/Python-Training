@@ -1,9 +1,4 @@
-// Thin client for the DRF api/v1/agents/ endpoints.
-//
-// The canvas runs inside a same-origin <iframe> on the Django /agent-builder/
-// page, so requests carry the session cookie automatically. Write methods need
-// the CSRF token, which the Django page hands to the iframe via its src
-// querystring (?csrf=<token>); we read it back from location.search.
+
 
 const API_ROOT = "/api/v1/agents";
 

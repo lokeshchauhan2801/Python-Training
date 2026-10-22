@@ -18,21 +18,19 @@ class DocumentAdminForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # A library document may supply a URL instead of a file, so the file
-        # field is optional at the form level (the clean() rule enforces that
-        # exactly one is present).
+
+
         if "file" in self.fields:
             self.fields["file"].required = False
-        # The minimal add form hides the title; it is derived from the document
-        # content at process time (with a filename/URL no-key fallback), so the
-        # title is never required at the form level.
+
+
         if "title" in self.fields:
             self.fields["title"].required = False
 
     def clean(self):
         cleaned = super().clean()
-        # The minimal add form omits the ``source`` field entirely; such a
-        # submission is always a library upload, so run the file-OR-URL rule.
+
+
         if "source" in self.fields:
             source = cleaned.get("source")
         else:

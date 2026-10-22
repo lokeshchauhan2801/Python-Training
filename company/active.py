@@ -66,7 +66,7 @@ def active_company_for_request(request):
         company = companies.filter(pk=company_id).first()
         if company:
             return company
-        # Stale / no-longer-accessible selection: drop it and re-default below.
+
         request.session.pop("active_company_id", None)
 
     company = companies.first()

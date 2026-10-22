@@ -59,9 +59,7 @@ def process_document_task(
         logger.error("Cannot process missing document %s", document_id)
         raise
 
-    # URL-sourced documents have no stored file yet: download it first (SSRF
-    # safe) and persist the file before extraction. A download failure marks the
-    # document failed with a user-safe message and re-raises.
+
     if document.source_url and not document.file:
         from .url_source import UrlSourceError, download_source_to_document
 
@@ -130,8 +128,7 @@ def dispatch_document_processing(
     document = Document.objects.filter(pk=document_id).first()
     task_id = str(uuid4())
 
-    # Flip to QUEUED up front so the UI reflects the transition immediately and
-    # the status poll can observe queued → processing → ready/failed.
+
     if document is not None:
         document.status = Document.STATUS_QUEUED
         document.processing_stage = "queued"
@@ -152,9 +149,8 @@ def dispatch_document_processing(
         )
 
     if requested in {"celery", "local-background"} and settings.DEBUG:
-        # Defer until the surrounding transaction (file write + row save from the
-        # admin add path) is committed, so the background thread never reads a
-        # not-yet-persisted file (previously caused FileNotFoundError / 0 chunks).
+
+
         transaction.on_commit(
             lambda: _local_executor.submit(
                 process_document_task.run,
@@ -168,9 +164,7 @@ def dispatch_document_processing(
         task = process_document_task.apply_async(args=[document_id], retry=False)
         return task.id, "celery"
 
-    # Kafka / Temporal (and any non-default backend) go through the strategy
-    # dispatcher so the selected infrastructure handles the document. Lazy
-    # import keeps this module broker-free at load time.
+
     from infrastructure.processing.dispatcher import ProcessingDispatcher
     from infrastructure.processing.interfaces import ProcessingRequest
 

@@ -13,7 +13,7 @@ keys (``can_switch_company``, ``accessible_companies``, ``active_company``,
 
 <div class="flex flex-row gap-4 items-center ml-auto">
     {% if can_switch_company %}
-        {# More than one accessible company: a switcher that auto-submits. #}
+
         <form method="post" action="{{ set_active_company_url }}" class="flex items-center">
             {% csrf_token %}
             <input type="hidden" name="next" value="{{ request.path }}">
@@ -27,7 +27,7 @@ keys (``can_switch_company``, ``accessible_companies``, ``active_company``,
             </select>
         </form>
     {% elif active_company %}
-        {# Exactly one accessible company: show its name as static text. #}
+
         <span class="font-medium text-font-default-light text-sm dark:text-font-default-dark">{{ active_company.name }}</span>
     {% endif %}
 

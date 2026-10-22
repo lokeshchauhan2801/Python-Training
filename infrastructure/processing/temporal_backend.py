@@ -5,8 +5,8 @@ class TemporalProcessingBackend(ProcessingBackend):
     TASK_QUEUE = "document-processing"
 
     def dispatch(self, request: ProcessingRequest) -> str:
-        # The Temporal client is async; in a sync context we drive it via
-        # asyncio.run so the admin/dispatch seam stays synchronous.
+
+
         import asyncio
 
         return asyncio.run(self._dispatch_async(request))
@@ -34,13 +34,13 @@ class TemporalProcessingBackend(ProcessingBackend):
         return handle.id
 
     def get_status(self, job_id: str) -> dict:
-        # Tolerant poll: any failure (Temporal unreachable, unknown workflow,
-        # transport error) degrades to a safe dict and never raises.
+
+
         import asyncio
 
         try:
             return asyncio.run(self._status_async(job_id))
-        except Exception:  # noqa: BLE001 — status polling must never raise
+        except Exception:
             return {
                 "status": "unknown",
                 "degraded": True,
@@ -58,8 +58,8 @@ class TemporalProcessingBackend(ProcessingBackend):
             getattr(settings, "TEMPORAL_HOST", "localhost:7233")
         )
         handle = client.get_workflow_handle(job_id)
-        # Describe only — never await handle.result() on the poll path (it would
-        # block until the workflow finishes).
+
+
         desc = await handle.describe()
         return {
             "status": desc.status.name if desc.status else "unknown",

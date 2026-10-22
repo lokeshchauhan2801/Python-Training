@@ -39,12 +39,8 @@ class KafkaEventPublisher(EventPublisher):
             }
         ).encode()
         self.producer.produce(topic, value=payload, callback=self._delivery_callback)
-        # produce() only buffers the message in memory. Without flushing, a
-        # short-lived publisher (created per web request) can be garbage
-        # collected before the background thread delivers to the broker, so the
-        # message is silently lost and the document stays "Queued" forever.
-        # flush() blocks until all buffered messages are delivered (or the
-        # timeout elapses) and services delivery callbacks.
+
+
         self.producer.flush(timeout=10)
 
     @staticmethod

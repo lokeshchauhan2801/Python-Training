@@ -22,7 +22,7 @@ class UserManagerTests(TestCase):
 
     def test_create_user_normalizes_email_domain(self):
         user = User.objects.create_user(email="Person@EXAMPLE.COM", password="x")
-        # Django normalizes the domain part to lower-case.
+
         self.assertEqual(user.email, "Person@example.com")
 
     def test_username_defaults_to_full_email(self):
@@ -37,7 +37,7 @@ class UserManagerTests(TestCase):
 
     def test_soft_deleted_user_hidden_by_objects_visible_via_all_objects(self):
         user = User.objects.create_user(email="c@example.com", password="x")
-        user.delete()  # soft delete
+        user.delete()
         self.assertFalse(User.objects.filter(pk=user.pk).exists())
         self.assertTrue(User.all_objects.filter(pk=user.pk).exists())
 
@@ -64,7 +64,7 @@ class UserAuditPopulationTests(TestCase):
         try:
             target = User(email="t2@example.com", username="t2@example.com")
             target.set_password("x")
-            target.save()  # no explicit actor -> resolved from the contextvar
+            target.save()
         finally:
             reset_current_user(token)
         self.assertEqual(target.created_by_id, actor.id)

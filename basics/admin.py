@@ -10,7 +10,6 @@ company scope filter:
 from django.core.exceptions import PermissionDenied
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 
-# Audit fields that may be made read-only when present on a model.
 AUDIT_FIELD_NAMES = (
     "id",
     "created_at",
@@ -46,11 +45,10 @@ class AuditAdminMixin:
         return readonly
 
     def save_model(self, request, obj, form, change):
-        # Run the superclass first so password hashing (DjangoUserAdmin /
-        # UserCreationForm) and any form.save side effects happen, and a PK is
-        # assigned, BEFORE we stamp the audit columns.
+
+
         super().save_model(request, obj, form, change)
-        # MEDIUM FIX 1: compute update_fields dynamically; never obj.save(actor=...).
+
         fields = []
         if not change and obj.created_by_id is None:
             obj.created_by = request.user
@@ -75,20 +73,16 @@ class CompanyScopedAdminMixin:
         qs = super().get_queryset(request)
         model_field_names = {f.name for f in self.model._meta.get_fields()}
         if "company" in model_field_names:
-            # Scope every company-scoped changelist to the ACTIVE company (the
-            # session-resolved global switcher value) — for BOTH superusers and
-            # non-superusers, matching the OLD project: a system admin sees the
-            # active company's data, not every company's. When the user has no
-            # accessible company, show nothing (clean empty state, no deref).
+
+
             from company.active import active_company_for_request
 
             active = active_company_for_request(request)
             if active is None:
                 return qs.none()
             return qs.filter(company=active)
-        # Models WITHOUT a company field (notably Company itself) keep the
-        # owner-based scoping so the Companies changelist still lists ALL of the
-        # user's companies to switch between — never filtered to one.
+
+
         if request.user.is_superuser:
             return qs
         if "owner" in model_field_names:
@@ -119,9 +113,8 @@ class CompanyScopedAdminMixin:
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.name == "company":
-            # Narrow the picker to the switchable set and default it to the
-            # active company — for superusers too (a superuser may still pick any
-            # accessible company, but the add form defaults to the active one).
+
+
             kwargs["queryset"] = self._owned_companies(request)
             active = self._resolve_active_company(request)
             if active is not None:
@@ -148,19 +141,16 @@ class CompanyScopedAdminMixin:
             return
         active = self._resolve_active_company(request)
         if not obj.company_id:
-            # No company on the row (hidden add form / tampered POST): stamp the
-            # active company. Applies to superusers too, so a hidden company
-            # field never leaves company_id null.
+
+
             if active is None:
                 raise PermissionDenied(
                     "You must have a company before adding a document."
                 )
             obj.company = active
             return
-        # A submitted company the user may NOT access (not in the accessible
-        # set — owned, or all active for a superuser): coerce to the active
-        # company when there is one, else reject. A superuser's accessible set is
-        # all active companies, so their explicit pick is honored.
+
+
         if not self._owned_companies(request).filter(pk=obj.company_id).exists():
             if active is None:
                 raise PermissionDenied(
@@ -169,13 +159,12 @@ class CompanyScopedAdminMixin:
             obj.company = active
 
     def save_model(self, request, obj, form, change):
-        # Enforce the company BEFORE the row is written (and before audit
-        # stamping in AuditAdminMixin.save_model) so a tampered POST can never
-        # persist another owner's company.
+
+
         self._enforce_company(request, obj)
         super().save_model(request, obj, form, change)
 
-    # --- actor-aware soft delete / restore ---------------------------------
+
     def delete_model(self, request, obj):
         obj.delete(actor=request.user)
 
@@ -202,10 +191,8 @@ class BaseModelAdmin(
     SoftDeleteAdminMixin,
     UnfoldModelAdmin,
 ):
-    # REUSABLE house rule: a subclass may name an "actor" FK (e.g.
-    # DocumentAdmin.actor_field = "uploaded_by"). When set, that field is made
-    # read-only (never a selectable dropdown) and auto-stamped to request.user
-    # on create — the user never hand-picks who uploaded/owns a row.
+
+
     actor_field = None
 
     actions = ["soft_delete_selected", "restore_selected"]
@@ -217,10 +204,8 @@ class BaseModelAdmin(
         return readonly
 
     def save_model(self, request, obj, form, change):
-        # Force the actor FK to request.user on create (before the row is
-        # written). The field is read-only so it is never in the submitted
-        # form; forcing (rather than defaulting when unset) also coerces any
-        # tampered value back to the acting user.
+
+
         if self.actor_field and not change:
             setattr(obj, self.actor_field, request.user)
         super().save_model(request, obj, form, change)

@@ -47,7 +47,7 @@ class ScrapeJobAdmin(BaseModelAdmin):
     )
 
     def get_urls(self):
-        # Custom URLs BEFORE super().get_urls() so they take precedence.
+
         custom = [
             path(
                 "<str:pk>/run/",
@@ -58,12 +58,12 @@ class ScrapeJobAdmin(BaseModelAdmin):
         return custom + super().get_urls()
 
     def run_view(self, request, pk):
-        # Resolve from the permission-scoped queryset ONLY (never all_objects).
+
         job = get_object_or_404(self.get_queryset(request), pk=pk)
         change_url = reverse("admin:scrapper_scrapejob_change", args=[job.pk])
 
         if request.method == "POST":
-            # CSRF is validated by CsrfViewMiddleware before we reach here.
+
             ScrapeService().run(job, actor=request.user)
             if job.status == ScrapeJob.Status.SUCCESS:
                 self.message_user(

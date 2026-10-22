@@ -28,8 +28,6 @@ _SUMMARY_SYSTEM_PROMPT = (
     "concisely, capturing the key questions and conclusions."
 )
 
-# Model literal matching settings.LLM_MODEL; stamped on messages whose author is
-# the assistant when the service does not supply a more specific name.
 _DEFAULT_MODEL_NAME = "gpt-4o-mini"
 
 
@@ -82,12 +80,10 @@ class ChatCompletion(PydanticBaseModel):
 
 class ChatService:
     def __init__(self, llm_client: LLMClient | None = None):
-        # Default to a real client, but build no backend/key at construct time.
+
         self._llm = llm_client or LLMClient()
 
-    # ------------------------------------------------------------------ #
-    # Existing turn-pair surface (unchanged behaviour).                  #
-    # ------------------------------------------------------------------ #
+
     def _session_messages(self, session):
         """Build provider-neutral messages from the session's prior turns."""
         messages = []
@@ -114,8 +110,8 @@ class ChatService:
             context=context or {},
             metadata={"provider": self._llm.provider, "model": self._llm.model},
         )
-        # full_clean enforces the company-match invariant (and field validation)
-        # before the save-time backstop re-checks it.
+
+
         turn.full_clean()
         turn.save(actor=actor or user)
         return turn
@@ -135,9 +131,7 @@ class ChatService:
         )
         return summary
 
-    # ------------------------------------------------------------------ #
-    # RAG message pipeline (ported from OLD chat/services.py).           #
-    # ------------------------------------------------------------------ #
+
     def create_message(
         self,
         conversation,
@@ -226,8 +220,8 @@ class ChatService:
             company=company,
         )
         if not eligible.exists():
-            # No indexed library documents => zero relevant chunks (NORMAL),
-            # never a retrieval error. Do not call embed_query / Chroma.
+
+
             return []
         k = 20 if self._is_chart_request(question) else 5
         try:
@@ -248,17 +242,8 @@ class ChatService:
         has_file_context=None,
         attachment_sections=None,
     ):
-        # Whether the session has file/document context to ground a chart in.
-        # Defaults to "do we have retrieved chunks?" so the single existing call
-        # site keeps working; tests may pass the flag explicitly.
-        #
-        # ``attachment_sections`` carries pre-extracted text from chat-attached
-        # files (``[(title, text), ...]``). Chat attachments are NOT embedded, so
-        # their content is folded directly into the grounding passages here. When
-        # any attachment text is present we also treat the turn as having file
-        # context (strict, no-outside-numbers mode) so the model answers FROM the
-        # file instead of general knowledge. Attachment blocks are NOT cited
-        # (they are not chunk-cited); citations stay sourced from ``chunks``.
+
+
         attachment_sections = attachment_sections or []
         if has_file_context is None:
             has_file_context = bool(chunks) or bool(attachment_sections)
@@ -289,8 +274,7 @@ class ChatService:
                 }
             )
 
-        # Chat-attached files are read directly (never embedded) and folded in
-        # as labelled, un-cited blocks ahead of any retrieved library chunks.
+
         attachment_blocks = [
             f"[Attached file: {title}]\n{text}"
             for title, text in attachment_sections
@@ -305,10 +289,8 @@ class ChatService:
         )
 
         if has_file_context:
-            # FILE case: stay strict. The chart may only reflect the retrieved
-            # file context; copy its numbers and never invent. If the file does
-            # not contain the requested figures, set chart to null and say the
-            # file does not contain them (do NOT fall back to general knowledge).
+
+
             chart_instructions = (
                 "For explicit chart/graph requests, return a chart only when the "
                 "retrieved file context supports the values; copy metric values "
@@ -318,13 +300,8 @@ class ChatService:
                 "does not contain those figures. "
             )
         else:
-            # NO-FILE case: the user asked for a chart but there is no file to
-            # ground it in. The model MAY use its own general knowledge to fill
-            # the structured chart with its best real numeric values. For such a
-            # knowledge-base chart it must add a short "(general knowledge)"
-            # marker in the chart title and a one-line caveat in the response
-            # that the figures are approximate and may be outdated. If it has no
-            # real values, set chart to null and say so in the response.
+
+
             chart_instructions = (
                 "For explicit chart/graph requests when no file context is "
                 "available, you MAY use your own general knowledge to fill the "
@@ -362,8 +339,7 @@ class ChatService:
         )
         return prompt, citations
 
-    # How many of the most recent turns to include verbatim. Everything older
-    # is condensed into a digest so the LLM still references the whole chat.
+
     _RECENT_TURNS = 30
     _DIGEST_TURNS = 60
     _DIGEST_SNIPPET = 160
@@ -384,8 +360,8 @@ class ChatService:
 
         parts = []
         if older:
-            # Oldest-first digest, capped to the most recent of the old turns so
-            # the digest itself stays bounded on extremely long conversations.
+
+
             digest_source = older[-self._DIGEST_TURNS :]
             digest_lines = []
             for message in digest_source:
@@ -406,7 +382,7 @@ class ChatService:
         )
         return "\n\n".join(parts)
 
-    # Fenced code block containing (optionally) a language hint, e.g. ```json.
+
     _FENCED_BLOCK_RE = re.compile(
         r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```",
         re.DOTALL,
@@ -462,8 +438,7 @@ class ChatService:
 
         cleaned = cls._FENCED_BLOCK_RE.sub(_strip_fenced, text)
 
-        # Also handle a bare (unfenced) top-level JSON chart spec: find the first
-        # balanced {...} or [...] block and drop it if it parses to a chart spec.
+
         stripped = cleaned.strip()
         if stripped and stripped[0] in "{[":
             try:
@@ -473,7 +448,7 @@ class ChatService:
             if parsed is not None and cls._looks_like_chart_spec(parsed):
                 cleaned = ""
 
-        # Collapse the blank lines left behind by removed blocks.
+
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned
 
@@ -510,8 +485,7 @@ class ChatService:
         )
         return (session_docs | message_docs).distinct()
 
-    # Bounds for injected attachment text so a huge file cannot blow the token
-    # budget: cap each document's text and the number of documents folded in.
+
     _MAX_ATTACHMENT_CHARS = 8000
     _MAX_ATTACHMENT_DOCS = 5
 
@@ -549,7 +523,7 @@ class ChatService:
         for document in documents[: self._MAX_ATTACHMENT_DOCS]:
             try:
                 text = document_services.extract_document_text(document)
-            except Exception:  # a bad attachment must never break the answer
+            except Exception:
                 logger.exception(
                     "Could not extract text from chat attachment %s", document.pk
                 )
@@ -564,9 +538,8 @@ class ChatService:
             return None
 
         wants_pie = bool(re.search(r"\bpie\b", question, re.I))
-        # The user's line/trend wording is only honoured when the summarized
-        # column turns out to be numeric/continuous; see the type decision
-        # after _summarize_csv_column below.
+
+
         wants_line = bool(
             re.search(r"\b(line|trend)\b", question, re.I)
             or re.search(r"over\s+time", question, re.I)
@@ -610,12 +583,7 @@ class ChatService:
             if not rows:
                 continue
 
-            # "<value> by <category>" aggregation (e.g. "count by city"): group
-            # the rows by a label column and SUM a numeric value column so the
-            # chart shows the file's real metric per category (NYC=10, LA=5,
-            # SF=3) rather than a frequency count. This fires only when the
-            # phrasing and columns clearly express that mapping; otherwise we
-            # fall through to the distribution summary below.
+
             aggregated = self._aggregate_value_by_label(headers, rows, question)
             if aggregated is not None:
                 label_index, value_index, label_values = aggregated
@@ -670,16 +638,7 @@ class ChatService:
 
             selected_index, label_counts, is_numeric = result
 
-            # Decide the chart type from the DATA SHAPE first, user intent
-            # second (within the pie|bar|line Literal):
-            #   * explicit pie/share/proportion request -> pie
-            #     (but only when the values can form a valid pie);
-            #   * a numeric/continuous column the user asked to see as a
-            #     line/trend -> line;
-            #   * everything else (categorical data, or no line intent) -> bar.
-            # A "line" request over categorical data is overridden to bar so the
-            # chart never misrepresents the data, and the sentence below names
-            # the type that was actually drawn.
+
             can_pie = wants_pie and any(count > 0 for _, count in label_counts)
             if can_pie:
                 chart_type = "pie"
@@ -707,7 +666,7 @@ class ChatService:
             )
         return None
 
-    # Maximum distinct categories to keep a chart (and especially a pie) readable.
+
     _MAX_CHART_CATEGORIES = 100
     _MAX_PIE_SLICES = 12
 
@@ -728,8 +687,7 @@ class ChatService:
         if not headers or len(headers) < 2:
             return None
 
-        # Columns the user explicitly named, in question order, as (match_pos,
-        # index) so we can tell which was mentioned first.
+
         named = []
         for index, header in enumerate(headers):
             if not header:
@@ -740,7 +698,7 @@ class ChatService:
         if len(named) < 2:
             return None
 
-        # Prefer an explicit "<X> by <Y>" phrasing: X is the value, Y the label.
+
         value_index = label_index = None
         by_match = re.search(
             r"\b([A-Za-z0-9_ ]+?)\s+by\s+([A-Za-z0-9_ ]+)", question, re.I
@@ -762,7 +720,7 @@ class ChatService:
         if value_index is None or label_index is None or value_index == label_index:
             return None
 
-        # The value column must be numeric across the data rows.
+
         totals = {}
         order = []
         for row in rows:
@@ -775,7 +733,7 @@ class ChatService:
             try:
                 value = float(raw_value)
             except ValueError:
-                return None  # value column is not numeric -> not an aggregation
+                return None
             if not math.isfinite(value):
                 return None
             if label not in totals:
@@ -824,8 +782,7 @@ class ChatService:
                 if math.isfinite(numeric_value):
                     numeric_counts[numeric_value] += 1
 
-            # Treat a column as numeric only when it is predominantly numbers
-            # and still has few enough distinct values to chart meaningfully.
+
             if numeric_counts and not text_counts:
                 ordered = [
                     (
@@ -843,15 +800,15 @@ class ChatService:
                 return ordered, False
             return None
 
-        # 1. Explicit column named in the question wins.
+
         if explicit_index is not None:
             summarized = summarize(explicit_index)
             if summarized and len(summarized[0]) >= 1:
                 labels, is_numeric = summarized
                 return explicit_index, labels[:max_categories], is_numeric
 
-        # 2. Auto-select the most chart-friendly column.
-        best = None  # (score, index, labels, is_numeric)
+
+        best = None
         for index in range(len(headers)):
             if not headers[index]:
                 continue
@@ -862,20 +819,20 @@ class ChatService:
             distinct = len(labels)
             if distinct < 1:
                 continue
-            # A single category makes a pointless pie/bar chart; skip it unless
-            # it is the only thing available.
+
+
             if distinct < 2:
                 score = -1
             elif distinct > max_categories:
-                # Too many slices to be readable; strongly deprioritize.
+
                 score = -distinct
             else:
-                # Prefer categorical columns with a modest number of groups.
-                # Fewer, well-populated groups score higher (ideal for pies).
+
+
                 total = sum(count for _, count in labels)
                 coverage = total / max(len(rows), 1)
                 score = coverage * 100 - distinct
-                # Prefer text categories over raw numeric spreads for pies.
+
                 if not is_numeric:
                     score += 50
             if best is None or score > best[0]:
@@ -968,13 +925,10 @@ class ChatService:
 
         assistant_model_name = model_name or _DEFAULT_MODEL_NAME
 
-        # Document-context signature at ask time. Computed once so the same
-        # value feeds the cache decision and, on a miss, the stored answer.
+
         current_signature = self._context_signature(user, company)
 
-        # Repeated-query cache: if this exact question already has an answer in
-        # this conversation AND the document context is unchanged, serve it from
-        # the database without calling the LLM. A changed context is a miss.
+
         cached = self._cached_answer(
             conversation,
             message_text,
@@ -1014,10 +968,8 @@ class ChatService:
         )
         if user_message:
             history_query = history_query.exclude(pk=user_message.pk)
-        # Give the LLM a reference to the whole chat (backed by Postgres): the
-        # most recent turns verbatim, plus a condensed digest of everything
-        # earlier so long conversations keep their context without exceeding
-        # the token budget.
+
+
         all_messages = list(history_query.order_by("created_at"))
         history = self._build_conversation_context(all_messages)
         try:
@@ -1027,10 +979,8 @@ class ChatService:
                 conversation,
                 company,
             )
-            # Pre-extract the text of any non-CSV chat attachments on this
-            # session so the answer is grounded in the attached file (text/pdf/
-            # docx/image-OCR), not general knowledge. CSVs are handled by the
-            # deterministic chart builder below, so they are excluded here.
+
+
             attachment_sections = self._chat_attachment_texts(conversation)
             prompt, citations = self._build_prompt(
                 history,
@@ -1043,15 +993,12 @@ class ChatService:
             provider_error = None
             try:
                 completion = self._llm.generate_structured(prompt, ChatCompletion)
-                # Defensive strip (LLM answer path only): remove any chart-spec
-                # JSON the model leaked into the prose so the user never sees a
-                # raw chart dump. The deterministic CSV fallback below builds its
-                # own prose and is intentionally not run through this.
+
+
                 sanitized = self._strip_chart_json_blocks(completion.response)
                 if not sanitized.strip():
-                    # Stripping emptied the prose (model returned only a JSON
-                    # dump): fall back to a short human sentence so the empty
-                    # response guard is not tripped and the chart still renders.
+
+
                     sanitized = (
                         "Here is the chart you requested."
                         if completion.chart is not None
@@ -1061,39 +1008,27 @@ class ChatService:
                     completion = completion.model_copy(update={"response": sanitized})
             except (ChatRetrievalError, ChatProviderError):
                 raise
-            except Exception as exc:  # provider unreachable / bad key / transient
+            except Exception as exc:
                 provider_error = exc
                 logger.warning(
                     "LLM provider failed to generate a response: %s", exc
                 )
 
-            # Deterministic CSV chart. For a chart request, build the chart from
-            # the ACTUAL rows of a chat-attached CSV. When such a CSV exists the
-            # locally-built chart is AUTHORITATIVE and OVERRIDES any chart the
-            # LLM returned, so the chart always reflects the file's real values
-            # (NYC=10, LA=5, SF=3) instead of fabricated general knowledge. This
-            # also works with no key. When there is NO chat CSV we keep the old
-            # behaviour: fall back to the (now-empty) builder only when the LLM
-            # returned no chart, otherwise trust the LLM's chart.
+
             if conversation and self._is_chart_request(message_text):
                 local_chart = self._build_csv_distribution_chart(
                     conversation, message_text
                 )
                 needs_fallback = completion is None or completion.chart is None
                 if local_chart and (needs_fallback or completion.chart is not None):
-                    # Text and chart come from one source so they can never
-                    # contradict: when we attach the locally-built chart we also
-                    # use the builder's own sentence describing it, discarding
-                    # the LLM's prose/chart (which, for an attached CSV, is
-                    # fabricated general knowledge or a refusal that would
-                    # otherwise sit next to a correct rendered chart).
+
+
                     response_text, chart = local_chart
                     completion = ChatCompletion(
                         response=response_text, chart=chart
                     )
 
-            # If the provider failed and no fallback produced an answer, surface
-            # the provider error to the caller.
+
             if completion is None:
                 raise ChatProviderError(
                     "The LLM provider failed to generate a response."
@@ -1138,10 +1073,8 @@ class ChatService:
                 context_signature=current_signature,
                 actor=user,
             )
-            # Title the session from its first message when it is still the
-            # default placeholder (first ~50 chars). The retitle-or-audit-touch
-            # (which ALWAYS saves the session) lives in the shared helper so the
-            # graph path reuses the identical semantics.
+
+
             retitle_if_default(
                 convo,
                 llm_title=completion.title,

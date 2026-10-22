@@ -25,7 +25,7 @@ def active_company(request):
         }
     return {
         "active_company": active_company_for_request(request),
-        # Resolve to a list once so the template can both count and iterate.
+
         "accessible_companies": list(allowed_companies_for_user(user)),
         "can_switch_company": can_switch_company(user),
         "set_active_company_url": reverse("company:set_active_company"),

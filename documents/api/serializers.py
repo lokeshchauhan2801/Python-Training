@@ -13,8 +13,6 @@ from chat.api.serializers import RequiredCompanyResolutionMixin
 
 from ..models import Document, DocumentChunk
 
-# Processing/output fields that are controlled by the extraction service, never
-# the client.
 _SERVER_CONTROLLED_DOC_FIELDS = (
     "uploaded_by",
     "status",
@@ -69,8 +67,8 @@ class DocumentSerializer(
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # company is writable on create (validated against ownership) and
-        # read-only on update.
+
+
         if self.instance is not None and "company" in self.fields:
             self.fields["company"].read_only = True
         if "company" in self.fields:

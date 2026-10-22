@@ -1,6 +1,4 @@
-/*
- * Refreshes the scoped document-job queue without reloading the admin page.
- */
+
 (function () {
   "use strict";
 

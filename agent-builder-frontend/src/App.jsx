@@ -15,7 +15,7 @@ const KIND_CLASS = {
   end: "ab-node ab-node-end",
 };
 
-// Map a server AgentNode row into a React Flow node.
+
 function toFlowNode(node, toolsBySlugId) {
   const pos = node.position && typeof node.position === "object" ? node.position : {};
   const toolNames = (node.tools || [])
@@ -41,7 +41,7 @@ function toFlowNode(node, toolsBySlugId) {
         </div>
       ),
     },
-    // Use a plain default node; the styled content lives in data.label.
+
     type: "default",
   };
 }
@@ -77,8 +77,7 @@ export default function App() {
     setError(e && e.message ? e.message : String(e));
   }, []);
 
-  // Load the first graph the user owns, or create a default one, then hydrate
-  // the canvas from GET /graph/{id}/load/.
+
   const loadInto = useCallback(
     async (id) => {
       const payload = await api.loadGraph(id);
@@ -124,7 +123,7 @@ export default function App() {
     if (graphId) await loadInto(graphId);
   }, [graphId, loadInto]);
 
-  // --- mutations ---------------------------------------------------------
+
   const addNode = useCallback(
     async (kind) => {
       if (!graphId) return;
@@ -147,7 +146,7 @@ export default function App() {
 
   const onConnect = useCallback(
     async (connection) => {
-      // Optimistically draw, then persist; on failure reload authoritative state.
+
       setEdges((eds) => addEdge(connection, eds));
       try {
         await api.createEdge({

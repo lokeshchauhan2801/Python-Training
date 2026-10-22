@@ -38,7 +38,6 @@ from .services import ChatProviderError, ChatRetrievalError, ChatService
 
 logger = logging.getLogger(__name__)
 
-# A ULID is exactly 26 Crockford base32 characters.
 _ULID_LEN = 26
 
 
@@ -86,7 +85,7 @@ def _orchestrator_for(company):
             chat_service=ChatService(),
             langfuse=get_langfuse_client(),
         )
-    except Exception:  # noqa: BLE001 - any failure => existing RAG path
+    except Exception:
         logger.debug("agents graph lookup failed; using ChatService", exc_info=True)
         return _chat_service()
 
@@ -139,7 +138,6 @@ def models_json(request):
     )
 
 
-# --- page views -----------------------------------------------------------
 @login_required
 def chat_home(request):
     """GET /chat/ — the three-area chat page with no session preselected."""
@@ -166,10 +164,10 @@ def chat_session(request, session_id):
     """
     if not _valid_ulid(session_id):
         raise Http404("Invalid session id.")
-    # Confirm the session is in scope before rendering (out-of-scope => 404).
+
     session = get_object_or_404(scoped_sessions(request), pk=session_id)
 
-    # Only preselect when the session is in the ACTIVE company; otherwise reset.
+
     active = active_or_none(request)
     in_active_company = active is not None and session.company_id == active.id
     preselect = str(session.id) if in_active_company else ""
@@ -182,7 +180,6 @@ def chat_session(request, session_id):
     return render(request, "chat/chat_page.html", context)
 
 
-# --- JSON read views ------------------------------------------------------
 @login_required
 @require_http_methods(["GET"])
 def companies_json(request):
@@ -200,7 +197,7 @@ def sessions_json(request):
 
     company_id = request.GET.get("company")
     if company_id:
-        # Re-validate the client company against scope; out-of-scope => empty.
+
         if not allowed_companies(request).filter(pk=company_id).exists():
             return JsonResponse({"sessions": []})
         sessions = sessions.filter(company_id=company_id)
@@ -237,7 +234,6 @@ def messages_json(request, session_id):
     )
 
 
-# --- JSON write views -----------------------------------------------------
 @login_required
 @require_http_methods(["POST"])
 def new_session(request):
@@ -254,12 +250,11 @@ def new_session(request):
         return JsonResponse({"error": "No company available."}, status=400)
 
     if company_id:
-        # Re-validate ownership server-side; out-of-scope => 404 (no leak).
+
         company = get_object_or_404(allowed, pk=company_id)
     else:
-        # No explicit company: default to the GLOBAL active company (shared
-        # session with the header switcher), falling back to the first accessible
-        # company only when there is no active company resolved.
+
+
         company = active_or_none(request) or allowed.order_by("name").first()
 
     from .models import ConversationSession
@@ -297,14 +292,7 @@ def send(request, session_id):
     model_name = (request.POST.get("model_name") or "").strip() or None
     attachment_ids = request.POST.getlist("attachment_ids")
 
-    # Run the pipeline AS THE SESSION'S OWNER, not request.user. The session is
-    # already authorization-scoped by _resolve_session, but scoped_sessions lets
-    # a SUPERUSER see (and open) sessions owned by OTHER users. Passing
-    # request.user into process_message then trips its owner-match guard
-    # ("Conversation does not belong to the signed-in user") and 500s. For a
-    # non-superuser, scoped_sessions already limits to their OWN sessions, so
-    # session.user == request.user and nothing changes; only the superuser case
-    # is corrected, and the turn stays attributed to the session's owner.
+
     chat_user = session.user
 
     try:
@@ -323,15 +311,15 @@ def send(request, session_id):
     except ChatRetrievalError:
         return JsonResponse({"error": "Document retrieval failed"}, status=502)
     except ValueError:
-        # Owner/company mismatch inside process_message. Scoping should already
-        # have prevented this; degrade to a clean 400 rather than a raw 500.
+
+
         return JsonResponse({"error": "This chat is not available."}, status=400)
 
     user_message = (
         session.messages.filter(role="user").order_by("-created_at").first()
     )
 
-    # Reload the session title (process_message may have retitled it — BUG 2).
+
     session.refresh_from_db(fields=["title"])
 
     return JsonResponse(
@@ -355,8 +343,7 @@ def delete_session(request, session_id):
     """
     session = _resolve_session(request, session_id)
 
-    # Soft-delete the session's messages first (consistent with the pattern),
-    # then the session itself. Both use the soft-delete queryset / instance API.
+
     session.messages.all().delete(actor=request.user)
     session.delete(actor=request.user)
 

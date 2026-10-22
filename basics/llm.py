@@ -29,7 +29,7 @@ def _provider_config(provider):
     name = provider or settings.LLM_PROVIDER
     cfg = registry.get(name)
     if cfg is None:
-        # Unknown/unregistered provider => the legacy generic globals.
+
         return {
             "chat_model": settings.LLM_MODEL,
             "embedding_model": getattr(settings, "EMBEDDING_MODEL", None),
@@ -43,9 +43,8 @@ def _provider_config(provider):
 
 class LLMClient:
     def __init__(self, *, model=None, api_key=None, base_url=None, provider=None):
-        # provider selects the whole config (chat model, embedding model,
-        # base_url, key) from the registry; explicit model/api_key/base_url still
-        # override the resolved provider values for that one field.
+
+
         self.provider = provider or settings.LLM_PROVIDER
         cfg = _provider_config(self.provider)
 
@@ -53,36 +52,27 @@ class LLMClient:
         self.base_url = (base_url or cfg.get("base_url") or "") or None
         self._api_key = (api_key or cfg.get("api_key") or settings.LLM_API_KEY) or None
 
-        # Embeddings are resolved INDEPENDENTLY of chat. A provider's chat
-        # endpoint is NOT necessarily an embeddings endpoint (DeepSeek, for
-        # example, has a chat API but NO OpenAI-style embeddings), so the
-        # embedding base_url/key must NOT inherit the chat base_url. When the
-        # provider config does not give an explicit embedding base_url, default
-        # to "" (the OpenAI embeddings endpoint) rather than the chat base_url —
-        # otherwise embed calls would be sent to a chat-only host and fail
-        # ("Document retrieval failed"). The embedding key defaults to the
-        # provider's embedding_api_key, else the chat key only when they share an
-        # endpoint (both empty => OpenAI default).
+
         self._embedding_model = (
             cfg.get("embedding_model") or getattr(settings, "EMBEDDING_MODEL", None)
         )
         self._embedding_base_url = (cfg.get("embedding_base_url") or "") or None
         self._embedding_api_key = (
             cfg.get("embedding_api_key")
-            # Only reuse the chat key when the chat endpoint IS the embedding
-            # endpoint (same base_url, incl. both-default/OpenAI).
+
+
             or (self._api_key if self._embedding_base_url == self.base_url else None)
         ) or None
 
-        self._client = None  # lazy; NOT built at import or construct time
-        self._embeddings = None  # lazy; NOT built at import or construct time
+        self._client = None
+        self._embeddings = None
 
     def _ensure_client(self):
         if self._client is None:
             if not self._api_key:
                 raise LLMConfigurationError("No LLM API key configured.")
-            # Imported lazily so that merely importing this module (and running
-            # check/migrate) never requires the backend to be constructable.
+
+
             from langchain_openai import ChatOpenAI
 
             self._client = ChatOpenAI(
@@ -98,8 +88,8 @@ class LLMClient:
                 raise LLMConfigurationError(
                     "LLM API key required to embed documents."
                 )
-            # Lazy import mirrors _ensure_client: importing this module never
-            # requires the embeddings backend to be constructable.
+
+
             from langchain_openai import OpenAIEmbeddings
 
             self._embeddings = OpenAIEmbeddings(
@@ -113,7 +103,7 @@ class LLMClient:
         client = self._ensure_client()
         try:
             result = client.invoke(self._to_lc_messages(messages))
-        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+        except Exception as exc:
             logger.error(
                 "LLM backend call failed (provider=%s model=%s)",
                 self.provider,
@@ -126,7 +116,7 @@ class LLMClient:
         embeddings = self._ensure_embeddings()
         try:
             return embeddings.embed_documents(texts)
-        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+        except Exception as exc:
             logger.error(
                 "LLM embedding call failed (provider=%s model=%s)",
                 self.provider,
@@ -138,7 +128,7 @@ class LLMClient:
         embeddings = self._ensure_embeddings()
         try:
             return embeddings.embed_query(text)
-        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+        except Exception as exc:
             logger.error(
                 "LLM embedding call failed (provider=%s model=%s)",
                 self.provider,
@@ -152,7 +142,7 @@ class LLMClient:
         try:
             structured_client = client.with_structured_output(schema)
             response = structured_client.invoke(prompt)
-        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+        except Exception as exc:
             logger.error(
                 "LLM structured call failed (provider=%s model=%s)",
                 self.provider,

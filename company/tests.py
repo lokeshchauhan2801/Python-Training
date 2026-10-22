@@ -37,7 +37,7 @@ class CompanySoftDeleteTests(TestCase):
     def test_queryset_bulk_soft_delete_and_restore(self):
         Company.objects.create(owner=self.owner, name="C", slug="c")
         Company.objects.create(owner=self.owner, name="D", slug="d")
-        Company.objects.all().delete()  # soft bulk delete
+        Company.objects.all().delete()
         self.assertEqual(Company.objects.count(), 0)
         self.assertEqual(Company.all_objects.count(), 2)
         Company.all_objects.all().restore()
@@ -83,7 +83,7 @@ class CompanyApiScopingTests(TestCase):
 
     def test_create_forces_owner_to_request_user(self):
         self.client.force_authenticate(self.alice)
-        # Attempt to claim bob as owner; it must be ignored.
+
         resp = self.client.post(
             "/api/v1/company/company/",
             {"name": "New", "slug": "new", "owner": str(self.bob.id)},

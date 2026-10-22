@@ -23,7 +23,7 @@ class AgentGraphViewSet(ScopedModelViewSet):
 
     @action(detail=True, methods=["get"])
     def load(self, request, pk=None):
-        # GET /graph/{id}/load/ — the whole canvas payload in one response.
+
         """Return the aggregated canvas payload for this graph."""
         graph = self.get_object()
         nodes = graph.nodes.order_by("created_at")

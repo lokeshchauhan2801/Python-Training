@@ -108,9 +108,8 @@ class KafkaEventConsumer(EventConsumer):
                 if msg is None:
                     continue
                 if msg.error():
-                    # Benign, transient conditions: end of partition, and
-                    # "topic not available yet" on a fresh broker before the
-                    # topic is auto-created on first publish. Keep polling.
+
+
                     if msg.error().code() in (
                         KafkaError._PARTITION_EOF,
                         KafkaError.UNKNOWN_TOPIC_OR_PART,

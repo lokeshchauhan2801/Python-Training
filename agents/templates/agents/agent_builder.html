@@ -19,9 +19,7 @@ document itself never scrolls (only the canvas pans/zooms internally).
 
 {% block extrahead %}{{ block.super }}
   <style>
-    /* The agent-builder page is a fixed app surface: the document must never
-       scroll, only the canvas inside the iframe pans/zooms. Cap html/body to
-       the viewport in case an Unfold wrapper reports extra height. */
+
     html:has(body.agentbuilder-fixed-viewport),
     body.agentbuilder-fixed-viewport {
       height: 100vh;
@@ -30,27 +28,16 @@ document itself never scrolls (only the canvas pans/zooms internally).
       overflow: hidden;
     }
 
-    /* The earlier "min-height:0 flex chain" relied on every Unfold content
-       wrapper (#main > .px-4, #content, #content-main, ...) cooperating. When
-       any ancestor kept its natural height or added top padding, the flex child
-       (the iframe) ended up BOTTOM-aligned inside a too-tall column — the canvas
-       appeared pushed to the bottom with an empty band above it.
 
-       Instead of depending on that fragile chain, pin the iframe directly to the
-       viewport with position:fixed, anchored to the TOP of the content area
-       (just below the Unfold header) and filling the rest of the screen. This is
-       robust to whatever the Unfold wrappers do with height/padding. The header
-       height is read from a CSS var with a sensible fallback. */
     body.agentbuilder-fixed-viewport {
-      --ab-header-h: 56px; /* Unfold top header; fallback if measurement fails */
+      --ab-header-h: 56px;
     }
     body.agentbuilder-fixed-viewport #agent-builder-root {
       position: fixed;
       top: var(--ab-header-h);
       right: 0;
       bottom: 0;
-      /* Left edge sits past the Unfold sidebar; measured at runtime and written
-         back as --ab-left (fallback keeps it usable before JS runs). */
+
       left: var(--ab-left, 0px);
       overflow: hidden;
       background: #0a0f1e;
@@ -62,7 +49,7 @@ document itself never scrolls (only the canvas pans/zooms internally).
       border: 0;
       display: block;
     }
-  </style>
+</style>
 {% endblock %}
 
 {% block content %}
@@ -82,12 +69,7 @@ document itself never scrolls (only the canvas pans/zooms internally).
     ></iframe>
   </div>
   <script>
-    // Fixed-app surface: bound the page to the viewport. The iframe is pinned
-    // with position:fixed (see the stylesheet), so it fills from the TOP of the
-    // content area rather than being bottom-aligned inside a too-tall flex
-    // column. Here we measure the real Unfold header height and sidebar right
-    // edge and write them into CSS vars so the iframe lines up exactly, then
-    // keep them in sync on resize and when the sidebar collapses/expands.
+
     (function () {
       var body = document.body;
       body.classList.add("agentbuilder-fixed-viewport");
@@ -97,8 +79,8 @@ document itself never scrolls (only the canvas pans/zooms internally).
       function px(n) { return (n > 0 ? n : 0) + "px"; }
 
       function measure() {
-        // Header: the top bar above #content. Unfold renders it as a <header>
-        // inside #main; fall back to 56px if we cannot find it.
+
+
         var headerH = 56;
         var header =
           document.querySelector("#main > header") ||
@@ -106,13 +88,11 @@ document itself never scrolls (only the canvas pans/zooms internally).
           document.querySelector("header");
         if (header) {
           var hr = header.getBoundingClientRect();
-          // Only trust it when it looks like a top bar (near the top, short).
+
           if (hr.top < 8 && hr.height > 0 && hr.height < 160) headerH = hr.height;
         }
 
-        // Left edge: the content area's own left, which already excludes the
-        // Unfold sidebar (collapsed or expanded). #content is the most reliable
-        // anchor; fall back to #main, then 0.
+
         var left = 0;
         var contentEl =
           document.getElementById("content") ||
@@ -127,14 +107,12 @@ document itself never scrolls (only the canvas pans/zooms internally).
       }
 
       measure();
-      // Re-measure after layout settles and on any size/sidebar change.
+
       window.addEventListener("resize", measure);
       window.setTimeout(measure, 50);
       window.setTimeout(measure, 300);
 
-      // The Unfold sidebar toggle changes the content's left edge without a
-      // resize event; observe body attribute/class/style mutations and the
-      // sidebar element directly so the iframe re-aligns when it collapses.
+
       try {
         var mo = new MutationObserver(function () { measure(); });
         mo.observe(body, { attributes: true, attributeFilter: ["class", "style"] });
@@ -143,8 +121,8 @@ document itself never scrolls (only the canvas pans/zooms internally).
           document.querySelector("[data-sidebar]") ||
           document.querySelector("aside");
         if (sidebar) mo.observe(sidebar, { attributes: true, attributeFilter: ["class", "style"] });
-      } catch (e) { /* MutationObserver unsupported — resize handler still runs */ }
+      } catch (e) {  }
     })();
-  </script>
+</script>
 </div>
 {% endblock %}

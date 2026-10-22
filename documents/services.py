@@ -36,9 +36,9 @@ from basics.vectorstore import ChromaVectorStore
 
 from .models import Document, DocumentChunk, DocumentStage
 
-try:  # Optional OCR dependency (needs the poppler system package).
+try:
     from pdf2image import convert_from_bytes
-except Exception:  # pragma: no cover - import guard
+except Exception:
     convert_from_bytes = None
 
 logger = logging.getLogger(__name__)
@@ -48,14 +48,9 @@ CHUNK_OVERLAP = 180
 TABLE_CHUNK_SIZE = 9_000
 MAX_DOCUMENT_CHUNKS = 10_000
 
-# Embedding/vector constants (ported from OLD docs/services.py). Chunk texts are
-# embedded in offset-ordered batches of EMBEDDING_BATCH_SIZE across
-# EMBEDDING_WORKERS threads, then pushed into Chroma in slices of
-# VECTOR_BATCH_SIZE.
 EMBEDDING_BATCH_SIZE = 96
 EMBEDDING_WORKERS = 4
 VECTOR_BATCH_SIZE = 100
-# Chroma collection every chunk vector lives in (OLD convention).
 VECTOR_COLLECTION = "pdf_chunks"
 SUPPORTED_FILE_TYPES = {
     ".pdf": "application/pdf",
@@ -65,7 +60,7 @@ SUPPORTED_FILE_TYPES = {
     ".csv": "text/csv",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".json": "application/json",
-    # Image formats — extracted via local OCR (Tesseract).
+
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -73,13 +68,9 @@ SUPPORTED_FILE_TYPES = {
     ".tiff": "image/tiff",
 }
 
-# Image extensions that are OCR'd on upload.
 IMAGE_FILE_TYPES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
-# DPI used when rasterising scanned PDF pages for OCR. 300 balances accuracy
-# against memory/time for typical letter-size documents.
 OCR_PDF_DPI = 300
-# Message shown when OCR is required but the Tesseract binary is not installed.
 OCR_UNAVAILABLE_MESSAGE = (
     "This file needs OCR because it has no selectable text, but the OCR engine "
     "(Tesseract) is not installed on the server. Install 'tesseract-ocr' and "
@@ -239,8 +230,7 @@ def _extract_pdf(document: Document) -> list[tuple[int, str, str]]:
             "This PDF could not be read. Check that it is a valid, unencrypted PDF."
         ) from exc
 
-    # No selectable text layer → the PDF is almost certainly scanned/image-only.
-    # Fall back to local OCR so scanned documents are supported automatically.
+
     if not chunks:
         logger.info(
             "No text layer in PDF %s; falling back to OCR.", document.pk
@@ -471,21 +461,21 @@ def resolve_file_extension(document: Document) -> str:
       4. The title suffix — only as a last resort, and only when it maps to a
          known supported type (so free-text titles can't masquerade as one).
     """
-    # 1. The real uploaded file.
+
     if document.file and document.file.name:
         suffix = Path(document.file.name).suffix.lower()
         if suffix in SUPPORTED_FILE_TYPES:
             return suffix
 
-    # 2. The stored file_type (e.g. "pdf", or already ".pdf").
+
     stored = (document.file_type or "").strip().lower()
     if stored:
         candidate = stored if stored.startswith(".") else f".{stored}"
-        # ".jpg"/".jpeg" and ".tif"/".tiff" are both valid; a bare "pdf" maps to ".pdf".
+
         if candidate in SUPPORTED_FILE_TYPES:
             return candidate
 
-    # 3. URL-sourced documents: the download path's suffix.
+
     if document.source_url:
         from urllib.parse import urlsplit
 
@@ -493,7 +483,7 @@ def resolve_file_extension(document: Document) -> str:
         if url_suffix in SUPPORTED_FILE_TYPES:
             return url_suffix
 
-    # 4. Title suffix — last resort, must be a known supported type.
+
     title_suffix = Path(document.title or "").suffix.lower()
     if title_suffix in SUPPORTED_FILE_TYPES:
         return title_suffix
@@ -591,12 +581,12 @@ def derive_document_title(
                 return title[:255]
         except (LLMConfigurationError, LLMBackendError):
             pass
-        except Exception:  # noqa: BLE001 - title derivation never raises
+        except Exception:
             logger.exception(
                 "Unexpected error deriving title for document %s", document.pk
             )
 
-    # No-key / failure fallback: filename stem, then URL host, then current.
+
     working_name = document.file.name if document.file else ""
     stem = Path(os.path.basename(working_name)).stem if working_name else ""
     if stem:
@@ -631,9 +621,8 @@ def purge_document(document: Document) -> None:
     already-removed file never blocks the row deletion), but the DB rows are
     always removed so the changelist reflects the deletion.
     """
-    # 1. Remove this document's chunk vectors from Chroma. Vectors are keyed by
-    #    the deterministic per-chunk id (see process_document's add_documents
-    #    payload): f"{document.pk}:{chunk_index}".
+
+
     vector_ids = [
         f"{document.pk}:{chunk_index}"
         for chunk_index in DocumentChunk.all_objects.filter(
@@ -645,24 +634,24 @@ def purge_document(document: Document) -> None:
             ChromaVectorStore().delete_documents(
                 vector_ids, collection=VECTOR_COLLECTION
             )
-        except Exception:  # pragma: no cover - best effort
+        except Exception:
             logger.exception(
                 "Could not remove vectors for document %s during purge", document.pk
             )
 
-    # 2. Hard-delete chunk rows.
+
     _delete_chunks(document)
 
-    # 3. Remove the uploaded file from storage (best effort; URL docs have none).
+
     if document.file:
         try:
             document.file.delete(save=False)
-        except Exception:  # pragma: no cover - best effort
+        except Exception:
             logger.exception(
                 "Could not remove file for document %s during purge", document.pk
             )
 
-    # 4. Hard-delete the document row itself.
+
     document.hard_delete()
 
 
@@ -760,13 +749,7 @@ def process_document(document: Document) -> Document:
         ]
     )
 
-    # Decide whether the title was supplied by the user (keep it verbatim) or
-    # should be derived from the extracted text. The admin add form may leave
-    # the title blank, in which case the uploaded file's basename is used as a
-    # transient placeholder. A title is treated as user-supplied when it is
-    # non-blank and is NOT just the uploaded file's basename. Dispatch no longer
-    # depends on the title (see resolve_file_extension), so the title is never
-    # mutated before extraction.
+
     file_basename = os.path.basename(document.file.name) if document.file else ""
     user_supplied_title = bool(document.title) and document.title != file_basename
 
@@ -777,8 +760,7 @@ def process_document(document: Document) -> Document:
         extracted_chunks = extract_document_chunks(document)
         _set_processing_progress(document, "extracting", 25)
 
-        # Embed BEFORE persisting rows so a key/provider failure leaves no chunk
-        # rows behind (NO-KEY path surfaces a clear, user-facing message).
+
         embeddings: list[list[float]] | None = None
         if embed:
             _set_processing_progress(document, "embedding", 30)
@@ -812,9 +794,7 @@ def process_document(document: Document) -> Document:
             )
         ]
 
-        # Purge any chunks left over from a previous (failed) attempt, then
-        # insert the fresh set atomically so a crash cannot leave a half-written
-        # chunk set behind.
+
         with transaction.atomic():
             _delete_chunks(document)
             DocumentChunk.objects.bulk_create(chunk_rows)
@@ -835,9 +815,8 @@ def process_document(document: Document) -> Document:
                     vector_store.add_documents(
                         [
                             {
-                                # Deterministic per-chunk id: enables idempotent
-                                # upsert on re-index and re-map by metadata
-                                # chunk_id on retrieval.
+
+
                                 "id": f"{document.pk}:{chunk.chunk_index}",
                                 "text": chunk.content,
                                 "embedding": embedding,
@@ -861,10 +840,7 @@ def process_document(document: Document) -> Document:
                 progress = 75 + int(23 * batch_index / total_batches)
                 _set_processing_progress(document, "indexing", progress)
 
-        # Auto-fill file_type from the resolved file extension (the uploaded
-        # file, the stored type, or the URL path — never the free-text title).
-        # Then derive the title from the extracted text when the user supplied
-        # none.
+
         resolved_suffix = resolve_file_extension(document).lstrip(".").lower()
         if resolved_suffix:
             document.file_type = resolved_suffix
@@ -907,17 +883,6 @@ def process_document(document: Document) -> Document:
         raise DocumentIndexError(message) from exc
 
 
-# Maximum cosine distance for a Chroma hit to count as RELEVANT. The
-# ``pdf_chunks`` collection uses cosine space (``hnsw:space=cosine``), so a hit's
-# ``distance`` is ``1 - cosine_similarity`` (0.0 == identical direction, 1.0 ==
-# orthogonal/unrelated, up to 2.0 == opposite). ``similarity_search`` ALWAYS
-# returns the k nearest vectors even for a totally off-topic question, so without
-# this cutoff an unrelated question (e.g. "do you know about MrBeast?") still
-# pulls back whatever happens to be closest (an employment letter, etc.) and
-# renders those as citations. Hits at or below this distance are kept; anything
-# farther is dropped, so an off-topic question yields NO chunks (hence no
-# citations) and the caller answers from general knowledge instead. Overridable
-# via ``settings.RAG_RELEVANCE_MAX_DISTANCE``.
 RAG_RELEVANCE_MAX_DISTANCE = 0.60
 
 
@@ -954,7 +919,7 @@ def find_relevant_chunks(
     returns ``[]`` (no spurious citations) and the caller falls back to a general
     answer; a genuinely relevant question keeps its close hits unchanged.
     """
-    # Authorize the (already-resolved active) company on the single axis.
+
     if not (getattr(user, "is_superuser", False) or company.owner_id == user.pk):
         return []
     query_embedding = get_llm_client().embed_query(question)
@@ -964,13 +929,11 @@ def find_relevant_chunks(
         k=k,
         filter={"company_id": str(company.id)},
     )
-    # Drop hits that are not actually close (see RAG_RELEVANCE_MAX_DISTANCE). A
-    # missing/None distance is treated as relevant so a vector-store backend that
-    # does not report distances never silently drops every hit.
+
+
     max_distance = _relevance_max_distance()
-    # Vector ids are deterministic (``f"{document_id}:{chunk_index}"``), so the
-    # chunk PK is carried in ``metadata["chunk_id"]``; re-map by it (skipping any
-    # hit missing the metadata/key). Ranking order of surviving hits is kept.
+
+
     ranked_ids = [
         hit["metadata"]["chunk_id"]
         for hit in hits
@@ -997,11 +960,11 @@ def _mark_failed(
     vector_store: ChromaVectorStore | None = None,
     vector_ids: list[str] | None = None,
 ) -> None:
-    # Best-effort removal of any partial vectors written before the failure.
+
     if vector_store is not None and vector_ids:
         try:
             vector_store.delete_documents(vector_ids, collection=VECTOR_COLLECTION)
-        except Exception:  # pragma: no cover - best effort
+        except Exception:
             logger.exception(
                 "Could not remove partial vectors for document %s", document.pk
             )
@@ -1025,18 +988,6 @@ def _mark_failed(
     )
 
 
-# ---------------------------------------------------------------------------
-# Resumable per-stage pipeline (Temporal path).
-#
-# The monolithic ``process_document`` above stays the synchronous/celery path.
-# The Temporal workflow drives the pipeline one stage at a time: each stage is
-# an idempotent ``stage_<slug>(document_id)`` function backed by a
-# ``DocumentStage`` row, so a workflow that failed mid-pipeline resumes at the
-# first non-completed stage (a completed stage short-circuits).
-# ---------------------------------------------------------------------------
-
-# Canonical stage slugs. Single source of truth — the Temporal workflow
-# re-declares the same slugs locally and MUST stay in lockstep with this order.
 STAGE_MARK_PROCESSING = "mark_processing"
 STAGE_EXTRACT_TEXT = "extract_text"
 STAGE_CHUNK_TEXT = "chunk_text"
@@ -1183,8 +1134,7 @@ def stage_mark_processing(document_id: str) -> dict:
     _ensure_stages(document)
     _reset_stages(document)
 
-    # URL-sourced documents have no stored file yet: download it first (SSRF
-    # safe) and persist the file before extraction (mirrors process_document_task).
+
     if document.source_url and not document.file:
         from .url_source import UrlSourceError, download_source_to_document
 
@@ -1332,7 +1282,7 @@ def stage_delete_existing_chunks(document_id: str) -> dict:
                 ChromaVectorStore().delete_documents(
                     vector_ids, collection=VECTOR_COLLECTION
                 )
-            except Exception:  # pragma: no cover - best effort (missing collection)
+            except Exception:
                 logger.exception(
                     "Could not remove existing vectors for document %s",
                     document_id,
@@ -1394,8 +1344,8 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                 vector_store.add_documents(
                     [
                         {
-                            # Deterministic per-chunk id: idempotent upsert +
-                            # re-map by metadata chunk_id on retrieval.
+
+
                             "id": f"{document.pk}:{chunk.chunk_index}",
                             "text": chunk.content,
                             "embedding": embedding,
@@ -1426,7 +1376,7 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                 vector_store.delete_documents(
                     pushed_ids, collection=VECTOR_COLLECTION
                 )
-            except Exception:  # pragma: no cover - best effort
+            except Exception:
                 logger.exception(
                     "Could not remove partial vectors for document %s",
                     document_id,
@@ -1442,7 +1392,7 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                 vector_store.delete_documents(
                     pushed_ids, collection=VECTOR_COLLECTION
                 )
-            except Exception:  # pragma: no cover - best effort
+            except Exception:
                 logger.exception(
                     "Could not remove partial vectors for document %s",
                     document_id,
@@ -1532,7 +1482,7 @@ def stage_notify_completed(document_id: str) -> dict:
     _stage_start(document, STAGE_NOTIFY_COMPLETED, progress=100)
     try:
         pass
-    except Exception as exc:  # pragma: no cover - hook has no work today
+    except Exception as exc:
         logger.exception(
             "stage_notify_completed failed for document %s", document_id
         )

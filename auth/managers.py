@@ -42,4 +42,4 @@ class AllUsersManager(DjangoUserManager.from_queryset(UserQuerySet)):
     """Recovery/restore manager: full UserManager API, NO is_deleted filter."""
 
     use_in_migrations = False
-    # NO get_queryset override -> returns every row, including soft-deleted.
+

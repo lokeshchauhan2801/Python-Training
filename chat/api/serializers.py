@@ -73,21 +73,21 @@ class ConversationSessionSerializer(
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # company is writable on create (validated against ownership) and
-        # read-only on update.
+
+
         if self.instance is not None and "company" in self.fields:
             self.fields["company"].read_only = True
         if "company" in self.fields:
-            # Required FK, but omission is allowed (resolved to the single owned
-            # company). Do not force the client to send it.
+
+
             self.fields["company"].required = False
 
     def validate_company(self, value):
         return self._resolve_company(value)
 
     def validate(self, attrs):
-        # When company is omitted entirely, validate_company does not run, so
-        # resolve the default here (create path only).
+
+
         if self.instance is None and "company" not in attrs:
             attrs["company"] = self._resolve_company(None)
         return attrs
