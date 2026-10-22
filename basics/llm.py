@@ -77,10 +77,36 @@ class LLMClient:
         self._client = None  # lazy; NOT built at import or construct time
         self._embeddings = None  # lazy; NOT built at import or construct time
 
+    @staticmethod
+    def _clear_empty_base_url_env():
+        """Drop empty OpenAI base-url env vars before building an SDK client.
+
+        The openai SDK reads ``OPENAI_BASE_URL`` / ``OPENAI_API_BASE`` from the
+        environment as a default base URL. When one of these is set to an EMPTY
+        string (e.g. ``OPENAI_BASE_URL=`` in a .env loaded via python-dotenv),
+        the SDK treats ``""`` as a configured endpoint and hands it to httpx,
+        which rejects it with ``UnsupportedProtocol: Request URL is missing an
+        'http://' or 'https://' protocol.`` — breaking EVERY embedding/chat call
+        that relies on the provider default (base_url=None), notably the
+        embedding path under both openai and deepseek.
+
+        We pass an explicit ``base_url`` to the client anyway, but when that
+        value is ``None`` the SDK still consults the env var, so an empty env var
+        wins over our intended default. Removing only the EMPTY values (never a
+        real URL a user deliberately exported) makes our resolved base_url the
+        single source of truth.
+        """
+        import os
+
+        for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            if os.environ.get(name, None) == "":
+                del os.environ[name]
+
     def _ensure_client(self):
         if self._client is None:
             if not self._api_key:
                 raise LLMConfigurationError("No LLM API key configured.")
+            self._clear_empty_base_url_env()
             # Imported lazily so that merely importing this module (and running
             # check/migrate) never requires the backend to be constructable.
             from langchain_openai import ChatOpenAI
@@ -98,6 +124,7 @@ class LLMClient:
                 raise LLMConfigurationError(
                     "LLM API key required to embed documents."
                 )
+            self._clear_empty_base_url_env()
             # Lazy import mirrors _ensure_client: importing this module never
             # requires the embeddings backend to be constructable.
             from langchain_openai import OpenAIEmbeddings
@@ -147,21 +174,82 @@ class LLMClient:
             raise LLMBackendError("LLM embedding call failed.") from exc
 
     def generate_structured(self, prompt, schema):
-        """Return a ``schema`` instance validated from a structured completion."""
+        """Return a ``schema`` instance validated from a structured completion.
+
+        Tries the provider's NATIVE structured output first (OpenAI function /
+        json-schema via ``with_structured_output``). Providers without that
+        capability — notably DeepSeek's ``deepseek-chat`` over the OpenAI-compat
+        shim — raise there; for them we FALL BACK to a plain completion that
+        appends the schema and parses JSON out of the text. So structured output
+        works across providers without the caller changing anything.
+        """
         client = self._ensure_client()
         try:
             structured_client = client.with_structured_output(schema)
             response = structured_client.invoke(prompt)
-        except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
+            if isinstance(response, schema):
+                return response
+            return schema.model_validate(response)
+        except Exception as native_exc:  # noqa: BLE001 - try the portable path
+            logger.info(
+                "native structured output unavailable (provider=%s model=%s); "
+                "falling back to prompt+parse",
+                self.provider,
+                self.model,
+            )
+            return self._structured_via_prompt(prompt, schema, native_exc)
+
+    def _structured_via_prompt(self, prompt, schema, native_exc):
+        """Prompt-and-parse structured output for providers without native support."""
+        import json
+        import re
+
+        try:
+            json_schema = json.dumps(schema.model_json_schema())
+        except Exception:  # noqa: BLE001 - schema introspection should not fail
+            json_schema = "{}"
+
+        text_prompt = prompt if isinstance(prompt, str) else str(prompt)
+        instruction = (
+            text_prompt
+            + "\n\nReturn ONLY a single JSON object (no prose, no code fences) "
+            "that validates against this JSON schema:\n" + json_schema
+        )
+        try:
+            raw = self.complete([{"role": "user", "content": instruction}])
+        except LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             logger.error(
                 "LLM structured call failed (provider=%s model=%s)",
                 self.provider,
                 self.model,
             )
             raise LLMBackendError("LLM structured call failed.") from exc
-        if isinstance(response, schema):
-            return response
-        return schema.model_validate(response)
+
+        # Extract the first JSON object from the response (tolerate code fences
+        # or stray prose the model may add despite the instruction).
+        candidate = (raw or "").strip()
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", candidate, re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1).strip()
+        if not candidate.startswith("{"):
+            brace = candidate.find("{")
+            if brace != -1:
+                candidate = candidate[brace:]
+        try:
+            data = json.loads(candidate)
+            return schema.model_validate(data)
+        except Exception as parse_exc:  # noqa: BLE001
+            logger.error(
+                "LLM structured call failed (provider=%s model=%s): could not "
+                "parse JSON from response",
+                self.provider,
+                self.model,
+            )
+            raise LLMBackendError(
+                "LLM structured call failed."
+            ) from (parse_exc or native_exc)
 
     @staticmethod
     def _to_lc_messages(messages):
@@ -198,6 +286,58 @@ class LLMClient:
                 for part in content
             )
         return str(content)
+
+
+def resolve_provider_model(model_name=None, provider=None):
+    """Map a selected (model, provider) to a concrete ``(provider, model)`` pair.
+
+    Single source of truth for turning the composer's selection into the
+    provider+model the real LLM call should use. Rules (in order):
+
+    1. An explicit, registry-known ``provider`` wins. This disambiguates a model
+       id that two providers might both list; the model is kept as given (or the
+       provider's chat_model/first model when no model was sent).
+    2. Otherwise, scan ``settings.LLM_PROVIDERS`` for the provider whose
+       ``"models"`` list (or ``"chat_model"``) contains ``model_name`` and return
+       that provider with ``model_name``.
+    3. Otherwise (empty/unknown model and no valid explicit provider) fall back
+       to ``settings.LLM_PROVIDER`` and that provider's ``chat_model`` (else its
+       first model, else ``settings.LLM_MODEL``) — preserving today's behaviour
+       exactly when the client sends nothing.
+
+    Returns a plain ``(provider_key, model_id)`` tuple and never constructs a
+    backend client, so callers stay no-key-safe.
+    """
+    registry = getattr(settings, "LLM_PROVIDERS", {}) or {}
+
+    def _default_model(provider_key):
+        cfg = registry.get(provider_key) or {}
+        return (
+            cfg.get("chat_model")
+            or (cfg.get("models") or [None])[0]
+            or settings.LLM_MODEL
+        )
+
+    name = (model_name or "").strip() or None
+    explicit = (provider or "").strip() or None
+
+    # 1. Explicit, known provider wins (disambiguates shared model ids).
+    if explicit and explicit in registry:
+        return explicit, (name or _default_model(explicit))
+
+    # 2. Find the provider whose registry entry lists this model.
+    if name:
+        for provider_key, cfg in registry.items():
+            models = cfg.get("models") or []
+            if name in models or name == cfg.get("chat_model"):
+                return provider_key, name
+
+    # 3. Empty OR unknown model (and no valid explicit provider): fall back to
+    #    the default provider AND its default model. An unknown model id is
+    #    discarded here rather than passed through, so the real call always uses
+    #    a model the default provider actually serves.
+    default_provider = settings.LLM_PROVIDER
+    return default_provider, _default_model(default_provider)
 
 
 def get_llm_client(provider: str | None = None) -> LLMClient:

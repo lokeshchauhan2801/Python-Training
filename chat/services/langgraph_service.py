@@ -362,7 +362,10 @@ class LangGraphChatService:
         if not content:
             raise ChatProviderError("The LLM provider returned an empty response.")
 
-        assistant_model_name = model_name or None
+        # Stamp the model that ACTUALLY answered. `send` passes the resolved
+        # model id as `model_name`; if it is ever omitted, fall back to the
+        # resolved chat client's model (never leave the row null).
+        assistant_model_name = model_name or getattr(llm, "model", None)
 
         # Persist the user + assistant pair AND the metadata atomically.
         with transaction.atomic():
@@ -557,22 +560,36 @@ class LangGraphChatService:
         """
         from langgraph.graph import END, START, StateGraph
 
-        node_slugs = [n.slug for n in nodes]
-        node_count = max(len(node_slugs), 1)
+        # START/END DB nodes are STRUCTURAL markers, not runnable nodes. Map
+        # them to LangGraph's START/END sentinels instead of registering them as
+        # graph nodes — registering an "end" node and ALSO routing to the END
+        # sentinel made LangGraph reject "end" as an unknown branch target
+        # ("At 'chat_agent' node, '_choose' branch found unknown target 'end'").
+        # Only STEP-kind nodes become real graph nodes.
+        kind_by_slug = {n.slug: n.kind for n in nodes}
+        start_slug = next((n.slug for n in nodes if n.kind == "start"), None)
+
+        def _resolve(slug):
+            # Map a DB slug to a LangGraph target: start-kind -> START,
+            # end-kind -> END, otherwise the slug itself (a STEP node).
+            kind = kind_by_slug.get(slug)
+            if kind == "start":
+                return START
+            if kind == "end":
+                return END
+            return slug
+
+        step_slugs = [n.slug for n in nodes if kind_by_slug.get(n.slug) == "step"]
+        node_count = max(len(step_slugs), 1)
         max_hops = 2 * node_count + 1
 
-        # Deterministic adjacency: source_slug -> [target_slug, ...] in
-        # (source, target) order.
-        adjacency: dict[str, list[str]] = {s: [] for s in node_slugs}
+        # Adjacency over RESOLVED targets (START/END sentinels or step slugs),
+        # in deterministic (source, target) order. Keyed by resolved source.
+        adjacency: dict[object, list[object]] = {}
         for edge in edges:
-            src = edge.source.slug
-            tgt = edge.target.slug
-            if src in adjacency:
-                adjacency[src].append(tgt)
-
-        start_slug = next(
-            (n.slug for n in nodes if n.kind == "start"), None
-        )
+            src = _resolve(edge.source.slug)
+            tgt = _resolve(edge.target.slug)
+            adjacency.setdefault(src, []).append(tgt)
 
         builder = StateGraph(GraphState)
 
@@ -580,8 +597,6 @@ class LangGraphChatService:
             is_router = slug == step_slug
 
             def _node(state):
-                # Record which concrete node is executing so the router body can
-                # append it to ``visited``.
                 state = dict(state)
                 state["_current"] = slug
                 if is_router:
@@ -593,13 +608,17 @@ class LangGraphChatService:
 
             return _node
 
-        for slug in node_slugs:
+        # Register only the STEP nodes.
+        for slug in step_slugs:
             builder.add_node(slug, _make_node(slug))
 
-        if start_slug and start_slug in node_slugs:
-            builder.add_edge(START, start_slug)
-        elif node_slugs:
-            builder.add_edge(START, node_slugs[0])
+        # Entry edge: START -> the first step the start node points at, else the
+        # first step node, else straight to END (degenerate graph).
+        start_targets = adjacency.get(START, [])
+        entry = next((t for t in start_targets if t in step_slugs), None)
+        if entry is None:
+            entry = step_slugs[0] if step_slugs else END
+        builder.add_edge(START, entry)
 
         def _make_choice(slug):
             targets = adjacency.get(slug, [])
@@ -609,15 +628,18 @@ class LangGraphChatService:
                     return END
                 visited = state.get("visited") or []
                 for tgt in targets:
-                    if tgt not in visited:
+                    # END is always takeable; a step target only if unvisited.
+                    if tgt == END or tgt not in visited:
                         return tgt
                 return END
 
             return _choose
 
-        for slug in node_slugs:
+        # Conditional edges only FROM step nodes. The mapping's keys/values are
+        # the resolved targets (step slugs and the END sentinel), all valid.
+        for slug in step_slugs:
             targets = adjacency.get(slug, [])
-            mapping = {t: t for t in targets}
+            mapping = {t: t for t in targets if t in step_slugs}
             mapping[END] = END
             builder.add_conditional_edges(slug, _make_choice(slug), mapping)
 

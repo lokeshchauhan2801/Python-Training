@@ -1421,3 +1421,206 @@ class ChatUIViewTests(TestCase):
     def tearDownClass(cls):
         super().tearDownClass()
         shutil.rmtree(_MEDIA, ignore_errors=True)
+
+
+# =====================================================================
+# Per-message provider selection: models_json offers BOTH providers,
+# and `send` routes the REAL call to the selected provider+model and
+# stamps the actual model on the assistant Message. No network/key: a
+# recording fake stands in for LLMClient so we can assert what provider
+# /model the view built without talking to a backend.
+# =====================================================================
+
+
+class _RecordingLLMClient:
+    """Fake LLMClient that records the provider/model it was built with.
+
+    Stands in for ``chat.views.LLMClient`` so a POST to ``send`` with a model
+    selection builds THIS instead of a real client. Serves the RAG seam
+    (generate_structured/complete/embed_query) with canned, network-free values.
+    The constructor signature mirrors the real one (provider/model keywords).
+    """
+
+    instances = []
+
+    def __init__(self, *, provider=None, model=None, api_key=None, base_url=None):
+        self.provider = provider
+        self.model = model
+        type(self).instances.append(self)
+
+    def generate_structured(self, prompt, schema):
+        return schema(response="fake answer", chart=None, title=None)
+
+    def complete(self, messages, *, temperature=None, max_tokens=None):
+        return "fake answer"
+
+    def embed_query(self, text):
+        return [0.0] * 8
+
+
+class ProviderSelectionModelsJsonTests(TestCase):
+    """models_json returns BOTH providers' models tagged with provider."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            email="models@example.com", password="pw"
+        )
+        cls.company = Company.objects.create(
+            owner=cls.user, name="MJ Co", slug="mj-co"
+        )
+
+    def test_models_json_lists_both_providers_tagged(self):
+        from django.conf import settings
+
+        self.client.force_login(self.user)
+        data = self.client.get(reverse("chat:models_json")).json()
+
+        self.assertIsInstance(data["models"], list)
+        for opt in data["models"]:
+            self.assertIn("id", opt)
+            self.assertIn("label", opt)
+            self.assertIn("provider", opt)
+
+        providers = {opt["provider"] for opt in data["models"]}
+        self.assertIn("openai", providers)
+        self.assertIn("deepseek", providers)
+
+        ids = {opt["id"] for opt in data["models"]}
+        self.assertIn("gpt-4o-mini", ids)
+        self.assertIn("deepseek-chat", ids)
+
+        # default / default_provider track settings.LLM_PROVIDER.
+        self.assertEqual(data["provider"], settings.LLM_PROVIDER)
+        self.assertEqual(data["default_provider"], settings.LLM_PROVIDER)
+        default_cfg = settings.LLM_PROVIDERS[settings.LLM_PROVIDER]
+        self.assertEqual(data["default"], default_cfg["chat_model"])
+
+        # A label carries the human provider name.
+        openai_opt = next(o for o in data["models"] if o["id"] == "gpt-4o-mini")
+        self.assertIn("OpenAI", openai_opt["label"])
+        deepseek_opt = next(
+            o for o in data["models"] if o["id"] == "deepseek-chat"
+        )
+        self.assertIn("DeepSeek", deepseek_opt["label"])
+
+
+class ProviderSelectionSendTests(TestCase):
+    """`send` routes the real call to the selected provider+model."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            email="sel@example.com", password="pw"
+        )
+        cls.company = Company.objects.create(
+            owner=cls.user, name="Sel Co", slug="sel-co"
+        )
+
+    def setUp(self):
+        self.session = ConversationSession.objects.create(
+            company=self.company, user=self.user
+        )
+        _RecordingLLMClient.instances = []
+        self.client.force_login(self.user)
+
+    def _post(self, data):
+        # Patch the view's LLMClient (so a selection builds the recorder) and
+        # retrieval (so no embeddings/Chroma is touched on the RAG path).
+        return mock.patch(
+            "chat.views.LLMClient", _RecordingLLMClient
+        ), mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        )
+
+    def test_send_with_deepseek_model_routes_to_deepseek(self):
+        patch_client, patch_chunks = self._post(None)
+        with patch_client, patch_chunks:
+            resp = self.client.post(
+                reverse("chat:send", args=[self.session.pk]),
+                {"question": "hi", "model_name": "deepseek-chat"},
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        # The view built a client for the deepseek provider + selected model.
+        self.assertTrue(_RecordingLLMClient.instances)
+        built = _RecordingLLMClient.instances[0]
+        self.assertEqual(built.provider, "deepseek")
+        self.assertEqual(built.model, "deepseek-chat")
+
+        # The assistant Message is stamped with the ACTUAL model used.
+        assistant = (
+            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
+            .order_by("-created_at")
+            .first()
+        )
+        self.assertEqual(assistant.model_name, "deepseek-chat")
+
+    def test_send_with_openai_model_routes_to_openai(self):
+        patch_client, patch_chunks = self._post(None)
+        with patch_client, patch_chunks:
+            resp = self.client.post(
+                reverse("chat:send", args=[self.session.pk]),
+                {"question": "hi", "model_name": "gpt-4o"},
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        built = _RecordingLLMClient.instances[0]
+        self.assertEqual(built.provider, "openai")
+        self.assertEqual(built.model, "gpt-4o")
+        assistant = (
+            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
+            .order_by("-created_at")
+            .first()
+        )
+        self.assertEqual(assistant.model_name, "gpt-4o")
+
+    def test_explicit_provider_field_disambiguates(self):
+        # An explicit provider wins even when the model id would otherwise map
+        # elsewhere, proving the server honours the composer's data-provider.
+        patch_client, patch_chunks = self._post(None)
+        with patch_client, patch_chunks:
+            resp = self.client.post(
+                reverse("chat:send", args=[self.session.pk]),
+                {
+                    "question": "hi",
+                    "model_name": "gpt-4o-mini",
+                    "provider": "deepseek",
+                },
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        built = _RecordingLLMClient.instances[0]
+        self.assertEqual(built.provider, "deepseek")
+        self.assertEqual(built.model, "gpt-4o-mini")
+
+    def test_send_without_selection_uses_default_service(self):
+        # No model/provider => the view must NOT build a per-turn client; it
+        # uses the patchable default service, preserving today's behaviour.
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="default answer"))
+        with mock.patch(
+            "chat.views.LLMClient", _RecordingLLMClient
+        ), mock.patch(
+            "chat.views._chat_service", return_value=fake
+        ), mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        ):
+            resp = self.client.post(
+                reverse("chat:send", args=[self.session.pk]),
+                {"question": "hi"},
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        # No per-turn client was constructed.
+        self.assertEqual(_RecordingLLMClient.instances, [])
+        # The default service answered and the stamp is the default model.
+        assistant = (
+            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
+            .order_by("-created_at")
+            .first()
+        )
+        self.assertEqual(assistant.content, "default answer")
+        # Behaviour is preserved exactly: with no selection, ChatService stamps
+        # its own _DEFAULT_MODEL_NAME (unchanged by this feature).
+        from chat.services.chat_service import _DEFAULT_MODEL_NAME
+
+        self.assertEqual(assistant.model_name, _DEFAULT_MODEL_NAME)

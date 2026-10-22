@@ -30,7 +30,12 @@ from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods
 
-from basics.llm import LLMBackendError, LLMConfigurationError
+from basics.llm import (
+    LLMBackendError,
+    LLMClient,
+    LLMConfigurationError,
+    resolve_provider_model,
+)
 from documents.models import Document
 
 from .scope import active_or_none, allowed_companies, scoped_sessions
@@ -47,7 +52,7 @@ def _chat_service():
     return ChatService()
 
 
-def _orchestrator_for(company):
+def _orchestrator_for(company, llm_client=None):
     """Return the service a NEW message runs through.
 
     ``LangGraphChatService`` when ``company`` has an active, runnable graph
@@ -55,11 +60,27 @@ def _orchestrator_for(company):
     otherwise the existing ``ChatService`` (``_chat_service()``), so chat is
     unchanged where no graph is configured.
 
+    ``llm_client`` is the per-turn client resolved in ``send`` for the model the
+    user picked (``LLMClient(provider=<resolved>, model=<selected>)``). When
+    given, it is injected into whichever service runs this turn so the REAL call
+    honours the selection: the RAG ``ChatService`` is built with it, and the
+    LangGraph service wraps a ``ChatService`` built with it (its tool handlers
+    and router all read ``self._chat._llm``). When ``None`` the default client is
+    used (the no-selection fallback). Note: the ``_chat_service()`` helper is
+    still used as the no-client default so tests that patch it keep working.
+
     Import-safety: ``agents`` is imported LAZILY here so ``chat`` has no
     import-time dependency on ``agents`` (and none on ``langgraph``). ANY
     import/lookup error degrades silently to the RAG path — a missing or
     unrunnable graph is never an error, just a fallback.
     """
+
+    def _rag_service():
+        # Per-turn client when one was resolved; else the patchable default.
+        if llm_client is not None:
+            return ChatService(llm_client=llm_client)
+        return _chat_service()
+
     try:
         from agents.models import AgentGraph, AgentNode
 
@@ -69,7 +90,7 @@ def _orchestrator_for(company):
             .first()
         )
         if graph is None:
-            return _chat_service()
+            return _rag_service()
         has_start = AgentNode.objects.filter(
             graph=graph, kind=AgentNode.KIND_START
         ).exists()
@@ -77,18 +98,18 @@ def _orchestrator_for(company):
             graph=graph, kind=AgentNode.KIND_STEP
         ).exists()
         if not (has_start and has_step):
-            return _chat_service()
+            return _rag_service()
 
         from chat.services.langgraph_service import LangGraphChatService
         from basics.langfuse import get_langfuse_client
 
         return LangGraphChatService(
-            chat_service=ChatService(),
+            chat_service=_rag_service(),
             langfuse=get_langfuse_client(),
         )
     except Exception:  # noqa: BLE001 - any failure => existing RAG path
         logger.debug("agents graph lookup failed; using ChatService", exc_info=True)
-        return _chat_service()
+        return _rag_service()
 
 
 def _valid_ulid(value):
@@ -116,26 +137,98 @@ def _message_payload(message):
     }
 
 
+# Human-friendly labels for the provider suffix in the dropdown. Unknown keys
+# fall back to a capitalized version of the key itself.
+_PROVIDER_DISPLAY_NAMES = {"openai": "OpenAI", "deepseek": "DeepSeek"}
+
+
+def _provider_display_name(provider):
+    return _PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
+
+
 @login_required
 @require_http_methods(["GET"])
 def models_json(request):
-    """Return the ACTIVE LLM provider and the models the dropdown should offer.
+    """Return BOTH providers' models so the dropdown can pick either one.
 
-    Auto-detects the provider from settings.LLM_PROVIDER and reads that
-    provider's model list from settings.LLM_PROVIDERS. The chat composer
-    populates its model <select> from this (no hardcoded model list), so
-    switching LLM_PROVIDER (openai <-> deepseek) changes the offered models
-    automatically. Degrades to the generic LLM_MODEL when no registry entry.
+    Every model is tagged with its provider, so the composer can show e.g.
+    "gpt-4o-mini (OpenAI)" and "deepseek-chat (DeepSeek)" in one list and send
+    the chosen model AND provider back on ``send``. The default selection is the
+    chat_model (else first model) of settings.LLM_PROVIDER. Built entirely from
+    settings.LLM_PROVIDERS (no hardcoded model names), active provider first, so
+    switching LLM_PROVIDER only changes which option is pre-selected.
+
+    Response shape::
+
+        {
+          "provider": "openai",            # active default provider
+          "default": "gpt-4o-mini",        # default model id
+          "default_provider": "openai",    # explicit, == provider
+          "models": [                      # list of {id, label, provider}
+            {"id": "gpt-4o-mini", "label": "gpt-4o-mini (OpenAI)",
+             "provider": "openai"},
+            ...
+          ]
+        }
+
+    Degrades to the generic LLM_MODEL/LLM_PROVIDER when the registry is empty,
+    keeping the ``provider``/``default`` keys for backward-compat.
     """
     from django.conf import settings
 
     provider = getattr(settings, "LLM_PROVIDER", "openai")
     registry = getattr(settings, "LLM_PROVIDERS", {}) or {}
-    cfg = registry.get(provider) or {}
-    models = cfg.get("models") or [getattr(settings, "LLM_MODEL", "gpt-4o-mini")]
-    default_model = cfg.get("chat_model") or models[0]
+
+    if not registry:
+        # No registry: degrade to the single generic model.
+        fallback_model = getattr(settings, "LLM_MODEL", "gpt-4o-mini")
+        return JsonResponse(
+            {
+                "provider": provider,
+                "default": fallback_model,
+                "default_provider": provider,
+                "models": [
+                    {
+                        "id": fallback_model,
+                        "label": "%s (%s)"
+                        % (fallback_model, _provider_display_name(provider)),
+                        "provider": provider,
+                    }
+                ],
+            }
+        )
+
+    # Iterate the registry with the active provider first so its models lead the
+    # list (and the default selection is near the top).
+    ordered_providers = [provider] + [p for p in registry if p != provider]
+
+    models = []
+    for provider_key in ordered_providers:
+        cfg = registry.get(provider_key) or {}
+        display = _provider_display_name(provider_key)
+        for model_id in cfg.get("models") or []:
+            models.append(
+                {
+                    "id": model_id,
+                    "label": "%s (%s)" % (model_id, display),
+                    "provider": provider_key,
+                }
+            )
+
+    active_cfg = registry.get(provider) or {}
+    default_model = (
+        active_cfg.get("chat_model")
+        or (active_cfg.get("models") or [None])[0]
+        or getattr(settings, "LLM_MODEL", "gpt-4o-mini")
+    )
+
     return JsonResponse(
-        {"provider": provider, "models": models, "default": default_model}
+        {
+            "provider": provider,
+            "default": default_model,
+            "default_provider": provider,
+            "models": models,
+        }
     )
 
 
@@ -295,7 +388,27 @@ def send(request, session_id):
         return JsonResponse({"error": "Question is required."}, status=400)
 
     model_name = (request.POST.get("model_name") or "").strip() or None
+    # Optional explicit provider from the composer (disambiguates a model id two
+    # providers might share). Absent => resolver infers it from the model.
+    provider = (request.POST.get("provider") or "").strip() or None
     attachment_ids = request.POST.getlist("attachment_ids")
+
+    # Resolve the selection to a concrete (provider, model). The resolver always
+    # yields a usable pair; the default provider+model when the client sent
+    # nothing.
+    resolved_provider, resolved_model = resolve_provider_model(model_name, provider)
+
+    # Only build + inject a per-turn client when the client actually SELECTED
+    # something. With no selection we pass llm_client=None so the default
+    # service (_chat_service(), which tests patch) is used — today's behaviour
+    # is preserved byte-for-byte. Building LLMClient is lazy (no key touched
+    # here), so the error->HTTP mapping below is unaffected.
+    selected = bool(model_name or provider)
+    llm_client = (
+        LLMClient(provider=resolved_provider, model=resolved_model)
+        if selected
+        else None
+    )
 
     # Run the pipeline AS THE SESSION'S OWNER, not request.user. The session is
     # already authorization-scoped by _resolve_session, but scoped_sessions lets
@@ -308,13 +421,17 @@ def send(request, session_id):
     chat_user = session.user
 
     try:
-        assistant_message = _orchestrator_for(session.company).process_message(
+        assistant_message = _orchestrator_for(
+            session.company, llm_client=llm_client
+        ).process_message(
             user=chat_user,
             message_text=question,
             conversation=session,
             company=session.company,
             attachment_ids=attachment_ids or None,
-            model_name=model_name,
+            # Stamp the ACTUAL model when the user picked one; otherwise pass the
+            # original (None) so the default-stamping behaviour is unchanged.
+            model_name=resolved_model if selected else model_name,
         )
     except LLMConfigurationError:
         return JsonResponse({"error": "LLM not configured"}, status=503)
