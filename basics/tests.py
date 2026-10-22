@@ -27,8 +27,8 @@ class ResolveProviderModelTests(SimpleTestCase):
         )
 
     def test_explicit_provider_wins_and_disambiguates(self):
-        # An explicit, registry-known provider is trusted even if the model
-        # would otherwise map to another provider by its models list.
+
+
         provider, model = resolve_provider_model("gpt-4o-mini", provider="deepseek")
         self.assertEqual(provider, "deepseek")
         self.assertEqual(model, "gpt-4o-mini")
@@ -53,7 +53,7 @@ class ResolveProviderModelTests(SimpleTestCase):
         self.assertEqual(model, default_cfg["chat_model"])
 
     def test_unknown_explicit_provider_is_ignored(self):
-        # A provider not in the registry is ignored; falls back to model scan.
+
         self.assertEqual(
             resolve_provider_model("deepseek-chat", provider="bogus"),
             ("deepseek", "deepseek-chat"),

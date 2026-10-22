@@ -1413,15 +1413,6 @@ class ChatUIViewTests(TestCase):
         shutil.rmtree(_MEDIA, ignore_errors=True)
 
 
-# =====================================================================
-# Per-message provider selection: models_json offers BOTH providers,
-# and `send` routes the REAL call to the selected provider+model and
-# stamps the actual model on the assistant Message. No network/key: a
-# recording fake stands in for LLMClient so we can assert what provider
-# /model the view built without talking to a backend.
-# =====================================================================
-
-
 class _RecordingLLMClient:
     """Fake LLMClient that records the provider/model it was built with.
 
@@ -1480,13 +1471,13 @@ class ProviderSelectionModelsJsonTests(TestCase):
         self.assertIn("gpt-4o-mini", ids)
         self.assertIn("deepseek-chat", ids)
 
-        # default / default_provider track settings.LLM_PROVIDER.
+
         self.assertEqual(data["provider"], settings.LLM_PROVIDER)
         self.assertEqual(data["default_provider"], settings.LLM_PROVIDER)
         default_cfg = settings.LLM_PROVIDERS[settings.LLM_PROVIDER]
         self.assertEqual(data["default"], default_cfg["chat_model"])
 
-        # A label carries the human provider name.
+
         openai_opt = next(o for o in data["models"] if o["id"] == "gpt-4o-mini")
         self.assertIn("OpenAI", openai_opt["label"])
         deepseek_opt = next(
@@ -1515,8 +1506,8 @@ class ProviderSelectionSendTests(TestCase):
         self.client.force_login(self.user)
 
     def _post(self, data):
-        # Patch the view's LLMClient (so a selection builds the recorder) and
-        # retrieval (so no embeddings/Chroma is touched on the RAG path).
+
+
         return mock.patch(
             "chat.views.LLMClient", _RecordingLLMClient
         ), mock.patch(
@@ -1533,13 +1524,13 @@ class ProviderSelectionSendTests(TestCase):
             )
         self.assertEqual(resp.status_code, 201, resp.content)
 
-        # The view built a client for the deepseek provider + selected model.
+
         self.assertTrue(_RecordingLLMClient.instances)
         built = _RecordingLLMClient.instances[0]
         self.assertEqual(built.provider, "deepseek")
         self.assertEqual(built.model, "deepseek-chat")
 
-        # The assistant Message is stamped with the ACTUAL model used.
+
         assistant = (
             self.session.messages.filter(role=Message.ROLE_ASSISTANT)
             .order_by("-created_at")
@@ -1566,8 +1557,8 @@ class ProviderSelectionSendTests(TestCase):
         self.assertEqual(assistant.model_name, "gpt-4o")
 
     def test_explicit_provider_field_disambiguates(self):
-        # An explicit provider wins even when the model id would otherwise map
-        # elsewhere, proving the server honours the composer's data-provider.
+
+
         patch_client, patch_chunks = self._post(None)
         with patch_client, patch_chunks:
             resp = self.client.post(
@@ -1584,8 +1575,8 @@ class ProviderSelectionSendTests(TestCase):
         self.assertEqual(built.model, "gpt-4o-mini")
 
     def test_send_without_selection_uses_default_service(self):
-        # No model/provider => the view must NOT build a per-turn client; it
-        # uses the patchable default service, preserving today's behaviour.
+
+
         fake = ChatService(llm_client=_FakeStructuredLLM(response="default answer"))
         with mock.patch(
             "chat.views.LLMClient", _RecordingLLMClient
@@ -1600,17 +1591,17 @@ class ProviderSelectionSendTests(TestCase):
                 {"question": "hi"},
             )
         self.assertEqual(resp.status_code, 201, resp.content)
-        # No per-turn client was constructed.
+
         self.assertEqual(_RecordingLLMClient.instances, [])
-        # The default service answered and the stamp is the default model.
+
         assistant = (
             self.session.messages.filter(role=Message.ROLE_ASSISTANT)
             .order_by("-created_at")
             .first()
         )
         self.assertEqual(assistant.content, "default answer")
-        # Behaviour is preserved exactly: with no selection, ChatService stamps
-        # its own _DEFAULT_MODEL_NAME (unchanged by this feature).
+
+
         from chat.services.chat_service import _DEFAULT_MODEL_NAME
 
         self.assertEqual(assistant.model_name, _DEFAULT_MODEL_NAME)
