@@ -117,7 +117,7 @@ class DocumentAdmin(BaseModelAdmin):
     # backend chooser is NOT a row-action anymore: it is the in-row "Schedule"
     # column below (an "Action" button + inline dropdown that POSTs to the
     # AJAX dispatch endpoint — no separate page, no full reload).
-    actions_row = ("show_chunks", "info_action")
+    actions_row = ("show_chunks",)
 
     list_display = (
         "id_short",
@@ -127,12 +127,19 @@ class DocumentAdmin(BaseModelAdmin):
         "chunk_count",
         "processing_backend",
         "schedule_column",
+        "info_column",
         "created_by",
         "created_at",
     )
     list_filter = ("status", "file_type", "source", "company", "is_deleted", "created_at")
     search_fields = ("title", "uploaded_by__email")
     date_hierarchy = "created_at"
+    # Surface Unfold's horizontal scrollbar at the TOP of the changelist. The
+    # extra columns (Schedule + Temporal/Info) make the table wider than the
+    # content area at 100% zoom; Unfold's results wrapper already scrolls via
+    # SimpleBar, but the bottom scrollbar sits below the fold and is easy to
+    # miss. A top scrollbar makes reaching the right-most columns obvious.
+    list_horizontal_scrollbar_top = True
 
     # The ADD form is intentionally minimal: the user only chooses a file OR a
     # media URL. Everything else (title, source, file_type, status, processing
@@ -373,25 +380,23 @@ class DocumentAdmin(BaseModelAdmin):
             reverse("admin:documents_document_chunks", args=[document.pk])
         )
 
-    @action(
-        description="Info",
-        url_path="temporal-info-pill",
-        variant=ActionVariant.PRIMARY,
-    )
-    def info_action(self, request, object_id):
-        # The per-row "Info" pill. Unfold's actions_row expects every entry to
-        # be an @action, but this one never navigates: temporal_info.js
-        # intercepts the click (preventDefault) and opens the polling modal
-        # instead. The returned button carries data-doc-id and the 'info-action'
-        # class the JS delegates on. object_id is a server-controlled pk
-        # interpolated via format_html's auto-escaping — no raw user text.
+    @admin.display(description="Temporal")
+    def info_column(self, obj):
+        # A plain list_display COLUMN (not an Unfold @action). An @action
+        # registers a navigable url_path; Unfold routed to it and the method
+        # returned a SafeString, which Django tried to treat as an HttpResponse
+        # -> "'SafeString' object has no attribute 'has_header'". Rendering the
+        # button as ordinary cell content avoids that entirely. temporal_info.js
+        # delegates on `.info-action` + data-doc-id (preventDefault) to open the
+        # polling modal; the button never navigates. obj.pk is server-controlled
+        # and auto-escaped by format_html.
         return format_html(
             '<button type="button" class="info-action '
             'inline-flex items-center gap-1 rounded-default border '
             'border-primary-600 bg-primary-600 px-3 py-1 text-sm '
             'font-medium text-white hover:bg-primary-700 cursor-pointer" '
             'data-doc-id="{}">Info</button>',
-            str(object_id),
+            str(obj.pk),
         )
 
     def save_model(self, request, obj, form, change):
