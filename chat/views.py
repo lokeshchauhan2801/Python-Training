@@ -116,6 +116,29 @@ def _message_payload(message):
     }
 
 
+@login_required
+@require_http_methods(["GET"])
+def models_json(request):
+    """Return the ACTIVE LLM provider and the models the dropdown should offer.
+
+    Auto-detects the provider from settings.LLM_PROVIDER and reads that
+    provider's model list from settings.LLM_PROVIDERS. The chat composer
+    populates its model <select> from this (no hardcoded model list), so
+    switching LLM_PROVIDER (openai <-> deepseek) changes the offered models
+    automatically. Degrades to the generic LLM_MODEL when no registry entry.
+    """
+    from django.conf import settings
+
+    provider = getattr(settings, "LLM_PROVIDER", "openai")
+    registry = getattr(settings, "LLM_PROVIDERS", {}) or {}
+    cfg = registry.get(provider) or {}
+    models = cfg.get("models") or [getattr(settings, "LLM_MODEL", "gpt-4o-mini")]
+    default_model = cfg.get("chat_model") or models[0]
+    return JsonResponse(
+        {"provider": provider, "models": models, "default": default_model}
+    )
+
+
 # --- page views -----------------------------------------------------------
 @login_required
 def chat_home(request):

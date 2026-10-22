@@ -149,6 +149,65 @@ LLM_API_KEY = (
     or ""
 )
 
+# Per-provider LLM registry. `get_llm_client(provider=...)` picks one entry so a
+# single call-site arg (provider="openai" | "deepseek") switches the WHOLE client
+# — chat model, embedding model, base_url, and key — for that call. Each value is
+# a plain string read from env; nothing here constructs a backend client (import
+# stays no-key-safe). The DEFAULT provider is LLM_PROVIDER, and its "openai"-style
+# generic LLM_* vars above remain the fallback so existing setups keep working.
+#
+# DeepSeek is an OpenAI-compatible CHAT endpoint but does NOT serve OpenAI
+# embedding models; its embedding fields default to the generic EMBEDDING_MODEL
+# and (optionally) a separate embeddings base_url/key if you run one. If DeepSeek
+# is selected for a path that embeds (document ingestion / document_search), set
+# DEEPSEEK_EMBEDDING_* to a provider that actually serves embeddings, or keep
+# embedding paths on openai.
+def _csv(env_value, default_list):
+    """Parse a comma-separated env list, falling back to default_list."""
+    raw = (env_value or "").strip()
+    if not raw:
+        return list(default_list)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+LLM_PROVIDERS = {
+    "openai": {
+        "chat_model": os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
+        # Models the chat dropdown offers for this provider (comma-separated env
+        # override OPENAI_MODELS). The first is the default selection.
+        "models": _csv(os.getenv("OPENAI_MODELS"), ["gpt-4o-mini", "gpt-4o"]),
+        "embedding_model": os.getenv(
+            "OPENAI_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        ),
+        "base_url": os.getenv("OPENAI_BASE_URL", ""),  # "" -> default OpenAI
+        "api_key": (
+            os.getenv("OPENAI_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("AI_API_KEY")
+            or ""
+        ),
+        "embedding_base_url": os.getenv("OPENAI_EMBEDDING_BASE_URL", ""),
+        "embedding_api_key": os.getenv("OPENAI_EMBEDDING_API_KEY", ""),
+    },
+    "deepseek": {
+        "chat_model": os.getenv("DEEPSEEK_LLM_MODEL", "deepseek-chat"),
+        "models": _csv(os.getenv("DEEPSEEK_MODELS"), ["deepseek-chat", "deepseek-reasoner"]),
+        # DeepSeek has no OpenAI-style embeddings; fall back to the generic model
+        # and let embedding_* below point at whoever actually serves it.
+        "embedding_model": os.getenv(
+            "DEEPSEEK_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        ),
+        "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "api_key": os.getenv("DEEPSEEK_API_KEY", ""),
+        # Embeddings: default to the OpenAI key/endpoint so RAG keeps working even
+        # when chat is on DeepSeek (override with DEEPSEEK_EMBEDDING_* to change).
+        "embedding_base_url": os.getenv("DEEPSEEK_EMBEDDING_BASE_URL", ""),
+        "embedding_api_key": (
+            os.getenv("DEEPSEEK_EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+        ),
+    },
+}
+
 # Langfuse prompt-management / tracing configuration. Plain env values only; no
 # SDK is imported at settings import. basics.langfuse.LangfuseClient reads these
 # lazily and is a no-op (local prompt fallback, no SDK import, no key logging)

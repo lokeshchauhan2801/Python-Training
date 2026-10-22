@@ -1,13 +1,3 @@
-"""Provider-agnostic, injectable LLM adapter.
-
-``LLMClient`` wraps ``langchain_openai.ChatOpenAI`` but never constructs a
-backend client at import or construction time. The backend is built lazily on
-the first ``complete`` call, so the project imports and runs ``check``/``migrate``
-with no key present. The provider is config-only (env), and ``complete`` exposes
-a single narrow contract that returns a plain string regardless of the backend
-content shape.
-"""
-
 import logging
 
 from django.conf import settings
@@ -27,12 +17,63 @@ class LLMBackendError(LLMError):
     """Raised when the backend provider call fails."""
 
 
+def _provider_config(provider):
+    """Resolve a provider's config from settings.LLM_PROVIDERS.
+
+    Falls back to the generic LLM_*/EMBEDDING_MODEL globals when the provider is
+    unknown or not in the registry, so existing single-provider setups are
+    unaffected. Returns a dict with chat_model, embedding_model, base_url,
+    api_key, embedding_base_url, embedding_api_key.
+    """
+    registry = getattr(settings, "LLM_PROVIDERS", {}) or {}
+    name = provider or settings.LLM_PROVIDER
+    cfg = registry.get(name)
+    if cfg is None:
+        # Unknown/unregistered provider => the legacy generic globals.
+        return {
+            "chat_model": settings.LLM_MODEL,
+            "embedding_model": getattr(settings, "EMBEDDING_MODEL", None),
+            "base_url": settings.LLM_BASE_URL or "",
+            "api_key": settings.LLM_API_KEY or "",
+            "embedding_base_url": "",
+            "embedding_api_key": "",
+        }
+    return cfg
+
+
 class LLMClient:
     def __init__(self, *, model=None, api_key=None, base_url=None, provider=None):
-        self.provider = provider or settings.LLM_PROVIDER  # label only
-        self.model = model or settings.LLM_MODEL
-        self.base_url = base_url or settings.LLM_BASE_URL or None
-        self._api_key = api_key or settings.LLM_API_KEY or None
+        # provider selects the whole config (chat model, embedding model,
+        # base_url, key) from the registry; explicit model/api_key/base_url still
+        # override the resolved provider values for that one field.
+        self.provider = provider or settings.LLM_PROVIDER
+        cfg = _provider_config(self.provider)
+
+        self.model = model or cfg.get("chat_model") or settings.LLM_MODEL
+        self.base_url = (base_url or cfg.get("base_url") or "") or None
+        self._api_key = (api_key or cfg.get("api_key") or settings.LLM_API_KEY) or None
+
+        # Embeddings are resolved INDEPENDENTLY of chat. A provider's chat
+        # endpoint is NOT necessarily an embeddings endpoint (DeepSeek, for
+        # example, has a chat API but NO OpenAI-style embeddings), so the
+        # embedding base_url/key must NOT inherit the chat base_url. When the
+        # provider config does not give an explicit embedding base_url, default
+        # to "" (the OpenAI embeddings endpoint) rather than the chat base_url —
+        # otherwise embed calls would be sent to a chat-only host and fail
+        # ("Document retrieval failed"). The embedding key defaults to the
+        # provider's embedding_api_key, else the chat key only when they share an
+        # endpoint (both empty => OpenAI default).
+        self._embedding_model = (
+            cfg.get("embedding_model") or getattr(settings, "EMBEDDING_MODEL", None)
+        )
+        self._embedding_base_url = (cfg.get("embedding_base_url") or "") or None
+        self._embedding_api_key = (
+            cfg.get("embedding_api_key")
+            # Only reuse the chat key when the chat endpoint IS the embedding
+            # endpoint (same base_url, incl. both-default/OpenAI).
+            or (self._api_key if self._embedding_base_url == self.base_url else None)
+        ) or None
+
         self._client = None  # lazy; NOT built at import or construct time
         self._embeddings = None  # lazy; NOT built at import or construct time
 
@@ -53,7 +94,7 @@ class LLMClient:
 
     def _ensure_embeddings(self):
         if self._embeddings is None:
-            if not self._api_key:
+            if not self._embedding_api_key:
                 raise LLMConfigurationError(
                     "LLM API key required to embed documents."
                 )
@@ -62,9 +103,9 @@ class LLMClient:
             from langchain_openai import OpenAIEmbeddings
 
             self._embeddings = OpenAIEmbeddings(
-                model=settings.EMBEDDING_MODEL,
-                api_key=self._api_key,
-                base_url=self.base_url or None,
+                model=self._embedding_model,
+                api_key=self._embedding_api_key,
+                base_url=self._embedding_base_url,
             )
         return self._embeddings
 
@@ -89,7 +130,7 @@ class LLMClient:
             logger.error(
                 "LLM embedding call failed (provider=%s model=%s)",
                 self.provider,
-                settings.EMBEDDING_MODEL,
+                self._embedding_model,
             )
             raise LLMBackendError("LLM embedding call failed.") from exc
 
@@ -101,7 +142,7 @@ class LLMClient:
             logger.error(
                 "LLM embedding call failed (provider=%s model=%s)",
                 self.provider,
-                settings.EMBEDDING_MODEL,
+                self._embedding_model,
             )
             raise LLMBackendError("LLM embedding call failed.") from exc
 
@@ -159,10 +200,11 @@ class LLMClient:
         return str(content)
 
 
-def get_llm_client() -> LLMClient:
-    """Return an LLMClient. The single injectable seam services depend on.
+def get_llm_client(provider: str | None = None) -> LLMClient:
+    """Return an LLMClient for ``provider`` (default: settings.LLM_PROVIDER).
 
-    Builds no backend at import or call time (LLMClient is lazy); tests patch
-    this function to inject a fake client.
+    Pass provider="openai" or "deepseek" to switch the WHOLE client (chat model,
+    embedding model, base_url, key) for that call. Builds no backend at import or
+    call time (LLMClient is lazy); tests patch this function to inject a fake.
     """
-    return LLMClient()
+    return LLMClient(provider=provider)

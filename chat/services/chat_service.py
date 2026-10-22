@@ -1,23 +1,3 @@
-"""Chat orchestration service (the LLM dependency-inversion seam).
-
-``ChatService`` depends on the ``LLMClient`` *contract*, injected via its
-constructor. The default is a real ``LLMClient`` whose backend/key is only
-touched on the first ``complete``/``generate_structured`` call, so constructing
-a ``ChatService`` never requires a key. Tests inject a fake client.
-
-Two surfaces live here side by side:
-
-* ``ask``/``summarize``/``_session_messages`` — the existing turn-pair
-  (``Conversation``) flow driven by the DRF API and in-admin chat.
-* ``process_message`` + its helpers — the ported RAG pipeline (ported/adapted
-  from the OLD ``chat/services.py``): document-grounded retrieval via
-  ``documents.services.find_relevant_chunks``, a Pydantic-validated structured
-  completion carrying an optional chart, a context-aware repeated-query cache,
-  a deterministic CSV chart fallback, and ``Message`` persistence. It is
-  additive — it never changes the ``ask``/``summarize`` behaviour the existing
-  23 chat tests pin.
-"""
-
 from __future__ import annotations
 
 import csv
