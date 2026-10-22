@@ -95,7 +95,7 @@
     body.chat-fixed-viewport #chat-sessions-head {
       flex: 0 0 auto;
     }
-  </style>
+</style>
 {% endblock %}
 
 {% block content %}
@@ -300,7 +300,7 @@
         inputEl.placeholder = "Type a message...";
         if (focusInput) {
           window.setTimeout(function () {
-            try { inputEl.focus(); } catch (e) { /* no-op */ }
+            try { inputEl.focus(); } catch (e) {  }
           }, 0);
         }
       }
@@ -734,7 +734,7 @@
           }),
           credentials: "same-origin",
           body: body.toString()
-        }).catch(function () { /* non-blocking */ });
+        }).catch(function () {  });
       }
 
       companySel.addEventListener("change", function () {
@@ -781,9 +781,8 @@
         const body = new URLSearchParams();
         body.append("question", question);
         body.append("model_name", modelSel.value);
-        // Send the selected option's provider too so the server routes to the
-        // right backend even when a model id is ambiguous. Falls back to the
-        // resolver server-side when absent.
+
+
         const selOpt = modelSel.selectedOptions && modelSel.selectedOptions[0];
         body.append("provider", (selOpt && selOpt.getAttribute("data-provider")) || "");
         pendingAttachmentIds.forEach(function (id) { body.append("attachment_ids", id); });
@@ -822,7 +821,7 @@
           .then(function () {
             inputEl.disabled = false;
             sendBtn.disabled = false;
-            try { inputEl.focus(); } catch (e) { /* no-op */ }
+            try { inputEl.focus(); } catch (e) {  }
           });
       }
 
@@ -926,9 +925,8 @@
           .then(function (data) {
             if (!data || !Array.isArray(data.models) || !data.models.length) { return; }
             clear(modelSel);
-            // models_json now returns objects {id, label, provider}. The option
-            // value is the model id; its provider rides along on data-provider
-            // so postMessage can send both (disambiguates a shared model id).
+
+
             data.models.forEach(function (m) {
               const opt = document.createElement("option");
               opt.value = m.id;
@@ -939,7 +937,7 @@
             });
             modelSel.title = "Model (" + (data.default_provider || data.provider || "") + ")";
           })
-          .catch(function () { /* leave the select empty on failure */ });
+          .catch(function () {  });
       }
 
       loadModels();
@@ -958,6 +956,6 @@
         });
       });
     })();
-  </script>
+</script>
 </div>
 {% endblock %}

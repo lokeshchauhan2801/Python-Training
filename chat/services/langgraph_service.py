@@ -23,14 +23,10 @@ from pydantic import Field
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Tool seam: a ``slug -> handler(ctx) -> ToolResult`` registry.               #
-# --------------------------------------------------------------------------- #
 @dataclass
 class ToolContext:
-    # Everything a handler needs, passed in by the runtime so handlers never
-    # construct these seams themselves. `tool` is the agents.models.Tool row,
-    # `llm` is a basics.llm.LLMClient, `langfuse` is the import-safe wrapper.
+
+
     user: object
     company: object
     conversation: object
@@ -45,9 +41,8 @@ class ToolContext:
 
 @dataclass
 class ToolResult:
-    # `tool_used` is the slug stamped onto Message.metadata by the runtime.
-    # `ok=False` + `error` is a graceful user-visible failure (e.g. the
-    # web_search stub), not an exception — the turn still produces a message.
+
+
     content: str
     citations: list = field(default_factory=list)
     chart_data: dict | None = None
@@ -56,8 +51,6 @@ class ToolResult:
     error: str | None = None
 
 
-# Module-level registry populated by @register at module import time (the five
-# handlers below run their decorator as this module loads).
 _REGISTRY: dict[str, Callable[["ToolContext"], "ToolResult"]] = {}
 
 
@@ -81,17 +74,13 @@ def available_slugs() -> set[str]:
     return set(_REGISTRY.keys())
 
 
-# --------------------------------------------------------------------------- #
-# The five built-in tool handlers. Each lazy-imports its chat/model seams so   #
-# this module stays import-safe (no chat.models / agents at module load).      #
-# --------------------------------------------------------------------------- #
 @register("general_assistant")
 def _general_assistant(ctx: ToolContext) -> ToolResult:
     """``general_assistant`` tool — a plain LLM answer, no retrieval."""
-    # Lazy imports keep this module import-safe and cycle-free.
+
     from chat.models import Message
 
-    # Exclude system rows, exactly as the RAG path does.
+
     history = (
         ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM)
         .order_by("created_at")
@@ -99,8 +88,7 @@ def _general_assistant(ctx: ToolContext) -> ToolResult:
     messages = [{"role": m.role, "content": m.content} for m in history]
     messages.append({"role": "user", "content": ctx.message_text})
 
-    # Optional Langfuse system prompt; empty fallback => behave exactly as
-    # before (no system message prepended).
+
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_general_assistant"
     sys = ctx.langfuse.get_prompt(name, fallback="") if ctx.langfuse else ""
     if sys.strip():
@@ -113,9 +101,8 @@ def _general_assistant(ctx: ToolContext) -> ToolResult:
 @register("document_search")
 def _document_search(ctx: ToolContext) -> ToolResult:
     """``document_search`` tool — the RAG/document path reused as a tool."""
-    # Reuse ChatService internals so behaviour matches the RAG pipeline exactly
-    # (_find_relevant_chunks owns the empty-collection guard + retrieval-error
-    # wrapping). Lazy import keeps this module import-safe.
+
+
     from chat.services import ChatCompletion, ChatService
 
     service = ChatService()
@@ -130,8 +117,8 @@ def _document_search(ctx: ToolContext) -> ToolResult:
         ctx.message_text,
         chunks,
     )
-    # Optional Langfuse preamble prepended to the RAG prompt; empty fallback
-    # leaves the structured prompt untouched (today's behaviour).
+
+
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_document_search"
     pre = ctx.langfuse.get_prompt(name, fallback="") if ctx.langfuse else ""
     if pre.strip():
@@ -151,8 +138,8 @@ def _document_search(ctx: ToolContext) -> ToolResult:
 @register("chat_summarise")
 def _chat_summarise(ctx: ToolContext) -> ToolResult:
     """``chat_summarise`` tool — summarise the conversation's prior history."""
-    # Lazy imports keep this module import-safe. Summarise the Message rows
-    # (not Conversation.turns, which is empty on the chat path).
+
+
     from chat.models import Message
     from chat.services import ChatService, _SUMMARY_SYSTEM_PROMPT
 
@@ -164,8 +151,7 @@ def _chat_summarise(ctx: ToolContext) -> ToolResult:
     )
     conversation_context = service._build_conversation_context(history)
 
-    # Resolve the system prompt from Langfuse, falling back to the hard-coded
-    # prompt when the tool/langfuse seam is absent or unconfigured.
+
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
     sys = (
         ctx.langfuse.get_prompt(name, fallback=_SUMMARY_SYSTEM_PROMPT)
@@ -174,8 +160,8 @@ def _chat_summarise(ctx: ToolContext) -> ToolResult:
     )
 
     try:
-        # A managed prompt may template the context in itself; if so, inline it
-        # and send a single system message. Otherwise keep today's shape.
+
+
         if "{{conversation}}" in sys or "{{history}}" in sys:
             system_content = sys.replace(
                 "{{conversation}}", conversation_context
@@ -186,7 +172,7 @@ def _chat_summarise(ctx: ToolContext) -> ToolResult:
                 {"role": "system", "content": sys},
                 {"role": "user", "content": conversation_context},
             ]
-    except Exception:  # noqa: BLE001 - any substitution issue degrades to fallback
+    except Exception:
         messages = [
             {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
             {"role": "user", "content": conversation_context},
@@ -199,8 +185,8 @@ def _chat_summarise(ctx: ToolContext) -> ToolResult:
 @register("web_search")
 def _web_search(ctx: ToolContext) -> ToolResult:
     """``web_search`` tool — STUB seam for a real provider (wire it in here)."""
-    # Graceful failure (ok=False), not an exception, so the turn still produces
-    # a message with the web_search badge. Wire a real provider here later.
+
+
     return ToolResult(
         content="Web search is not configured on this server.",
         ok=False,
@@ -212,10 +198,10 @@ def _web_search(ctx: ToolContext) -> ToolResult:
 @register("prompt_tool")
 def _prompt_tool(ctx: ToolContext) -> ToolResult:
     """``prompt_tool`` — generic prompt-only tool driven by a Langfuse prompt."""
-    # Lazy imports keep this module import-safe and cycle-free.
+
     from chat.models import Message
 
-    # Same history + current turn as general_assistant.
+
     history = (
         ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM)
         .order_by("created_at")
@@ -223,41 +209,32 @@ def _prompt_tool(ctx: ToolContext) -> ToolResult:
     messages = [{"role": m.role, "content": m.content} for m in history]
     messages.append({"role": "user", "content": ctx.message_text})
 
-    # Force the tool's Langfuse prompt as the system message. An empty prompt
-    # (unconfigured Langfuse, blank prompt_name, or a blank managed prompt)
-    # degrades to EXACT general_assistant behaviour: no system message.
+
     name = (ctx.tool.prompt_name if ctx.tool else "") or ""
     sys = ctx.langfuse.get_prompt(name, fallback="") if (ctx.langfuse and name) else ""
     if sys.strip():
         messages.insert(0, {"role": "system", "content": sys})
 
     content = ctx.llm.complete(messages)
-    # Record the resolving slug when known so metadata reflects the real tool.
+
     used = (ctx.tool.slug if ctx.tool and ctx.tool.slug else "prompt_tool")
     return ToolResult(content=content, tool_used=used)
 
 
-# --------------------------------------------------------------------------- #
-# GraphState: the plain TypedDict threaded through the compiled StateGraph.    #
-# --------------------------------------------------------------------------- #
 class GraphState(TypedDict, total=False):
-    message_text: str  # current user turn
-    history_text: str  # condensed conversation context for prompts
-    enabled_tools: list[str]  # slugs the router may pick (already filtered)
-    selected_tool: str | None  # slug the router chose (None before routing)
-    route_reason: str  # short human reason the router recorded
-    result: ToolResult | None  # the executed tool's result
-    visited: list[str]  # node slugs entered, for the cycle guard
-    hops: int  # total node entries, for the MAX_HOPS guard
+    message_text: str
+    history_text: str
+    enabled_tools: list[str]
+    selected_tool: str | None
+    route_reason: str
+    result: ToolResult | None
+    visited: list[str]
+    hops: int
 
 
-# The sentinel the router returns to answer directly (no specialised tool). It
-# runs the ``general_assistant`` handler.
 DIRECT = "__direct__"
 _DIRECT_HANDLER_SLUG = "general_assistant"
 
-# Local fallback router prompt used when Langfuse has no managed prompt (or is
-# not configured). ``{question}``/``{tools}``/``{history}`` are filled in.
 _FALLBACK_ROUTER_PROMPT = (
     "You are a router that selects the single best tool to answer the user's "
     "message, or answers directly when no tool fits.\n"
@@ -289,9 +266,7 @@ class LangGraphChatService:
         self._chat = chat_service
         self._langfuse = langfuse
 
-    # ------------------------------------------------------------------ #
-    # Public entry point — mirrors ChatService.process_message's shape.  #
-    # ------------------------------------------------------------------ #
+
     def process_message(
         self,
         user,
@@ -323,14 +298,12 @@ class LangGraphChatService:
 
         llm = self._chat._llm
 
-        # Condensed history for prompts — assembled exactly like the RAG path
-        # (non-system messages, oldest first), BEFORE the current turn is saved.
+
         history_text = self._history_text(conversation)
 
         step_node, enabled_tools = self._resolve_step_and_tools(company)
 
-        # Build + run the graph. Known/mapped failures surface as the existing
-        # exception types; anything unexpected becomes a ChatProviderError (502).
+
         try:
             result = self._run_graph(
                 user=user,
@@ -351,7 +324,7 @@ class LangGraphChatService:
             ChatRetrievalError,
         ):
             raise
-        except Exception as exc:  # noqa: BLE001 - unexpected tool/graph failure
+        except Exception as exc:
             logger.exception("LangGraph turn failed unexpectedly")
             raise ChatProviderError(
                 "The LLM provider failed to generate a response."
@@ -362,12 +335,10 @@ class LangGraphChatService:
         if not content:
             raise ChatProviderError("The LLM provider returned an empty response.")
 
-        # Stamp the model that ACTUALLY answered. `send` passes the resolved
-        # model id as `model_name`; if it is ever omitted, fall back to the
-        # resolved chat client's model (never leave the row null).
+
         assistant_model_name = model_name or getattr(llm, "model", None)
 
-        # Persist the user + assistant pair AND the metadata atomically.
+
         with transaction.atomic():
             convo = conversation
             user_message = self._chat.create_message(
@@ -398,9 +369,8 @@ class LangGraphChatService:
                 actor=user,
                 update_fields=["metadata", "updated_at", "updated_by"],
             )
-            # First-message retitle (BUG 2). The graph path has no structured
-            # title, so the title comes from message_text[:50] (documented
-            # difference from the RAG path).
+
+
             retitle_if_default(
                 convo,
                 llm_title=None,
@@ -409,9 +379,7 @@ class LangGraphChatService:
             )
         return assistant_message
 
-    # ------------------------------------------------------------------ #
-    # Graph construction + execution.                                    #
-    # ------------------------------------------------------------------ #
+
     def _run_graph(
         self,
         *,
@@ -433,13 +401,13 @@ class LangGraphChatService:
         router's choice/execution survives outside the LangGraph state (which
         only carries JSON-ish scalars).
         """
-        # agents.models is read lazily; the tool seam/registry is local to this
-        # module.
+
+
         from agents.models import AgentEdge, AgentNode
 
         node_slug = step_node.slug
 
-        # Captured outcome, filled by the router node when it runs the handler.
+
         outcome = {
             "tool_result": None,
             "tool_used": "",
@@ -470,9 +438,8 @@ class LangGraphChatService:
             handler = get_handler(handler_slug)
             tool_row = tool_rows.get(handler_slug)
             if handler is None:
-                # An unregistered slug that is flagged prompt_only runs through
-                # the generic prompt_tool handler (its Langfuse prompt_name
-                # drives the answer); otherwise fall back to the direct handler.
+
+
                 prompt_only = (
                     tool_row is not None
                     and isinstance(tool_row.config, dict)
@@ -482,8 +449,8 @@ class LangGraphChatService:
                     "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
                 )
             result = handler(_ctx(tool_row))
-            # Stamp the slug the ROUTER selected (so __direct__ records
-            # general_assistant, web_search records web_search, etc.).
+
+
             if not result.tool_used:
                 result.tool_used = handler_slug
             return result
@@ -509,7 +476,7 @@ class LangGraphChatService:
                 "hops": state.get("hops", 0) + 1,
             }
 
-        # Build the generic graph from the active graph's node/edge rows.
+
         graph = step_node.graph
         nodes = list(
             AgentNode.objects.filter(graph=graph).order_by("slug")
@@ -539,9 +506,7 @@ class LangGraphChatService:
             }
         )
 
-        # If the router node never executed (degenerate graph with no STEP in
-        # the traversal), fall back to a direct answer so the turn still yields
-        # a message rather than failing.
+
         if outcome["tool_result"] is None:
             result = _execute(DIRECT)
             outcome["tool_result"] = result
@@ -560,18 +525,13 @@ class LangGraphChatService:
         """
         from langgraph.graph import END, START, StateGraph
 
-        # START/END DB nodes are STRUCTURAL markers, not runnable nodes. Map
-        # them to LangGraph's START/END sentinels instead of registering them as
-        # graph nodes — registering an "end" node and ALSO routing to the END
-        # sentinel made LangGraph reject "end" as an unknown branch target
-        # ("At 'chat_agent' node, '_choose' branch found unknown target 'end'").
-        # Only STEP-kind nodes become real graph nodes.
+
         kind_by_slug = {n.slug: n.kind for n in nodes}
         start_slug = next((n.slug for n in nodes if n.kind == "start"), None)
 
         def _resolve(slug):
-            # Map a DB slug to a LangGraph target: start-kind -> START,
-            # end-kind -> END, otherwise the slug itself (a STEP node).
+
+
             kind = kind_by_slug.get(slug)
             if kind == "start":
                 return START
@@ -583,8 +543,7 @@ class LangGraphChatService:
         node_count = max(len(step_slugs), 1)
         max_hops = 2 * node_count + 1
 
-        # Adjacency over RESOLVED targets (START/END sentinels or step slugs),
-        # in deterministic (source, target) order. Keyed by resolved source.
+
         adjacency: dict[object, list[object]] = {}
         for edge in edges:
             src = _resolve(edge.source.slug)
@@ -608,12 +567,11 @@ class LangGraphChatService:
 
             return _node
 
-        # Register only the STEP nodes.
+
         for slug in step_slugs:
             builder.add_node(slug, _make_node(slug))
 
-        # Entry edge: START -> the first step the start node points at, else the
-        # first step node, else straight to END (degenerate graph).
+
         start_targets = adjacency.get(START, [])
         entry = next((t for t in start_targets if t in step_slugs), None)
         if entry is None:
@@ -628,15 +586,14 @@ class LangGraphChatService:
                     return END
                 visited = state.get("visited") or []
                 for tgt in targets:
-                    # END is always takeable; a step target only if unvisited.
+
                     if tgt == END or tgt not in visited:
                         return tgt
                 return END
 
             return _choose
 
-        # Conditional edges only FROM step nodes. The mapping's keys/values are
-        # the resolved targets (step slugs and the END sentinel), all valid.
+
         for slug in step_slugs:
             targets = adjacency.get(slug, [])
             mapping = {t: t for t in targets if t in step_slugs}
@@ -645,9 +602,7 @@ class LangGraphChatService:
 
         return builder.compile()
 
-    # ------------------------------------------------------------------ #
-    # The LLM router.                                                    #
-    # ------------------------------------------------------------------ #
+
     def _route(
         self,
         *,
@@ -689,7 +644,7 @@ class LangGraphChatService:
                 history=history_text or "(no prior conversation)",
             )
         except (KeyError, IndexError):
-            # A managed prompt may use different placeholders; fall back locally.
+
             router_prompt = _FALLBACK_ROUTER_PROMPT.format(
                 question=message_text,
                 tools=tools_desc,
@@ -722,9 +677,7 @@ class LangGraphChatService:
             )
         return (selected, reason, trace_id)
 
-    # ------------------------------------------------------------------ #
-    # Helpers.                                                           #
-    # ------------------------------------------------------------------ #
+
     def _resolve_step_and_tools(self, company):
         """Return ``(step_node, enabled_tools)`` for the company's active graph.
 
@@ -749,8 +702,8 @@ class LangGraphChatService:
         enabled = []
         seen = set()
         for tool in step_node.tools.filter(is_enabled=True):
-            # Keep a prompt-only tool even when its slug has no registered
-            # handler: the runtime routes it through prompt_tool below.
+
+
             prompt_only = (
                 isinstance(tool.config, dict)
                 and tool.config.get("kind") == "prompt_only"
