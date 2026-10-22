@@ -524,21 +524,30 @@ class LangGraphChatService:
         """
         from langgraph.graph import END, START, StateGraph
 
-        node_slugs = [n.slug for n in nodes]
-        node_count = max(len(node_slugs), 1)
+
+        kind_by_slug = {n.slug: n.kind for n in nodes}
+        start_slug = next((n.slug for n in nodes if n.kind == "start"), None)
+
+        def _resolve(slug):
+
+
+            kind = kind_by_slug.get(slug)
+            if kind == "start":
+                return START
+            if kind == "end":
+                return END
+            return slug
+
+        step_slugs = [n.slug for n in nodes if kind_by_slug.get(n.slug) == "step"]
+        node_count = max(len(step_slugs), 1)
         max_hops = 2 * node_count + 1
 
 
-        adjacency: dict[str, list[str]] = {s: [] for s in node_slugs}
+        adjacency: dict[object, list[object]] = {}
         for edge in edges:
-            src = edge.source.slug
-            tgt = edge.target.slug
-            if src in adjacency:
-                adjacency[src].append(tgt)
-
-        start_slug = next(
-            (n.slug for n in nodes if n.kind == "start"), None
-        )
+            src = _resolve(edge.source.slug)
+            tgt = _resolve(edge.target.slug)
+            adjacency.setdefault(src, []).append(tgt)
 
         builder = StateGraph(GraphState)
 
@@ -546,8 +555,6 @@ class LangGraphChatService:
             is_router = slug == step_slug
 
             def _node(state):
-
-
                 state = dict(state)
                 state["_current"] = slug
                 if is_router:
@@ -559,13 +566,16 @@ class LangGraphChatService:
 
             return _node
 
-        for slug in node_slugs:
+
+        for slug in step_slugs:
             builder.add_node(slug, _make_node(slug))
 
-        if start_slug and start_slug in node_slugs:
-            builder.add_edge(START, start_slug)
-        elif node_slugs:
-            builder.add_edge(START, node_slugs[0])
+
+        start_targets = adjacency.get(START, [])
+        entry = next((t for t in start_targets if t in step_slugs), None)
+        if entry is None:
+            entry = step_slugs[0] if step_slugs else END
+        builder.add_edge(START, entry)
 
         def _make_choice(slug):
             targets = adjacency.get(slug, [])
@@ -575,15 +585,17 @@ class LangGraphChatService:
                     return END
                 visited = state.get("visited") or []
                 for tgt in targets:
-                    if tgt not in visited:
+
+                    if tgt == END or tgt not in visited:
                         return tgt
                 return END
 
             return _choose
 
-        for slug in node_slugs:
+
+        for slug in step_slugs:
             targets = adjacency.get(slug, [])
-            mapping = {t: t for t in targets}
+            mapping = {t: t for t in targets if t in step_slugs}
             mapping[END] = END
             builder.add_conditional_edges(slug, _make_choice(slug), mapping)
 

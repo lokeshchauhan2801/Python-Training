@@ -67,10 +67,36 @@ class LLMClient:
         self._client = None
         self._embeddings = None
 
+    @staticmethod
+    def _clear_empty_base_url_env():
+        """Drop empty OpenAI base-url env vars before building an SDK client.
+
+        The openai SDK reads ``OPENAI_BASE_URL`` / ``OPENAI_API_BASE`` from the
+        environment as a default base URL. When one of these is set to an EMPTY
+        string (e.g. ``OPENAI_BASE_URL=`` in a .env loaded via python-dotenv),
+        the SDK treats ``""`` as a configured endpoint and hands it to httpx,
+        which rejects it with ``UnsupportedProtocol: Request URL is missing an
+        'http://' or 'https://' protocol.`` — breaking EVERY embedding/chat call
+        that relies on the provider default (base_url=None), notably the
+        embedding path under both openai and deepseek.
+
+        We pass an explicit ``base_url`` to the client anyway, but when that
+        value is ``None`` the SDK still consults the env var, so an empty env var
+        wins over our intended default. Removing only the EMPTY values (never a
+        real URL a user deliberately exported) makes our resolved base_url the
+        single source of truth.
+        """
+        import os
+
+        for name in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            if os.environ.get(name, None) == "":
+                del os.environ[name]
+
     def _ensure_client(self):
         if self._client is None:
             if not self._api_key:
                 raise LLMConfigurationError("No LLM API key configured.")
+            self._clear_empty_base_url_env()
 
 
             from langchain_openai import ChatOpenAI
@@ -88,6 +114,7 @@ class LLMClient:
                 raise LLMConfigurationError(
                     "LLM API key required to embed documents."
                 )
+            self._clear_empty_base_url_env()
 
 
             from langchain_openai import OpenAIEmbeddings
@@ -137,11 +164,51 @@ class LLMClient:
             raise LLMBackendError("LLM embedding call failed.") from exc
 
     def generate_structured(self, prompt, schema):
-        """Return a ``schema`` instance validated from a structured completion."""
+        """Return a ``schema`` instance validated from a structured completion.
+
+        Tries the provider's NATIVE structured output first (OpenAI function /
+        json-schema via ``with_structured_output``). Providers without that
+        capability — notably DeepSeek's ``deepseek-chat`` over the OpenAI-compat
+        shim — raise there; for them we FALL BACK to a plain completion that
+        appends the schema and parses JSON out of the text. So structured output
+        works across providers without the caller changing anything.
+        """
         client = self._ensure_client()
         try:
             structured_client = client.with_structured_output(schema)
             response = structured_client.invoke(prompt)
+            if isinstance(response, schema):
+                return response
+            return schema.model_validate(response)
+        except Exception as native_exc:
+            logger.info(
+                "native structured output unavailable (provider=%s model=%s); "
+                "falling back to prompt+parse",
+                self.provider,
+                self.model,
+            )
+            return self._structured_via_prompt(prompt, schema, native_exc)
+
+    def _structured_via_prompt(self, prompt, schema, native_exc):
+        """Prompt-and-parse structured output for providers without native support."""
+        import json
+        import re
+
+        try:
+            json_schema = json.dumps(schema.model_json_schema())
+        except Exception:
+            json_schema = "{}"
+
+        text_prompt = prompt if isinstance(prompt, str) else str(prompt)
+        instruction = (
+            text_prompt
+            + "\n\nReturn ONLY a single JSON object (no prose, no code fences) "
+            "that validates against this JSON schema:\n" + json_schema
+        )
+        try:
+            raw = self.complete([{"role": "user", "content": instruction}])
+        except LLMError:
+            raise
         except Exception as exc:
             logger.error(
                 "LLM structured call failed (provider=%s model=%s)",
@@ -149,9 +216,29 @@ class LLMClient:
                 self.model,
             )
             raise LLMBackendError("LLM structured call failed.") from exc
-        if isinstance(response, schema):
-            return response
-        return schema.model_validate(response)
+
+
+        candidate = (raw or "").strip()
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", candidate, re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1).strip()
+        if not candidate.startswith("{"):
+            brace = candidate.find("{")
+            if brace != -1:
+                candidate = candidate[brace:]
+        try:
+            data = json.loads(candidate)
+            return schema.model_validate(data)
+        except Exception as parse_exc:
+            logger.error(
+                "LLM structured call failed (provider=%s model=%s): could not "
+                "parse JSON from response",
+                self.provider,
+                self.model,
+            )
+            raise LLMBackendError(
+                "LLM structured call failed."
+            ) from (parse_exc or native_exc)
 
     @staticmethod
     def _to_lc_messages(messages):
