@@ -47,7 +47,7 @@ class DocumentViewSet(ScopedModelViewSet):
         try:
             process_document(document)
         except (DocumentValidationError, DocumentIndexError):
-            # The service persisted status=failed with a user-facing message.
+
             document.refresh_from_db()
         return Response(
             self.get_serializer(document).data, status=status.HTTP_200_OK

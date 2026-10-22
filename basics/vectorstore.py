@@ -16,9 +16,6 @@ from chromadb.errors import InvalidCollectionException, NotFoundError
 from chromadb.telemetry.product import ProductTelemetryClient, ProductTelemetryEvent
 from overrides import override
 
-# A read against a collection that was never created (no documents have been
-# indexed yet) is a NORMAL "zero hits" case, not an error. Chroma signals the
-# missing collection with one of these depending on the client version.
 _MISSING_COLLECTION_ERRORS = (InvalidCollectionException, NotFoundError, ValueError)
 
 
@@ -84,9 +81,8 @@ class ChromaVectorStore:
         return self._client
 
     def add_documents(self, documents: list[dict], collection: str) -> list[str]:
-        # Callers pass a deterministic per-chunk id (``f"{document_id}:{chunk_index}"``);
-        # ``col.add(ids=...)`` upserts by id, so re-adding the same ids overwrites
-        # in place (no duplicate vectors).
+
+
         col = self.client.get_or_create_collection(
             collection,
             metadata={"hnsw:space": "cosine"},
@@ -108,8 +104,8 @@ class ChromaVectorStore:
         try:
             col = self.client.get_collection(collection)
         except _MISSING_COLLECTION_ERRORS:
-            # Collection never created (no documents indexed yet) => no hits.
-            # Do NOT auto-create the collection on a read.
+
+
             return []
         if col.count() == 0:
             return []
@@ -136,7 +132,7 @@ class ChromaVectorStore:
         try:
             col = self.client.get_collection(collection)
         except _MISSING_COLLECTION_ERRORS:
-            # Missing collection => no stored embeddings.
+
             return {}
         result = col.get(ids=ids, include=["embeddings"])
         return {

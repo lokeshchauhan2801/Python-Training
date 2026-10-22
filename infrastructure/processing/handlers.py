@@ -31,8 +31,8 @@ def run_document_processing(surface, document_id, backend, company_id="", user_i
     parity with the event payload and the (future) scrapper surface.
     """
     if surface == SURFACE_SCRAPPER:
-        # NEW scrapper has no QueueMessage/run_scrapper_processing yet; the
-        # surface abstraction is kept but not wired in Phase 4.
+
+
         raise ValueError("scrapper surface not wired in Phase 4")
 
     from documents.models import Document
@@ -70,7 +70,7 @@ def run_with_retry(surface, document_id, backend, company_id="", user_id=""):
                 company_id=company_id,
                 user_id=user_id,
             )
-        except Exception as exc:  # noqa: BLE001 — bounded retry over any failure
+        except Exception as exc:
             last_exc = exc
             logger.warning(
                 "Processing attempt %s/%s failed for %s/%s: %s",
@@ -96,7 +96,7 @@ def _record_attempt(surface, document_id, attempt):
         from documents.models import Document
 
         Document.objects.filter(pk=document_id).update(processing_attempts=attempt)
-    except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask processing errors
+    except Exception as exc:
         logger.warning(
             "Could not record attempt %s for %s/%s: %s",
             attempt,

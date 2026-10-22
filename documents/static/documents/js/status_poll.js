@@ -1,12 +1,4 @@
-/*
- * Documents completion-notification poller.
- *
- * Polls the scoped status endpoint every few seconds and shows a dismissible
- * toast when a document flips to "ready" or "failed", then stops tracking that
- * id. GET only (no CSRF needed). All DOM is built with createElement/textContent
- * (never innerHTML) so document titles/errors can never be interpreted as
- * markup. The endpoint URL is read from a data attribute set by the template.
- */
+
 (function () {
   "use strict";
 
@@ -21,7 +13,7 @@
 
   var POLL_MS = 4000;
   var TERMINAL = { ready: true, failed: true };
-  // Last status we saw per document id, so we only toast on a transition.
+
   var lastStatus = {};
   var firstPass = true;
 
@@ -151,8 +143,8 @@
           updateProgress(doc);
           var prev = lastStatus[doc.id];
           lastStatus[doc.id] = doc.status;
-          // On the first pass we only seed the baseline so we don't toast for
-          // documents that were already terminal before the page loaded.
+
+
           if (firstPass) {
             return;
           }
@@ -163,7 +155,7 @@
         firstPass = false;
       })
       .catch(function () {
-        /* transient network error — the next tick retries */
+
       });
   }
 

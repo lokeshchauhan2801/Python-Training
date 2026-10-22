@@ -16,7 +16,7 @@ class LangfuseClient:
         self._public_key = public_key
         self._base_url = base_url
         self._configured = bool(secret_key and public_key and base_url)
-        self._client = None  # lazy; SDK is NOT imported until first use
+        self._client = None
 
     @property
     def configured(self) -> bool:
@@ -32,14 +32,14 @@ class LangfuseClient:
             return None
         if self._client is None:
             try:
-                import langfuse  # lazy import; only when fully configured
+                import langfuse
 
                 self._client = langfuse.Langfuse(
                     public_key=self._public_key,
                     secret_key=self._secret_key,
                     host=self._base_url,
                 )
-            except Exception:  # noqa: BLE001 - SDK optional; degrade gracefully
+            except Exception:
                 logger.debug(
                     "langfuse SDK unavailable or failed to initialise; "
                     "using local prompt fallback"
@@ -58,10 +58,10 @@ class LangfuseClient:
             return fallback
         try:
             prompt = client.get_prompt(name)
-        except Exception:  # noqa: BLE001 - absent prompt / SDK error -> fallback
+        except Exception:
             logger.debug("langfuse get_prompt(%s) failed; using fallback", name)
             return fallback
-        # v2 prompts expose .compile()/.prompt; v3 may differ. Be tolerant.
+
         for attr in ("compile", "get_langchain_prompt"):
             method = getattr(prompt, attr, None)
             if callable(method):
@@ -69,7 +69,7 @@ class LangfuseClient:
                     compiled = method()
                     if isinstance(compiled, str):
                         return compiled
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
         text = getattr(prompt, "prompt", None)
         if isinstance(text, str):
@@ -97,7 +97,7 @@ class LangfuseClient:
                 labels=list(labels) if labels is not None else ["production"],
             )
             return True
-        except Exception:  # noqa: BLE001 - network/SDK error -> caller reports
+        except Exception:
             logger.debug("langfuse create_prompt(%s) failed", name)
             return False
 
@@ -121,16 +121,16 @@ class LangfuseClient:
             if callable(start):
                 try:
                     span = start(name=name, **kw)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     span = None
             yield span
         finally:
-            # Best-effort close for SDKs that require it; never raise.
+
             end = getattr(span, "end", None)
             if callable(end):
                 try:
                     end()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
     def flush(self) -> None:
@@ -142,7 +142,7 @@ class LangfuseClient:
         if callable(flush):
             try:
                 flush()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
 

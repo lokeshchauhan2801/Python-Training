@@ -33,7 +33,7 @@
       }
       #app { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 
-      /* Top workflow bar */
+
       #toolbar {
         display: flex;
         align-items: center;
@@ -70,7 +70,7 @@
 
       #body { display: flex; flex: 1 1 auto; min-height: 0; }
 
-      /* Canvas */
+
       #canvas-wrap { position: relative; flex: 1 1 auto; min-width: 0; overflow: auto; }
       #canvas {
         position: relative;
@@ -109,25 +109,19 @@
       .node .tools { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
       .node .tool-chip { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
       .node .tool-chip .pill { font-size: 9px; padding: 1px 6px; border-radius: 999px; background: #26224a; color: #c3b7ff; }
-      /* Ports are pinned at a FIXED top offset (40px) that matches the edge
-         attach point in portPoints() (p.y + 40). Previously the CSS used
-         top:50% (center of a tall STEP node) while edges attached near the top,
-         so the dot and the thread were in different places and the input dot
-         looked missing. A larger dot + an invisible padded hit area make it easy
-         to grab and drop onto. */
+
       .node .dot {
         position: absolute; right: -9px; top: 40px; transform: translateY(-50%);
         width: 16px; height: 16px; border-radius: 50%; background: var(--accent-2);
         border: 2px solid #0a0f1e; cursor: crosshair; z-index: 3;
         box-shadow: 0 0 0 3px rgba(79,124,255,0.25);
       }
-      /* Invisible 12px hit halo so the dot is forgiving to grab. */
+
       .node .dot::after {
         content: ""; position: absolute; inset: -12px; border-radius: 50%;
       }
       .node .dot.out:hover { background: #7c5cff; box-shadow: 0 0 0 4px rgba(124,92,255,0.4); }
-      /* The INPUT port — clearly visible on the left edge, a ring so it reads
-         as a drop target. */
+
       .node .dot.in {
         left: -9px; right: auto; cursor: default;
         background: #0a0f1e; border-color: var(--accent-2);
@@ -135,7 +129,7 @@
       }
       .node .inactive-badge { font-size: 9px; color: #0a0f1e; background: var(--muted); padding: 1px 6px; border-radius: 999px; }
 
-      /* Right inspector */
+
       #inspector {
         width: 320px;
         flex: 0 0 320px;
@@ -166,7 +160,7 @@
       #status.err { background: #2a1420; border-color: var(--danger); color: #ffd4d9; display: block; }
       #status.ok { background: #11271c; border-color: var(--ok); color: #c9ffe3; display: block; }
       code { font-family: ui-monospace, Menlo, monospace; background: #0a0f1e; padding: 1px 5px; border-radius: 5px; }
-    </style>
+</style>
   </head>
   <body>
     <div id="app">
@@ -201,7 +195,7 @@
 
     <script>
       "use strict";
-      // ---- querystring context (csrf + active company, handed in by the Django page) ----
+
       const params = new URLSearchParams(location.search);
       const CSRF = params.get("csrf") || "";
       const COMPANY_ID = params.get("company") || "";
@@ -221,17 +215,17 @@
         web_search: "web",
       };
 
-      // ---- state ----
+
       const state = {
-        graph: null, // {id, name, is_active}
-        nodes: [],   // AgentNode rows (+ position)
-        edges: [],   // AgentEdge rows
-        tools: [],   // Tool rows for the company
+        graph: null,
+        nodes: [],
+        edges: [],
+        tools: [],
         selectedNodeId: null,
-        linkFrom: null, // node id while dragging a new edge
+        linkFrom: null,
       };
 
-      // ---- dom refs ----
+
       const canvas = document.getElementById("canvas");
       const edgesSvg = canvas.querySelector("svg.edges");
       const inspectorBody = document.getElementById("inspector-body");
@@ -242,8 +236,7 @@
 
       companyLabel.textContent = COMPANY_NAME ? "· " + COMPANY_NAME : "";
 
-      // Reflect the loaded flow's name + active state in the toolbar header so
-      // it is always obvious which LangGraph flow this canvas is editing.
+
       function updateFlowHeader() {
         const g = state.graph || {};
         graphNameEl.textContent = g.name || "Graph Workflow";
@@ -252,7 +245,7 @@
         activeChip.className = "flow-chip" + (active ? " active" : "");
       }
 
-      // ---- helpers ----
+
       function showStatus(msg, kind) {
         statusEl.textContent = msg;
         statusEl.className = kind || "";
@@ -283,25 +276,21 @@
         return data;
       }
 
-      // company is required on create for a multi-company user; always send it.
+
       function withCompany(payload) {
         const out = Object.assign({}, payload);
         if (COMPANY_ID) out.company = COMPANY_ID;
         return out;
       }
 
-      // Node box + layout geometry. COL_GAP must exceed NODE_W so adjacent
-      // columns never overlap (the earlier layout put every STEP in the same
-      // column, so multiple steps stacked on top of each other).
+
       const NODE_W = 230;
-      const COL_GAP = 320;   // horizontal distance between columns (> NODE_W)
-      const ROW_GAP = 240;   // vertical distance when two nodes share a column
+      const COL_GAP = 320;
+      const ROW_GAP = 240;
       const ORIGIN_X = 60;
       const ORIGIN_Y = 80;
 
-      // Deterministic left-to-right ordering for nodes WITHOUT a saved position:
-      // START first, END last, STEP nodes in between (by creation order). Each
-      // node gets its OWN column so none overlap. Computed once per render.
+
       function computeAutoColumns() {
         const starts = state.nodes.filter((n) => n.kind === "start");
         const steps = state.nodes.filter((n) => n.kind === "step");
@@ -317,16 +306,14 @@
       function nodePos(node, index) {
         const p = node.position || {};
         if (typeof p.x === "number" && typeof p.y === "number") return { x: p.x, y: p.y };
-        // No saved position: place each node in its OWN column so they never
-        // overlap. _autoCols is filled at the top of render().
+
+
         const col = _autoCols[node.id];
         const column = typeof col === "number" ? col : (index + 1);
         return { x: ORIGIN_X + column * COL_GAP, y: ORIGIN_Y };
       }
 
-      // A free slot for a newly created node: one column to the right of the
-      // current rightmost node (using resolved positions, saved or auto), so it
-      // never spawns on top of an existing node.
+
       function nextFreePosition() {
         _autoCols = computeAutoColumns();
         let maxX = ORIGIN_X;
@@ -337,12 +324,12 @@
         return { x: maxX + COL_GAP, y: ORIGIN_Y };
       }
 
-      // ---- rendering ----
+
       function render() {
-        // remove existing node elements (keep the svg)
+
         canvas.querySelectorAll(".node").forEach((el) => el.remove());
 
-        // Assign each unsaved node its own column so nodes never overlap.
+
         _autoCols = computeAutoColumns();
 
         state.nodes.forEach((node, index) => {
@@ -420,7 +407,7 @@
             el.appendChild(toolsWrap);
           }
 
-          // ports: in (left) and out (right)
+
           const dotOut = document.createElement("div");
           dotOut.className = "dot out";
           dotOut.title = "Drag to another node to wire an edge";
@@ -474,7 +461,7 @@
           hit.addEventListener("click", () => removeEdge(edge));
           edgesSvg.appendChild(hit);
 
-          // × marker at the midpoint
+
           const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
           const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
           ring.setAttribute("class", "edge-x-ring");
@@ -503,7 +490,7 @@
         canvas.style.height = maxY + "px";
       }
 
-      // ---- node dragging ----
+
       function startDrag(ev, node, el) {
         ev.preventDefault();
         const startX = ev.clientX, startY = ev.clientY;
@@ -519,7 +506,7 @@
           document.removeEventListener("mousemove", move);
           document.removeEventListener("mouseup", up);
           el.style.cursor = "grab";
-          // persist the new position (best-effort)
+
           node.position = node._pos;
           api("PATCH", "node/" + node.id + "/", { position: node._pos }).catch(() => {});
         }
@@ -527,13 +514,7 @@
         document.addEventListener("mouseup", up);
       }
 
-      // ---- edge linking ----
-      // Drag from a node's right-side output dot onto another node to wire an
-      // edge. We resolve the TARGET from the element under the pointer on mouse
-      // release (document.elementFromPoint) rather than relying on which
-      // element's mouseup fires first — the earlier approach had a race with a
-      // global mouseup reset that cleared the source before the target handler
-      // ran, so edges never got created. A live preview line follows the cursor.
+
       let previewPath = null;
 
       function startLink(nodeId, ev) {
@@ -565,7 +546,7 @@
           if (previewPath && previewPath.parentNode) previewPath.parentNode.removeChild(previewPath);
           previewPath = null;
 
-          // Find the node under the cursor on release.
+
           const targetEl = document.elementFromPoint(e.clientX, e.clientY);
           const nodeEl = targetEl ? targetEl.closest(".node") : null;
           const targetId = nodeEl ? nodeEl.dataset.nodeId : null;
@@ -601,7 +582,7 @@
         } catch (e) { showStatus(e.message, "err"); }
       }
 
-      // ---- selection / inspector ----
+
       function selectNode(nodeId) {
         state.selectedNodeId = nodeId;
         render();
@@ -631,8 +612,7 @@
           return wrap;
         };
 
-        // Type (editable select) so a node's kind can be fixed/changed. START
-        // and END are structural; STEP carries tools and runs the router.
+
         const typeSelect = document.createElement("select");
         [["start", "START"], ["step", "STEP"], ["end", "END"]].forEach(function (pair) {
           const opt = document.createElement("option");
@@ -643,7 +623,7 @@
         });
         inspectorBody.appendChild(mkField("Type", typeSelect));
 
-        // Name
+
         const nameInput = document.createElement("input");
         nameInput.type = "text";
         nameInput.value = node.label || "";
@@ -651,8 +631,8 @@
 
         let slugInput = null;
         const toolChecks = [];
-        // Re-render the inspector when the type changes so STEP reveals the
-        // slug + tool checkboxes (and START/END hide them).
+
+
         typeSelect.addEventListener("change", function () {
           node._pendingKind = typeSelect.value;
           node.kind = typeSelect.value;
@@ -713,7 +693,7 @@
           inspectorBody.appendChild(routerNote);
         }
 
-        // actions
+
         const actions = document.createElement("div");
         actions.className = "row-actions";
         const save = document.createElement("button");
@@ -756,11 +736,11 @@
           row.appendChild(name);
           const pill = document.createElement("span");
           pill.className = "pill";
-          // prompt-only tools created from Langfuse carry a kind=prompt_only
-          // config but no built-in TOOL_PILL entry.
+
+
           pill.textContent = TOOL_PILL[t.slug] || (t.config && t.config.kind === "prompt_only" ? "prompt_only" : "tool");
           row.appendChild(pill);
-          // Editable Langfuse prompt-name pointer, saved on change.
+
           const promptInput = document.createElement("input");
           promptInput.type = "text";
           promptInput.placeholder = "langfuse prompt name";
@@ -778,7 +758,7 @@
           inspectorBody.appendChild(row);
         });
 
-        // Inline hint explaining where the prompt text actually lives.
+
         const hint = document.createElement("div");
         hint.className = "note";
         hint.appendChild(document.createTextNode(
@@ -786,8 +766,7 @@
         ));
         inspectorBody.appendChild(hint);
 
-        // "Add Langfuse tool" affordance: creates a prompt-only tool from a
-        // Langfuse prompt name.
+
         const addRow = document.createElement("div");
         addRow.className = "tool-row";
         const addInput = document.createElement("input");
@@ -825,9 +804,8 @@
         const kind = typeSelect ? typeSelect.value : node.kind;
         const payload = { kind: kind, label: nameInput.value.trim() };
         if (slugInput) payload.slug = slugInput.value.trim();
-        // Tools apply only to STEP nodes; send the checked ids. For non-step
-        // nodes clear tools so a type change away from step doesn't keep stale
-        // tool links.
+
+
         if (kind === "step") {
           payload.tools = toolChecks.filter((cb) => cb.checked).map((cb) => cb.dataset.toolId);
         } else {
@@ -855,10 +833,10 @@
         } catch (e) { showStatus(e.message, "err"); }
       }
 
-      // ---- toolbar actions ----
+
       async function ensureGraph() {
         if (state.graph) return state.graph;
-        // Try to load an existing graph for this company first.
+
         const list = await api("GET", "graph/");
         const rows = Array.isArray(list) ? list : (list.results || []);
         if (rows.length) {
@@ -895,12 +873,8 @@
         clearStatus();
         try {
           await ensureGraph();
-          // + New Node always adds a STEP node — the only kind that carries
-          // tools and that the router runs. START/END are structural endpoints
-          // (one each per graph) and are created by seeding; new nodes you add
-          // are steps you wire BETWEEN them. (The earlier count-based kind guess
-          // produced duplicate start/end nodes and no editable step, which is
-          // why tools couldn't be chosen.) Pick a unique step slug.
+
+
           const existing = new Set(state.nodes.map((n) => n.slug));
           let slug = existing.has("chat_agent") ? null : "chat_agent";
           if (!slug) {
@@ -909,13 +883,13 @@
             slug = "step_" + i;
           }
           const node = await api("POST", "node/", {
-            // company is derived server-side from the graph — never sent here.
+
             graph: state.graph.id,
             kind: "step",
             slug: slug,
             label: "New step",
-            // Spawn to the RIGHT of the rightmost existing node so a new node
-            // never lands on top of another.
+
+
             position: nextFreePosition(),
           });
           state.nodes.push(node);
@@ -927,8 +901,8 @@
 
       async function manageTools() {
         clearStatus();
-        // The canvas cannot run manage.py; it creates the built-in Tool rows via
-        // the API instead (idempotent — a slug that already exists is skipped).
+
+
         const builtins = [
           { slug: "general_assistant", name: "General assistant" },
           { slug: "document_search", name: "Document search" },
@@ -969,12 +943,12 @@
       document.getElementById("btn-manage-tools").addEventListener("click", manageTools);
       document.getElementById("btn-activate").addEventListener("click", activateGraph);
 
-      // ---- boot ----
+
       if (!COMPANY_ID) {
         showStatus("No active company. Pick a company in the top-right switcher, then reload this page.", "err");
       } else {
         loadGraph();
       }
-    </script>
+</script>
   </body>
 </html>

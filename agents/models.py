@@ -69,8 +69,8 @@ class Tool(BaseModel, SoftDeleteModel):
     description = models.TextField(blank=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
     config = models.JSONField(default=dict, blank=True)
-    # Langfuse prompt pointer (the managed prompt's NAME, not its text). Blank
-    # => the handler uses its hard-coded fallback prompt.
+
+
     prompt_name = models.CharField(max_length=200, blank=True, default="")
 
     objects = SoftDeleteManager()
@@ -92,15 +92,11 @@ class Tool(BaseModel, SoftDeleteModel):
 
     def clean(self):
         super().clean()
-        # The slug must resolve to a handler in the in-code tool registry. This
-        # is a cross-reference to CODE (not another table), so it lives in model
-        # validation. Imported lazily so importing agents.models never imports
-        # the registry at module load.
+
+
         from chat.services.langgraph_service import available_slugs
 
-        # prompt-only tools (config kind=prompt_only) are created from a Langfuse
-        # prompt and run through the generic prompt_tool handler, so their slug
-        # need not match a registered handler.
+
         prompt_only = (
             isinstance(self.config, dict)
             and self.config.get("kind") == "prompt_only"
@@ -176,10 +172,8 @@ class AgentNode(BaseModel, SoftDeleteModel):
     def clean(self):
         super().clean()
         self._validate_company_matches_graph()
-        # At most one start and at most one end per graph. This needs a sibling
-        # query (the save-time backstop would race), so it is a best-effort
-        # clean()-only validation; the runtime treats "no START" as "no graph
-        # configured" -> fallback.
+
+
         if self.kind in (self.KIND_START, self.KIND_END):
             siblings = AgentNode.objects.filter(
                 graph=self.graph, kind=self.kind
@@ -241,17 +235,17 @@ class AgentEdge(BaseModel, SoftDeleteModel):
         return f"{self.source_id} -> {self.target_id}"
 
     def _validate_edge(self):
-        # No self-loop.
+
         if self.source_id == self.target_id:
             raise ValidationError(
                 {"target": "An edge cannot connect a node to itself."}
             )
-        # No cross-graph edge.
+
         if self.source.graph_id != self.target.graph_id:
             raise ValidationError(
                 {"target": "An edge must connect nodes of the same graph."}
             )
-        # company == source.graph.company == target.graph.company.
+
         if (
             self.company_id != self.source.graph.company_id
             or self.company_id != self.target.graph.company_id

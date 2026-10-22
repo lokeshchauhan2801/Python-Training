@@ -1,23 +1,4 @@
-/*
- * In-row "Schedule" dropdown for the Documents changelist.
- *
- * Each row's Schedule column renders an "Action" button and a hidden dropdown
- * menu (Process now / Celery / Kafka / Temporal — rendered server-side by the
- * schedule_column display method). This script:
- *   - toggles a single dropdown open/closed below its button (only one open at
- *     a time; clicking elsewhere closes it). The menu is pinned with
- *     position:fixed at the toggle button's viewport rect (getBoundingClientRect)
- *     with a high z-index so it renders in a layer the changelist's overflow
- *     container cannot clip ("goes under the list line"); any scroll/resize
- *     while open closes it so a stale fixed position never lingers;
- *   - on an item click, POSTs {backend} to the scoped AJAX dispatch endpoint
- *     with the CSRF token (no page navigation, no full reload);
- *   - updates that row's status cell from the JSON response.
- *
- * All DOM updates use textContent/createElement (never innerHTML) so server
- * data can never be interpreted as markup. The dispatch URL is a reverse()d
- * template with a placeholder pk the JS swaps per row.
- */
+
 (function () {
   "use strict";
 
@@ -34,7 +15,7 @@
     return urlTemplate.replace("__PK__", encodeURIComponent(docId));
   }
 
-  // Read the CSRF cookie (Django's default "csrftoken").
+
   function getCookie(name) {
     var cookies = (document.cookie || "").split(";");
     for (var i = 0; i < cookies.length; i++) {
@@ -48,11 +29,7 @@
 
   var MENU_Z_INDEX = "9999";
 
-  // Pin the menu with position:fixed at the toggle button's viewport rect so
-  // it escapes the changelist's clipping overflow container. getBoundingClientRect
-  // returns viewport-relative coordinates, which is exactly what position:fixed
-  // uses, so no scroll offsets are added. The menu sits just below the button
-  // (top = rect.bottom + 4px gap), left-aligned to it.
+
   function positionMenu(toggle, menu) {
     var rect = toggle.getBoundingClientRect();
     menu.style.position = "fixed";
@@ -62,8 +39,7 @@
     menu.style.margin = "0";
   }
 
-  // Hide a menu and strip the inline fixed-positioning so the next open starts
-  // clean and the resting markup carries no stale styles.
+
   function hideMenu(menu) {
     menu.classList.add("hidden");
     menu.style.position = "";
@@ -90,8 +66,8 @@
   }
 
   function updateRowStatus(docId, statusDisplay) {
-    // Find the row holding this document's Action button, then its status cell
-    // (Django renders the status_badge column as td.field-status_badge).
+
+
     var toggle = document.querySelector(
       '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
     );
@@ -140,8 +116,7 @@
     }, 6000);
   }
 
-  // Minimal CSS.escape fallback for the ids we embed (ULIDs/UUIDs are safe,
-  // but guard anyway for attribute-selector correctness).
+
   function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === "function") {
       return window.CSS.escape(value);
@@ -191,7 +166,7 @@
     closeAllMenus();
   }
 
-  // Delegate all clicks so dynamically re-rendered rows keep working.
+
   document.addEventListener("click", function (event) {
     var toggle = event.target.closest(".schedule-toggle");
     if (toggle) {
@@ -226,14 +201,11 @@
       return;
     }
 
-    // Click anywhere else closes any open menu.
+
     closeAllMenus();
   });
 
-  // A fixed-positioned menu is pinned to the toggle's rect at open time; once
-  // the page scrolls or the viewport resizes that rect moves, so close any
-  // open menu rather than let it float out of place. Capture-phase scroll
-  // catches scrolling inside the changelist's overflow container too.
+
   window.addEventListener("scroll", function () {
     closeAllMenus();
   }, true);

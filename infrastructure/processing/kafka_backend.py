@@ -23,5 +23,5 @@ class KafkaProcessingBackend(ProcessingBackend):
         return event.event_id
 
     def get_status(self, job_id: str) -> str:
-        # Kafka is fire-and-forget from the dispatcher's perspective.
+
         return "PUBLISHED"

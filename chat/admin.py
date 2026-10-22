@@ -47,17 +47,17 @@ class ConversationInline(admin.TabularInline):
     show_change_link = True
 
     def has_add_permission(self, request, obj=None):
-        # Turns are created through the chat service, not hand-added here.
+
         return False
 
 
 @admin.register(ConversationSession)
 class ConversationSessionAdmin(BaseModelAdmin):
-    # Goal 1: app-local templates extending the Unfold admin templates.
+
     change_list_template = "admin/chat/conversationsession/change_list.html"
     change_form_template = "admin/chat/conversationsession/change_form.html"
 
-    # Goal 4: full config.
+
     list_display = (
         "title",
         "session_id",
@@ -91,15 +91,11 @@ class ConversationSessionAdmin(BaseModelAdmin):
             },
         ),
     )
-    # session_id is read-only in addition to the audit fields appended by the
-    # AuditAdminMixin.
+
+
     readonly_fields = ("session_id",)
 
-    # Goal 5: bulk soft-delete/restore come from BaseModelAdmin.actions; the
-    # per-session "Detail JSON" / "Summarize" buttons are rendered by the
-    # overridden change_form template and call the AJAX endpoints below.
 
-    # --- display methods (Goal 4) ------------------------------------------
     @admin.display(description="Turns")
     def turn_count(self, obj):
         return obj.turns.count()
@@ -110,7 +106,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             return "-"
         return (obj.summary[:80] + "...") if len(obj.summary) > 80 else obj.summary
 
-    # --- LLM-client seam so tests can inject a fake client -----------------
+
     def _chat_service(self):
         """Build the chat service (default real, lazy, no key at construct).
 
@@ -118,7 +114,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
         """
         return ChatService()
 
-    # --- scope helpers (re-derive scope server-side, never trust client) ---
+
     def _allowed_companies(self, request):
         """Companies the requesting user may use (shared with /chat/ views)."""
         return _allowed_companies_for(request)
@@ -127,7 +123,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
         """Non-deleted sessions visible to the user (shared with /chat/ views)."""
         return _scoped_sessions_for(request)
 
-    # --- Goal 2: custom URLs (BEFORE super().get_urls()) -------------------
+
     def get_urls(self):
         admin_view = self.admin_site.admin_view
         custom = [
@@ -179,11 +175,11 @@ class ConversationSessionAdmin(BaseModelAdmin):
         ]
         return custom + super().get_urls()
 
-    # --- Goal 2: AJAX GET -> JSON ------------------------------------------
+
     def detail_json_view(self, request, pk):
         if request.method != "GET":
             return JsonResponse({"error": "Method not allowed"}, status=405)
-        # Permission-scoped resolution ONLY.
+
         session = get_object_or_404(self.get_queryset(request), pk=pk)
         turns = [
             {
@@ -206,7 +202,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             }
         )
 
-    # --- Goal 2: AJAX POST (CSRF-validated, NOT csrf_exempt) ---------------
+
     def summarize_view(self, request, pk):
         if request.method != "POST":
             return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -219,7 +215,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             return JsonResponse({"error": "LLM not configured"}, status=503)
         return JsonResponse({"summary": summary})
 
-    # --- Goal 3: custom learning page via TemplateResponse -----------------
+
     def learning_view(self, request):
         context = {
             **self.admin_site.each_context(request),
@@ -230,7 +226,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             request, "admin/chat/conversationsession/learning_view.html", context
         )
 
-    # --- Chat UI: page view (TemplateResponse) -----------------------------
+
     def chat_page_view(self, request):
         """The three-area chat page. No server data embedded; JS fetches it."""
         context = {
@@ -242,7 +238,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             request, "admin/chat/conversationsession/chat_page.html", context
         )
 
-    # --- Chat UI: companies-list JSON (scoped) -----------------------------
+
     def companies_json_view(self, request):
         if request.method != "GET":
             return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -252,7 +248,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
         ]
         return JsonResponse({"companies": companies})
 
-    # --- Chat UI: sessions-list JSON (scoped, filterable by company) -------
+
     def sessions_json_view(self, request):
         if request.method != "GET":
             return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -260,8 +256,8 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
         company_id = request.GET.get("company")
         if company_id:
-            # Re-validate the client-supplied company against scope; an
-            # out-of-scope id yields an empty list (never leaks other data).
+
+
             allowed = self._allowed_companies(request).filter(pk=company_id)
             if not allowed.exists():
                 return JsonResponse({"sessions": []})
@@ -286,7 +282,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             )
         return JsonResponse({"sessions": payload})
 
-    # --- Chat UI: session-turns JSON (scoped, 404 outside scope) -----------
+
     def session_turns_json_view(self, request, pk):
         if request.method != "GET":
             return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -311,10 +307,10 @@ class ConversationSessionAdmin(BaseModelAdmin):
             }
         )
 
-    # --- Chat UI: create a new session under a scoped company --------------
+
     def new_session_view(self, request):
-        # Always answer with JSON (never a redirect) so the AJAX client can
-        # create a session strictly in-place with no full-page navigation.
+
+
         if request.method not in ("GET", "POST"):
             return JsonResponse({"error": "Method not allowed"}, status=405)
 
@@ -326,7 +322,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             return JsonResponse({"error": "No company available."}, status=400)
 
         if company_id:
-            # Re-validate ownership server-side; out-of-scope => 404 (no leak).
+
             company = get_object_or_404(allowed, pk=company_id)
         else:
             company = allowed.order_by("name").first()
@@ -345,7 +341,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
             status=201,
         )
 
-    # --- Chat UI: send a message (POST, CSRF-validated like summarize) -----
+
     def send_message_view(self, request, pk):
         if request.method != "POST":
             return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -353,7 +349,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
         question = request.POST.get("question")
         if question is None and request.body:
-            # Support a JSON body as well as form-encoded.
+
             try:
                 question = (json.loads(request.body) or {}).get("question")
             except (ValueError, TypeError):
@@ -431,7 +427,7 @@ class MessageVersionInline(admin.TabularInline):
     ordering = ("version",)
 
     def has_add_permission(self, request, obj=None):
-        # Versions are written by the service, not hand-added here.
+
         return False
 
 
@@ -470,7 +466,7 @@ class MessageAdmin(BaseModelAdmin):
         ),
     )
 
-    # Role -> badge colour. Theme-aware foreground on a tinted background.
+
     _ROLE_COLORS = {
         Message.ROLE_USER: "#2563eb",
         Message.ROLE_ASSISTANT: "#7c3aed",

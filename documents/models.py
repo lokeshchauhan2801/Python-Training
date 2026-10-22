@@ -67,7 +67,7 @@ class Document(BaseModel, SoftDeleteModel):
     processing_error = models.TextField(blank=True)
     chunk_count = models.PositiveIntegerField(default=0)
     processing_attempts = models.PositiveSmallIntegerField(default=0)
-    # Milliseconds the last conversion took, for the "time taken" column.
+
     processing_duration_ms = models.PositiveIntegerField(null=True, blank=True)
 
     objects = SoftDeleteManager()

@@ -1,21 +1,4 @@
-/*
- * Per-row "Temporal workflow info" modal for the Documents changelist.
- *
- * Each row renders an "Info" pill (class "info-action", data-doc-id) via the
- * DocumentAdmin.info_action @action. This script delegates clicks on that pill
- * (preventDefault so it never navigates), fetches the scoped temporal-info
- * endpoint, and opens a modal showing the workflow id/status/run id/started/
- * closed/result plus a Stages table (Stage | Status | Detail).
- *
- * All DOM is built with createElement/textContent/appendChild (never raw HTML
- * assignment) so workflow ids, stage names, and error details cannot be
- * interpreted as markup. GET only with credentials:"same-origin" +
- * X-Requested-With (the CSRF
- * cookie rides along; no token needed for a read). While the workflow status is
- * "RUNNING" the modal re-fetches every ~2000ms; it stops on a terminal/unknown
- * status or when the modal closes. Close button (×), Escape, and a backdrop
- * click all close the modal and restore focus to the triggering pill.
- */
+
 (function () {
   "use strict";
 
@@ -29,8 +12,8 @@
   }
 
   var POLL_MS = 2000;
-  // Statuses that keep polling. Anything else (COMPLETED/FAILED/TERMINATED/
-  // CANCELED/TIMED_OUT/CONTINUED_AS_NEW/unknown/n/a/...) stops the single timer.
+
+
   var POLLING_STATUSES = { RUNNING: true };
 
   var STATUS_COLORS = {
@@ -40,12 +23,12 @@
     failed: "#dc2626",
   };
 
-  // Module-level singletons: only one modal + one poll timer at a time.
+
   var overlayEl = null;
   var pollTimer = null;
   var currentDocId = null;
   var triggerEl = null;
-  var bodyEl = null; // the scrollable card body we rebuild on each fetch
+  var bodyEl = null;
 
   function infoUrl(docId) {
     return urlTemplate.replace("__PK__", encodeURIComponent(docId));
@@ -79,8 +62,7 @@
     }
   }
 
-  // Build the fixed overlay + dialog card shell once; returns the card body
-  // element (cleared/rebuilt on every fetch) so poll refreshes are cheap.
+
   function buildShell() {
     var overlay = document.createElement("div");
     overlay.style.position = "fixed";
@@ -95,7 +77,7 @@
     overlay.style.justifyContent = "center";
     overlay.style.padding = "48px 16px";
     overlay.style.overflow = "auto";
-    // Backdrop click (on the overlay itself, not the card) closes the modal.
+
     overlay.addEventListener("click", function (event) {
       if (event.target === overlay) {
         closeModal();
@@ -149,12 +131,12 @@
     overlayEl = overlay;
     bodyEl = body;
 
-    // Move focus into the dialog for keyboard users.
+
     close.focus();
     return body;
   }
 
-  // One "Label: value" row.
+
   function labeledRow(label, value) {
     var row = document.createElement("div");
     row.style.display = "flex";
@@ -237,7 +219,7 @@
     return wrap;
   }
 
-  // Rebuild the card body from a fresh payload.
+
   function render(data) {
     if (!bodyEl) {
       return;
@@ -299,13 +281,13 @@
         });
       })
       .then(function (data) {
-        // The modal may have been closed (or switched to another row) while
-        // the request was in flight — ignore a stale response.
+
+
         if (!bodyEl || currentDocId !== docId) {
           return;
         }
         render(data);
-        // Keep polling only while the workflow is RUNNING; otherwise stop.
+
         if (!POLLING_STATUSES[data.status]) {
           stopPolling();
         }
@@ -320,7 +302,7 @@
   }
 
   function openModal(docId, trigger) {
-    // Replace any modal already open (e.g. a second row's pill).
+
     if (overlayEl) {
       closeModal();
     }
@@ -335,12 +317,12 @@
     bodyEl.appendChild(loading);
 
     fetchInfo();
-    // Start the single poll timer; fetchInfo() stops it once non-RUNNING.
+
     stopPolling();
     pollTimer = window.setInterval(fetchInfo, POLL_MS);
   }
 
-  // Delegate clicks so dynamically re-rendered rows keep working.
+
   document.addEventListener("click", function (event) {
     var pill = event.target.closest(".info-action");
     if (!pill) {

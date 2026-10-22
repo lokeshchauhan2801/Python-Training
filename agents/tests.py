@@ -1,1 +1,0 @@
-# Intentionally left without tests.

@@ -19,9 +19,6 @@ from django.core.management.base import BaseCommand
 from basics.langfuse import get_langfuse_client
 from chat.services import _SUMMARY_SYSTEM_PROMPT
 
-# name -> default text. Names match the conventional Tool.prompt_name values and
-# the fallback strings the handlers use, so pushing them makes the portal
-# reflect exactly what the code does today.
 _DEFAULT_PROMPTS = {
     "tool_chat_summarise": _SUMMARY_SYSTEM_PROMPT,
     "tool_general_assistant": (

@@ -30,7 +30,7 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
        data-new-url="{% url 'admin:chat_conversation_new' %}"
        data-base-url="{% url 'admin:chat_conversation_sessions' %}">
 
-    {# --- page header row: title left, company control + New chat right --- #}
+
     <div class="flex flex-col gap-4 mb-6 md:flex-row md:items-center md:justify-between">
       <h1 class="font-semibold text-xl text-font-important-light tracking-tight dark:text-font-important-dark">
         {{ title }}
@@ -57,7 +57,7 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
       {% translate "No companies available. You cannot start a chat yet." %}
     </p>
 
-    {# --- main area: LEFT session list + CENTER conversation panel --- #}
+
     <div class="flex flex-col gap-4 md:flex-row md:items-stretch">
       <div class="flex-none border border-base-200 rounded-default p-3 w-full md:w-64 dark:border-base-700">
         <ul id="chat-session-list" class="list-none m-0 p-0"></ul>
@@ -94,7 +94,7 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
     const companiesUrl = root.dataset.companiesUrl;
     const sessionsUrl = root.dataset.sessionsUrl;
     const newUrl = root.dataset.newUrl;
-    const baseUrl = root.dataset.baseUrl; // ".../admin/chat/chat/"
+    const baseUrl = root.dataset.baseUrl;
 
     const companySel = document.getElementById("chat-company");
     const emptyEl = document.getElementById("chat-empty");
@@ -118,7 +118,7 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
       statusEl.textContent = text || "";
     }
 
-    // Per-session URLs are built from the base chat page prefix, never hardcoded.
+
     function turnsUrlFor(id) {
       return baseUrl + id + "/turns-json/";
     }
@@ -313,7 +313,7 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
         })
         .then(function (res) {
           if (!res.ok || res.data.error) {
-            // Clean inline error; do NOT corrupt the panel.
+
             setStatus(res.data.error || "Send failed.");
             return;
           }
@@ -328,9 +328,9 @@ NEVER innerHTML, so content can never execute. POSTs carry the CSRF token.
         });
     });
 
-    // Initial load.
+
     loadCompanies();
   })();
-  </script>
+</script>
 </div>
 {% endblock %}

@@ -73,7 +73,7 @@ class ActiveCompanyResolutionTests(TestCase):
     def test_allowed_companies_owner_scoped(self):
         allowed = allowed_companies_for_user(self.single_owner)
         self.assertEqual(set(allowed), {self.single_co})
-        # Another owner's company is never visible.
+
         self.assertNotIn(self.other_co, allowed)
 
     def test_allowed_companies_superuser_sees_all_active(self):
@@ -104,11 +104,11 @@ class ActiveCompanyResolutionTests(TestCase):
 
     def test_pops_and_redefaults_invalid_session_id(self):
         session = SessionStore()
-        # A company this user cannot access.
+
         session["active_company_id"] = str(self.other_co.id)
         request = _request_with_session(self.single_owner, session)
         resolved = active_company_for_request(request)
-        # Falls back to the user's own company and rewrites the session.
+
         self.assertEqual(resolved, self.single_co)
         self.assertEqual(
             request.session["active_company_id"], str(self.single_co.id)
@@ -172,11 +172,11 @@ class SetActiveCompanyViewTests(TestCase):
     def test_cannot_switch_to_inaccessible_company(self):
         """A non-superuser cannot switch to another owner's company."""
         self.client.force_login(self.other_owner)
-        # Seed a valid active company first.
+
         self.client.post(self.url, {"company": str(self.other_co.id)})
         resp = self.client.post(self.url, {"company": str(self.company_a.id)})
         self.assertEqual(resp.status_code, 403)
-        # The session key is unchanged (still the user's own company).
+
         self.assertEqual(
             self.client.session["active_company_id"], str(self.other_co.id)
         )
@@ -237,7 +237,7 @@ class SwitcherRenderTests(TestCase):
         self.client.force_login(self.single_owner)
         resp = self.client.get(reverse("admin:index"))
         self.assertEqual(resp.status_code, 200)
-        # The auto-submit switcher form is absent; the single company name shows.
+
         self.assertNotContains(resp, 'name="company" aria-label')
         self.assertContains(resp, "Solo")
 
@@ -314,11 +314,11 @@ class AdminScopingFollowsActiveCompanyTests(TestCase):
         self.assertEqual(
             self.client.session["active_company_id"], str(self.company_b.id)
         )
-        # Documents changelist follows company B.
+
         resp = self.client.get(reverse("admin:documents_document_changelist"))
         self.assertContains(resp, "docB")
         self.assertNotContains(resp, "docA")
-        # Chat session list (filtered by the active company) follows company B.
+
         resp = self.client.get(
             reverse("chat:sessions_json") + "?company=" + str(self.company_b.id)
         )
@@ -331,10 +331,7 @@ class AdminScopingFollowsActiveCompanyTests(TestCase):
         self.client.force_login(self.super_owner)
         self._set_active(self.company_b)
 
-        # Adding a document no longer auto-dispatches processing on save: it
-        # lands in the ``uploaded`` state and waits for the user to pick a
-        # backend from the in-row Schedule control. So no dispatch/LLM mock is
-        # needed and no processing runs here.
+
         resp = self.client.post(
             "/admin/documents/document/add/",
             {
@@ -345,8 +342,8 @@ class AdminScopingFollowsActiveCompanyTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         created = Document.objects.order_by("-created_at").first()
         self.assertEqual(created.company_id, self.company_b.id)
-        # It is parked as UPLOADED (not queued/processing): processing starts
-        # only when the user chooses a backend from the Schedule dropdown.
+
+
         self.assertEqual(created.status, Document.STATUS_UPLOADED)
         self.assertEqual(created.chunk_count, 0)
 
@@ -380,9 +377,8 @@ class NoCompanyEmptyStateTests(TestCase):
         from documents.models import Document
 
         self.client.force_login(self.user)
-        # No auto-dispatch happens on save anymore, so no dispatch patch is
-        # needed: the add POST yields a clean PermissionDenied (403) in
-        # save_model when the user has no accessible company.
+
+
         resp = self.client.post(
             "/admin/documents/document/add/",
             {

@@ -21,7 +21,7 @@ class ScrapeJob(BaseModel, SoftDeleteModel):
     )
     url = models.URLField(max_length=2048)
     title = models.CharField(max_length=512, blank=True)
-    # NIT 5: default references the named enum member, not a bare string.
+
     status = models.CharField(
         max_length=20,
         choices=Status,

@@ -107,8 +107,8 @@ class Conversation(BaseModel, SoftDeleteModel):
         self._validate_company_matches_session()
 
     def save(self, *args, **kwargs):
-        # Universal backstop: re-check the cross-field invariant on every save
-        # path (admin direct-save, serializer, service) before persisting.
+
+
         self._validate_company_matches_session()
         super().save(*args, **kwargs)
 
@@ -146,9 +146,8 @@ class Message(BaseModel, SoftDeleteModel):
     content = models.TextField()
     citations = models.JSONField(default=list, blank=True)
     chart_data = models.JSONField(null=True, blank=True)
-    # Router/graph facts that travel together (tool_used, node_slug,
-    # route_reason, source, trace_id). Empty {} on the RAG fallback path and on
-    # legacy rows, which the chat UI renders with no tool badge.
+
+
     metadata = models.JSONField(default=dict, blank=True)
     documents = models.ManyToManyField(
         "documents.Document",
@@ -156,10 +155,8 @@ class Message(BaseModel, SoftDeleteModel):
         blank=True,
     )
     model_name = models.CharField(max_length=100, default="gpt-4o-mini")
-    # Document-context signature in effect when this answer was produced. Used
-    # by the repeated-query cache to detect whether the retrievable document
-    # context changed between two identical questions. NULL on legacy rows is
-    # treated as unknown => cache miss. See ChatService._context_signature.
+
+
     context_signature = models.CharField(max_length=64, null=True, blank=True)
 
     objects = SoftDeleteManager()
@@ -187,8 +184,8 @@ class Message(BaseModel, SoftDeleteModel):
         self._validate_company_matches_conversation()
 
     def save(self, *args, **kwargs):
-        # Universal backstop: re-check the cross-field invariant on every save
-        # path (admin direct-save, serializer, service) before persisting.
+
+
         self._validate_company_matches_conversation()
         super().save(*args, **kwargs)
 

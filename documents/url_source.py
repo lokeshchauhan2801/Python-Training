@@ -19,7 +19,6 @@ from urllib.parse import unquote, urlsplit
 
 logger = logging.getLogger(__name__)
 
-# Map a Content-Type to a file suffix when the URL path has no usable extension.
 _CONTENT_TYPE_SUFFIX = {
     "application/pdf": ".pdf",
     "text/plain": ".txt",
@@ -46,7 +45,7 @@ def _infer_filename(url: str, content_type: str) -> str:
     """
     path = urlsplit(url).path
     base = os.path.basename(unquote(path)).strip() or "download"
-    # Keep the base safe/simple: strip directory separators and NUL.
+
     base = base.replace("/", "_").replace("\\", "_").replace("\x00", "")
     root, ext = os.path.splitext(base)
     if not ext:
@@ -85,7 +84,7 @@ def download_source_to_document(document) -> None:
     if not url:
         raise UrlSourceError("No source URL to download.")
 
-    # SSRF policy (scheme/host/port + resolved-IP checks). Reuses scrapper.
+
     try:
         _validate_url(url)
     except ScrapeValidationError as exc:

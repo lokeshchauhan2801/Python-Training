@@ -29,7 +29,6 @@ from .services import ChatCompletion, ChartData, ChartPoint, ChatService
 
 User = get_user_model()
 
-# Per-module temp MEDIA_ROOT so attach/CSV tests write real files off the repo.
 _MEDIA = tempfile.mkdtemp(prefix="chat-tests-media-")
 
 
@@ -104,7 +103,7 @@ class ChatInvariantTests(TestCase):
         turn = Conversation(
             session=self.session,
             user=self.user,
-            company=self.company_b,  # mismatches session.company (A)
+            company=self.company_b,
             question="q",
         )
         with self.assertRaises(ValidationError):
@@ -189,7 +188,7 @@ class AdminDetailJsonTests(TestCase):
 
     def test_anonymous_is_blocked(self):
         resp = self.client.get(self._url())
-        # admin_view redirects anonymous users to the login page.
+
         self.assertIn(resp.status_code, (302, 403))
         if resp.status_code == 302:
             self.assertIn("/admin/login/", resp["Location"])
@@ -273,7 +272,7 @@ class AdminChatUITests(TestCase):
             return_value=ChatService(llm_client=_FakeLLM(reply=reply)),
         )
 
-    # --- chat page ---------------------------------------------------------
+
     def test_chat_page_renders_for_staff(self):
         self.client.force_login(self.alice)
         resp = self.client.get(reverse("admin:chat_conversation_sessions"))
@@ -290,7 +289,7 @@ class AdminChatUITests(TestCase):
         resp = self.client.get(reverse("admin:chat_conversation_sessions"))
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
-        # base_site -> base.html renders the Unfold navigation sidebar.
+
         self.assertIn('id="nav-sidebar"', body)
 
     def test_chat_page_company_control_in_header_region(self):
@@ -305,10 +304,10 @@ class AdminChatUITests(TestCase):
         self.assertNotEqual(header_pos, -1)
         self.assertNotEqual(new_pos, -1)
         self.assertNotEqual(list_pos, -1)
-        # Company selector and New chat come before the session list / panel.
+
         self.assertLess(header_pos, list_pos)
         self.assertLess(new_pos, list_pos)
-        # The message input is still present.
+
         self.assertIn('id="chat-input"', body)
 
     def test_chat_page_anonymous_redirected(self):
@@ -316,7 +315,7 @@ class AdminChatUITests(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/admin/login/", resp["Location"])
 
-    # --- companies-list scoping -------------------------------------------
+
     def test_companies_json_scoped(self):
         url = reverse("admin:chat_conversation_companies_json")
 
@@ -332,7 +331,7 @@ class AdminChatUITests(TestCase):
         names = {c["name"] for c in self.client.get(url).json()["companies"]}
         self.assertEqual(names, {"Alice Co", "Bob Co"})
 
-    # --- sessions-list scoping --------------------------------------------
+
     def test_sessions_json_scoped(self):
         url = reverse("admin:chat_conversation_sessions_json")
 
@@ -340,20 +339,20 @@ class AdminChatUITests(TestCase):
         sessions = self.client.get(url).json()["sessions"]
         self.assertEqual([s["title"] for s in sessions], ["Alice chat"])
 
-        # Alice filtering by Bob's company sees nothing (not Bob's sessions).
+
         sessions = self.client.get(
             url, {"company": str(self.bob_co.id)}
         ).json()["sessions"]
         self.assertEqual(sessions, [])
 
-        # Superuser filtered by a company returns that company's sessions.
+
         self.client.force_login(self.superuser)
         sessions = self.client.get(
             url, {"company": str(self.bob_co.id)}
         ).json()["sessions"]
         self.assertEqual([s["title"] for s in sessions], ["Bob chat"])
 
-    # --- turns-json scoping ------------------------------------------------
+
     def test_turns_json_out_of_scope_is_404(self):
         self.client.force_login(self.alice)
         url = reverse(
@@ -372,14 +371,14 @@ class AdminChatUITests(TestCase):
         self.assertEqual(data["title"], "Alice chat")
         self.assertEqual(data["company_id"], str(self.alice_co.id))
 
-    # --- new-session creation ---------------------------------------------
+
     def test_new_session_scoped_create(self):
         self.client.force_login(self.alice)
         url = reverse("admin:chat_conversation_new")
 
         resp = self.client.post(url, {"company": str(self.alice_co.id)})
         self.assertEqual(resp.status_code, 201)
-        # Success is strictly JSON, never a redirect (zero full-page nav).
+
         self.assertEqual(resp["Content-Type"], "application/json")
         self.assertIn("session_id", resp.json())
         created = ConversationSession.objects.filter(
@@ -387,7 +386,7 @@ class AdminChatUITests(TestCase):
         )
         self.assertEqual(created.count(), 1)
 
-        # Alice cannot create under Bob's company.
+
         before = ConversationSession.objects.filter(company=self.bob_co).count()
         resp = self.client.post(url, {"company": str(self.bob_co.id)})
         self.assertEqual(resp.status_code, 404)
@@ -402,7 +401,7 @@ class AdminChatUITests(TestCase):
         """
         url = reverse("admin:chat_conversation_new")
 
-        # Success via GET: JSON 201, not a redirect.
+
         self.client.force_login(self.alice)
         resp = self.client.get(url, {"company": str(self.alice_co.id)})
         self.assertEqual(resp.status_code, 201)
@@ -410,7 +409,7 @@ class AdminChatUITests(TestCase):
         self.assertNotIn("Location", resp)
         self.assertIn("session_id", resp.json())
 
-        # Failure (user owns no company): JSON 400 error, not a redirect.
+
         no_co_user = User.objects.create_user(
             email="nocompany@example.com", password="pw", is_staff=True
         )
@@ -421,7 +420,7 @@ class AdminChatUITests(TestCase):
         self.assertNotIn("Location", resp)
         self.assertIn("error", resp.json())
 
-    # --- send-message ------------------------------------------------------
+
     def test_send_message_persists_turn(self):
         self.client.force_login(self.alice)
         url = reverse(
@@ -458,8 +457,8 @@ class AdminChatUITests(TestCase):
         url = reverse(
             "admin:chat_conversation_send", args=[self.alice_session.pk]
         )
-        # A client that raises LLMConfigurationError (as a key-less real client
-        # would) must surface as a clean 503, and the DB must stay uncorrupted.
+
+
         with mock.patch.object(
             ConversationSessionAdmin,
             "_chat_service",
@@ -471,14 +470,6 @@ class AdminChatUITests(TestCase):
         self.assertFalse(
             Conversation.objects.filter(session=self.alice_session).exists()
         )
-
-
-# =====================================================================
-# Phase-3 chat rebuild (FEAT-003): Message model + company invariant,
-# ChatService.process_message with a fake LLM, and the top-level /chat/
-# UI + AJAX surface. No LLM key / no network: a structured fake client +
-# a tmp CHROMA_PATH / MEDIA_ROOT.
-# =====================================================================
 
 
 class MessageModelTests(TestCase):
@@ -497,7 +488,7 @@ class MessageModelTests(TestCase):
     def test_message_save_rejects_company_mismatch(self):
         message = Message(
             conversation=self.session,
-            company=self.company_b,  # mismatches session.company (A)
+            company=self.company_b,
             role=Message.ROLE_USER,
             content="hi",
         )
@@ -604,7 +595,7 @@ class ProcessMessageTests(TestCase):
         )
         self.assertEqual(assistant.role, Message.ROLE_ASSISTANT)
         self.assertEqual(assistant.content, "general answer")
-        # No documents indexed => no citations, but a real answer persisted.
+
         self.assertEqual(assistant.citations, [])
         roles = list(
             self.session.messages.order_by("created_at").values_list(
@@ -694,14 +685,14 @@ class ProcessMessageTests(TestCase):
                 company=self.company,
             )
             self.assertEqual(fake.structured_calls, 1)
-            # Identical question + unchanged document context => cache HIT.
+
             service.process_message(
                 user=self.user,
                 message_text="same question",
                 conversation=self.session,
                 company=self.company,
             )
-        # No second LLM call: the answer came from the per-session cache.
+
         self.assertEqual(fake.structured_calls, 1)
         answers = self.session.messages.filter(role=Message.ROLE_ASSISTANT)
         self.assertEqual(answers.count(), 2)
@@ -718,7 +709,7 @@ class ProcessMessageTests(TestCase):
                 company=self.company,
             )
             self.assertEqual(fake.structured_calls, 1)
-            # Adding a ready library doc changes the context signature => MISS.
+
             Document.objects.create(
                 company=self.company,
                 uploaded_by=self.user,
@@ -734,11 +725,11 @@ class ProcessMessageTests(TestCase):
                 conversation=self.session,
                 company=self.company,
             )
-        # Signature changed, so the LLM was called a second time.
+
         self.assertEqual(fake.structured_calls, 2)
 
     def test_prompt_no_file_vs_file_branch(self):
-        # No-file branch: the fake records a prompt mentioning general knowledge.
+
         no_file = _FakeStructuredLLM(response="answer")
         with self._no_chunks():
             ChatService(llm_client=no_file).process_message(
@@ -749,7 +740,7 @@ class ProcessMessageTests(TestCase):
             )
         self.assertIn("general knowledge", no_file.prompts[0])
 
-        # File branch: with retrieved chunks the prompt forbids outside numbers.
+
         document = Document.objects.create(
             company=self.company,
             uploaded_by=self.user,
@@ -802,7 +793,7 @@ class ProcessMessageTests(TestCase):
             file_type="csv",
         )
         self.assertTrue(csv_doc.file)
-        # The fake LLM returns NO chart, so the deterministic CSV builder fires.
+
         with self._no_chunks():
             assistant = self._service(
                 response="here you go"
@@ -814,9 +805,8 @@ class ProcessMessageTests(TestCase):
             )
         self.assertIsNotNone(assistant.chart_data)
         self.assertIn(assistant.chart_data["type"], {"bar", "pie", "line"})
-        # The CSV fallback emits a single-series chart whose points carry the
-        # numeric value under a "values" LIST (not a singular "value"); pin that
-        # shape so the client renderer (which reads values[0]) stays in sync.
+
+
         self.assertEqual(len(assistant.chart_data["series"]), 1)
         points = {point["label"]: point for point in assistant.chart_data["data"]}
         self.assertIn("NYC", points)
@@ -824,7 +814,7 @@ class ProcessMessageTests(TestCase):
         self.assertNotIn("value", nyc)
         self.assertIsInstance(nyc["values"], list)
         self.assertEqual(len(nyc["values"]), 1)
-        # NYC appears twice in the CSV, LA once.
+
         self.assertEqual(nyc["values"][0], 2)
         self.assertEqual(points["LA"]["values"][0], 1)
 
@@ -851,7 +841,7 @@ class ProcessMessageTests(TestCase):
             ),
             file_type="csv",
         )
-        # The fake LLM fabricates a DIFFERENT chart from "general knowledge".
+
         fabricated = ChartData(
             type="pie",
             title="City populations (general knowledge)",
@@ -877,7 +867,7 @@ class ProcessMessageTests(TestCase):
         self.assertIsNotNone(assistant.chart_data)
         self.assertEqual(assistant.chart_data["type"], "pie")
         points = {p["label"]: p["values"][0] for p in assistant.chart_data["data"]}
-        # Real CSV rows win over the LLM's fabricated populations.
+
         self.assertEqual(points, {"NYC": 10.0, "LA": 5.0, "SF": 3.0})
 
     @override_settings(MEDIA_ROOT=_MEDIA)
@@ -913,7 +903,7 @@ class ProcessMessageTests(TestCase):
         prompt = fake.prompts[0]
         self.assertIn("Attached file: notes.txt", prompt)
         self.assertIn("The capital of France is Paris.", prompt)
-        # Attachment present => strict (no outside numbers) file-context branch.
+
         self.assertIn("never make up numbers", prompt)
 
     @override_settings(MEDIA_ROOT=_MEDIA)
@@ -950,7 +940,7 @@ class ProcessMessageTests(TestCase):
             ),
             file_type="png",
         )
-        # The extractor OCRs the image to text.
+
         extracted = document_services.extract_document_text(document)
         self.assertIn("4242", extracted)
 
@@ -991,16 +981,16 @@ class ChatUIViewTests(TestCase):
             company=cls.bob_co, user=cls.bob, title="Bob UI chat"
         )
 
-    # --- page render ------------------------------------------------------
+
     def test_chat_home_renders_sidebar_and_regions(self):
         self.client.force_login(self.alice)
         resp = self.client.get(reverse("chat:home"))
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
-        self.assertIn('id="nav-sidebar"', body)  # Unfold LEFT sidebar
-        self.assertIn('id="chat-session-list"', body)  # session list region
-        self.assertIn('id="chat-messages"', body)  # conversation panel region
-        self.assertIn('id="chat-input"', body)  # composer region
+        self.assertIn('id="nav-sidebar"', body)
+        self.assertIn('id="chat-session-list"', body)
+        self.assertIn('id="chat-messages"', body)
+        self.assertIn('id="chat-input"', body)
 
     def test_chat_session_preselects_valid_ulid(self):
         self.client.force_login(self.alice)
@@ -1022,24 +1012,24 @@ class ChatUIViewTests(TestCase):
         )
         self.assertEqual(resp.status_code, 404)
 
-    # --- new_session (BUG 1) ---------------------------------------------
+
     def test_new_session_returns_json_201_not_redirect_single_session(self):
         self.client.force_login(self.alice)
         before = ConversationSession.objects.filter(company=self.alice_co).count()
         resp = self.client.post(reverse("chat:new_session"))
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp["Content-Type"], "application/json")
-        self.assertNotIn("Location", resp)  # never a redirect
+        self.assertNotIn("Location", resp)
         self.assertIn("session_id", resp.json())
         after = ConversationSession.objects.filter(company=self.alice_co).count()
-        self.assertEqual(after - before, 1)  # exactly one session created
+        self.assertEqual(after - before, 1)
 
     def test_new_session_rejects_get(self):
         self.client.force_login(self.alice)
         resp = self.client.get(reverse("chat:new_session"))
         self.assertEqual(resp.status_code, 405)
 
-    # --- send (persistence + BUG 2) --------------------------------------
+
     def test_send_persists_user_and_assistant_messages(self):
         self.client.force_login(self.alice)
         fake = ChatService(llm_client=_FakeStructuredLLM(response="hi back"))
@@ -1083,7 +1073,7 @@ class ChatUIViewTests(TestCase):
         self.assertNotEqual(session.title, "New session")
         self.assertEqual(resp.json()["session"]["title"], session.title)
 
-    # --- company scoping --------------------------------------------------
+
     def test_send_on_another_owners_session_is_404(self):
         self.client.force_login(self.alice)
         fake = ChatService(llm_client=_FakeStructuredLLM(response="nope"))
@@ -1104,7 +1094,7 @@ class ChatUIViewTests(TestCase):
         )
         self.assertEqual(resp.status_code, 404)
 
-    # --- attach -----------------------------------------------------------
+
     @override_settings(MEDIA_ROOT=_MEDIA)
     def test_attach_creates_chat_source_document(self):
         self.client.force_login(self.alice)
@@ -1124,7 +1114,7 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(document.company_id, self.alice_co.id)
         self.assertEqual(document.uploaded_by_id, self.alice.id)
 
-    # --- delete_session (soft-delete) ------------------------------------
+
     def test_delete_session_soft_deletes_in_scope(self):
         session = ConversationSession.objects.create(
             company=self.alice_co, user=self.alice, title="To delete"
@@ -1143,7 +1133,7 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(resp["Content-Type"], "application/json")
         self.assertTrue(resp.json()["deleted"])
 
-        # Soft-deleted (is_deleted=True), not hard-deleted.
+
         self.assertFalse(
             ConversationSession.objects.filter(pk=session.pk).exists()
         )
@@ -1151,7 +1141,7 @@ class ChatUIViewTests(TestCase):
         self.assertTrue(row.is_deleted)
         self.assertIsNotNone(row.deleted_at)
 
-        # The session's messages are soft-deleted too.
+
         self.assertFalse(
             Message.objects.filter(conversation=session).exists()
         )
@@ -1159,7 +1149,7 @@ class ChatUIViewTests(TestCase):
             Message.all_objects.filter(conversation=session, is_deleted=True).exists()
         )
 
-        # It disappears from the sessions list.
+
         listing = self.client.get(reverse("chat:sessions_json")).json()
         ids = {s["id"] for s in listing["sessions"]}
         self.assertNotIn(str(session.pk), ids)
@@ -1170,7 +1160,7 @@ class ChatUIViewTests(TestCase):
             reverse("chat:delete_session", args=[self.bob_session.pk])
         )
         self.assertEqual(resp.status_code, 404)
-        # Bob's session is untouched (still visible, not deleted).
+
         self.assertTrue(
             ConversationSession.objects.filter(pk=self.bob_session.pk).exists()
         )
@@ -1202,7 +1192,7 @@ class ChatUIViewTests(TestCase):
             ConversationSession.objects.filter(pk=session.pk).exists()
         )
 
-    # --- rendered page structural assertions (BUG 1/2/delete button) -----
+
     def test_chat_page_has_no_leaked_template_comments(self):
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
@@ -1212,23 +1202,23 @@ class ChatUIViewTests(TestCase):
     def test_chat_page_composer_is_bottom_of_flex_column_panel(self):
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The composer markup is present.
+
         self.assertIn('id="chat-composer"', body)
-        # #chat-messages (grow/scroll) comes before #chat-composer (bottom row)
-        # within the flex-column panel.
+
+
         messages_pos = body.find('id="chat-messages"')
         composer_pos = body.find('id="chat-composer"')
         self.assertNotEqual(messages_pos, -1)
         self.assertNotEqual(composer_pos, -1)
         self.assertLess(messages_pos, composer_pos)
-        # The growing/scrolling transcript area.
+
         self.assertIn("overflow-y-auto", body)
-        # The composer is pinned to the bottom (margin-top:auto) as the last
-        # child of the flex-column panel.
+
+
         composer_tag = body[composer_pos:composer_pos + 120]
         self.assertIn("mt-auto", composer_tag)
-        # The attach control renders as an SVG icon, NOT the literal ligature
-        # text "attach_file".
+
+
         self.assertNotIn("attach_file", body)
 
     def test_chat_page_layout_is_viewport_bounded(self):
@@ -1244,29 +1234,29 @@ class ChatUIViewTests(TestCase):
         layout_pos = body.find('id="chat-layout"')
         self.assertNotEqual(layout_pos, -1)
         layout_tag = body[layout_pos:layout_pos + 260]
-        # The outer layout clips overflow so the page never grows past the
-        # screen; children scroll internally.
+
+
         self.assertIn("overflow:hidden", layout_tag)
-        # The buggy hardcoded reservation is GONE -- height is measured in JS,
-        # not baked into the markup as a guessed offset.
+
+
         self.assertNotIn("calc(100vh - 12rem)", layout_tag)
         self.assertNotIn("100vh", layout_tag)
-        # The runtime sizing helper measures the layout's real top and sets its
-        # height to the remaining viewport space, on load and on resize.
+
+
         self.assertIn("sizeChatLayout", body)
         self.assertIn("getBoundingClientRect", body)
         self.assertIn("window.innerHeight", body)
         self.assertIn('addEventListener("resize", sizeChatLayout)', body)
-        # The transcript area grows + scrolls internally (flex-1 + min-h-0 +
-        # overflow-y-auto); it is NOT the whole page scrolling.
+
+
         messages_pos = body.find('id="chat-messages"')
         self.assertNotEqual(messages_pos, -1)
         messages_tag = body[messages_pos:messages_pos + 120]
         self.assertIn("flex-1", messages_tag)
         self.assertIn("min-h-0", messages_tag)
         self.assertIn("overflow-y-auto", messages_tag)
-        # The composer is a fixed, non-scrolling row pinned to the bottom of the
-        # panel (flex-none + margin-top:auto), so it never scrolls out of view.
+
+
         composer_pos = body.find('id="chat-composer"')
         self.assertNotEqual(composer_pos, -1)
         composer_tag = body[composer_pos:composer_pos + 140]
@@ -1280,20 +1270,20 @@ class ChatUIViewTests(TestCase):
         /chat/<id>/delete/ endpoint."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The conversation panel still has a title/header row...
+
         header_pos = body.find('id="chat-conv-header"')
         title_pos = body.find('id="chat-conv-title"')
         self.assertNotEqual(header_pos, -1)
         self.assertNotEqual(title_pos, -1)
         self.assertLess(header_pos, body.find('id="chat-messages"'))
-        # ...but the top-right delete control (markup + JS lookup) is gone.
+
         self.assertNotIn('id="chat-conv-delete"', body)
         self.assertNotIn("convDeleteBtn", body)
-        # Deletion still exists via the per-row trash control + shared endpoint.
+
         self.assertIn("data-row-delete-session-id", body)
         self.assertIn('"/delete/"', body)
-        # The sidebar history entry has a stable id so the shared delete
-        # handler can remove it as well as the main history-grid row.
+
+
         self.assertIn('item.getAttribute("data-chat-session-id") === id', body)
         self.assertIn('history.pushState({ sessionId: null }, "", baseUrl)', body)
 
@@ -1307,19 +1297,19 @@ class ChatUIViewTests(TestCase):
         session."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The per-row delete trigger marker (always visible trash icon).
+
         self.assertIn("data-row-delete-session-id", body)
-        # Clicking it calls deleteSession() directly.
+
         self.assertIn("deleteSession", body)
-        # It reuses the existing soft-delete endpoint (no new endpoint).
+
         self.assertIn("/delete/", body)
-        # The row body click still loads the session; the delete trigger
-        # stopPropagation()s so it does NOT also load the session.
+
+
         self.assertIn("stopPropagation", body)
-        # No confirmation popup: delete is immediate.
+
         self.assertNotIn("window.confirm", body)
         self.assertNotIn("This cannot be undone", body)
-        # The old hover-reveal '...' menu wiring is gone.
+
         self.assertNotIn("data-row-menu-session-id", body)
 
     def test_chat_page_session_rows_are_uniform_grid(self):
@@ -1330,10 +1320,10 @@ class ChatUIViewTests(TestCase):
         uniform row class + truncation styles."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The uniform row class with a fixed height (h-14) + consistent padding.
+
         self.assertIn("chat-session-row", body)
         self.assertIn("h-14", body)
-        # Single-line title truncation (overflow:hidden; ellipsis; nowrap).
+
         self.assertIn("textOverflow", body)
         self.assertIn('"ellipsis"', body)
         self.assertIn('"nowrap"', body)
@@ -1344,11 +1334,11 @@ class ChatUIViewTests(TestCase):
         send auto-creates a session), the input auto-focuses, and Enter sends."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # Auto-focus wiring + auto-create-on-first-send + Enter-to-send.
+
         self.assertIn("inputEl.focus", body)
         self.assertIn("sendMessage", body)
-        # On an empty state the first send creates a session via the new-session
-        # endpoint, then posts the message (no hunting for a chat to start).
+
+
         self.assertIn("postMessage", body)
         self.assertIn('body.append("question"', body)
 
@@ -1357,14 +1347,14 @@ class ChatUIViewTests(TestCase):
         word (the user saw the paperclip render as the text 'attach_file')."""
         self.client.force_login(self.alice)
         body = self.client.get(reverse("chat:home")).content.decode()
-        # The attach control is an inline SVG, so the ligature word must NOT be
-        # present as static markup text.
+
+
         self.assertNotIn("attach_file", body)
         self.assertNotIn(">add<", body)
-        # Inline SVGs are present for the composer/new-chat controls.
+
         self.assertIn("<svg", body)
-        # Belt-and-suspenders: the Material Symbols font is still loaded by the
-        # Unfold shell for any remaining glyphs.
+
+
         self.assertIn("fonts/material-symbols/styles.css", body)
 
     def test_company_selector_rendered_in_header_not_chats_column(self):
@@ -1380,14 +1370,14 @@ class ChatUIViewTests(TestCase):
         self.assertNotEqual(header_pos, -1)
         self.assertNotEqual(company_pos, -1)
         self.assertNotEqual(list_pos, -1)
-        # The company element lives inside the header, above the session list.
+
         self.assertLess(header_pos, company_pos)
         self.assertLess(company_pos, list_pos)
-        # It is hidden from view (no duplicate visible selector on the page).
+
         company_tag = body[company_pos:company_pos + 120]
         self.assertIn("hidden", company_tag)
 
-    # --- ADDITION A: empty/missing vector store must NOT hard-fail --------
+
     @override_settings(CHROMA_PATH=tempfile.mkdtemp(prefix="chat-empty-chroma-"))
     def test_send_with_empty_vector_store_returns_answer(self):
         """With NO library documents (empty/absent Chroma collection), a send
@@ -1411,7 +1401,7 @@ class ChatUIViewTests(TestCase):
         data = resp.json()
         self.assertEqual(data["assistant"]["content"], "general answer")
         self.assertEqual(data["assistant"]["citations"], [])
-        # Both the user and assistant messages were persisted.
+
         roles = list(
             session.messages.order_by("created_at").values_list("role", flat=True)
         )

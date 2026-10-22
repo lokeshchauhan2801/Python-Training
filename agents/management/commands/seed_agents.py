@@ -10,7 +10,6 @@ from django.db import transaction
 from agents.models import AgentEdge, AgentGraph, AgentNode, Tool
 from company.models import Company
 
-# (slug, display name, is_enabled, langfuse prompt name) for the built-in tools.
 _TOOL_SPECS = [
     ("general_assistant", "General assistant", True, "tool_general_assistant"),
     ("document_search", "Document search", True, "tool_document_search"),
@@ -62,8 +61,8 @@ class Command(BaseCommand):
     def _seed_company(self, company):
         tools = {}
         for slug, name, is_enabled, prompt_name in _TOOL_SPECS:
-            # prompt_name in defaults => set only on create; a re-seed never
-            # clobbers a value the user edited in the canvas/Langfuse.
+
+
             tool, created = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
@@ -105,7 +104,7 @@ class Command(BaseCommand):
             defaults={"company": company, "kind": AgentNode.KIND_END},
         )
 
-        # All four tools attached to the STEP router node (M2M add is idempotent).
+
         step.tools.add(*tools.values())
 
         for src, tgt in ((start, step), (step, end)):

@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load the single .env file from the project root BEFORE reading any env vars.
 load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-change-me")
@@ -15,8 +14,6 @@ DEBUG = os.getenv("DEBUG", "False").lower() in ("1", "true", "yes", "on")
 
 ALLOWED_HOSTS = [h for h in os.getenv("ALLOWED_HOSTS", "*").split(",") if h]
 
-# Application definition.
-# Unfold and the contrib apps it needs must come BEFORE django.contrib.admin.
 INSTALLED_APPS = [
     "unfold",
     "unfold.contrib.filters",
@@ -30,7 +27,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "basics",
-    "auth",  # label: accounts
+    "auth",
     "company",
     "chat",
     "scrapper",
@@ -46,16 +43,13 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    # Capture the acting user into a contextvar AFTER AuthenticationMiddleware
-    # so request.user is populated.
+
+
     "basics.middleware.CurrentUserMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-# Allow the Unfold admin shell to frame the same-origin /agent-builder/ canvas
-# iframe. Django's default is "DENY", which would block even same-origin
-# framing; "SAMEORIGIN" only loosens it to this origin.
 X_FRAME_OPTIONS = "SAMEORIGIN"
 
 ROOT_URLCONF = "base.urls"
@@ -63,11 +57,8 @@ ROOT_URLCONF = "base.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        # A single project-level templates dir (base/templates/) is required to
-        # override Unfold's header: because `unfold` is FIRST in INSTALLED_APPS,
-        # an app-local unfold/helpers/*.html would NOT win under APP_DIRS — only
-        # a filesystem DIRS entry reliably overrides the stock Unfold template.
-        # APP_DIRS stays True so every app's own templates still load.
+
+
         "DIRS": [BASE_DIR / "base" / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
@@ -76,10 +67,10 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
-                # ChatGPT-style recent-chat history in the Unfold sidebar.
+
                 "chat.context_processors.admin_chat_history",
-                # Global company switcher: active company + accessible set on
-                # every admin + chat response (session-based, no model change).
+
+
                 "company.context_processors.active_company",
             ],
         },
@@ -89,8 +80,6 @@ TEMPLATES = [
 WSGI_APPLICATION = "base.wsgi.application"
 ASGI_APPLICATION = "base.asgi.application"
 
-# Database — PostgreSQL only. NAME is forced to agentic-db (default). An
-# optional DATABASE_URL may override the discrete settings. NO SQLite anywhere.
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -137,11 +126,9 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# LLM configuration. The key may be absent entirely; the app must import and run
-# check/migrate with no key, so nothing here constructs a backend client.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")  # "" -> default OpenAI endpoint
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_API_KEY = (
     os.getenv("LLM_API_KEY")
     or os.getenv("OPENAI_API_KEY")
@@ -149,19 +136,6 @@ LLM_API_KEY = (
     or ""
 )
 
-# Per-provider LLM registry. `get_llm_client(provider=...)` picks one entry so a
-# single call-site arg (provider="openai" | "deepseek") switches the WHOLE client
-# — chat model, embedding model, base_url, and key — for that call. Each value is
-# a plain string read from env; nothing here constructs a backend client (import
-# stays no-key-safe). The DEFAULT provider is LLM_PROVIDER, and its "openai"-style
-# generic LLM_* vars above remain the fallback so existing setups keep working.
-#
-# DeepSeek is an OpenAI-compatible CHAT endpoint but does NOT serve OpenAI
-# embedding models; its embedding fields default to the generic EMBEDDING_MODEL
-# and (optionally) a separate embeddings base_url/key if you run one. If DeepSeek
-# is selected for a path that embeds (document ingestion / document_search), set
-# DEEPSEEK_EMBEDDING_* to a provider that actually serves embeddings, or keep
-# embedding paths on openai.
 def _csv(env_value, default_list):
     """Parse a comma-separated env list, falling back to default_list."""
     raw = (env_value or "").strip()
@@ -173,13 +147,13 @@ def _csv(env_value, default_list):
 LLM_PROVIDERS = {
     "openai": {
         "chat_model": os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini"),
-        # Models the chat dropdown offers for this provider (comma-separated env
-        # override OPENAI_MODELS). The first is the default selection.
+
+
         "models": _csv(os.getenv("OPENAI_MODELS"), ["gpt-4o-mini", "gpt-4o"]),
         "embedding_model": os.getenv(
             "OPENAI_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         ),
-        "base_url": os.getenv("OPENAI_BASE_URL", ""),  # "" -> default OpenAI
+        "base_url": os.getenv("OPENAI_BASE_URL", ""),
         "api_key": (
             os.getenv("OPENAI_API_KEY")
             or os.getenv("LLM_API_KEY")
@@ -192,15 +166,15 @@ LLM_PROVIDERS = {
     "deepseek": {
         "chat_model": os.getenv("DEEPSEEK_LLM_MODEL", "deepseek-chat"),
         "models": _csv(os.getenv("DEEPSEEK_MODELS"), ["deepseek-chat", "deepseek-reasoner"]),
-        # DeepSeek has no OpenAI-style embeddings; fall back to the generic model
-        # and let embedding_* below point at whoever actually serves it.
+
+
         "embedding_model": os.getenv(
             "DEEPSEEK_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         ),
         "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         "api_key": os.getenv("DEEPSEEK_API_KEY", ""),
-        # Embeddings: default to the OpenAI key/endpoint so RAG keeps working even
-        # when chat is on DeepSeek (override with DEEPSEEK_EMBEDDING_* to change).
+
+
         "embedding_base_url": os.getenv("DEEPSEEK_EMBEDDING_BASE_URL", ""),
         "embedding_api_key": (
             os.getenv("DEEPSEEK_EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -208,33 +182,15 @@ LLM_PROVIDERS = {
     },
 }
 
-# Langfuse prompt-management / tracing configuration. Plain env values only; no
-# SDK is imported at settings import. basics.langfuse.LangfuseClient reads these
-# lazily and is a no-op (local prompt fallback, no SDK import, no key logging)
-# unless ALL THREE are present. These live in ~/.bash_profile alongside the LLM
-# keys and may be absent in CI-style runs, so the client must tolerate "".
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "")  # BASE_URL, not HOST
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "")
 
-# Vector store (ChromaDB) + embedding configuration. These are plain values
-# only; no Chroma or embedding client is constructed at import. ChromaVectorStore
-# (basics/vectorstore.py) and LLMClient read these lazily on first use. When
-# CHROMA_HOST is set the store talks to a remote Chroma server, otherwise it uses
-# a local PersistentClient rooted at CHROMA_PATH (gitignored chroma_data/).
 CHROMA_PATH = Path(os.getenv("CHROMA_PATH", BASE_DIR / "chroma_data"))
 CHROMA_HOST = os.getenv("CHROMA_HOST", "")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# Document-processing backends (Phase 4). All values are plain strings read from
-# the environment; NOTHING here opens a broker/server connection at import. The
-# selected backend is resolved lazily when a document is dispatched. The DEBUG
-# "celery" path runs inline on a background thread so no Redis/worker is needed
-# in local development.
-#   celery   — Celery/Redis (inline ThreadPool in DEBUG, apply_async otherwise)
-#   kafka    — publish an event consumed by the kafka_worker
-#   temporal — start a Temporal workflow run by the temporal_worker
 DOCUMENT_PROCESSING_BACKEND = os.getenv("DOCUMENT_PROCESSING_BACKEND", "celery")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
@@ -253,12 +209,6 @@ REST_FRAMEWORK = {
     ],
 }
 
-# django-unfold configuration. Branding (SITE_TITLE/SITE_HEADER/SITE_SYMBOL),
-# sidebar search, and a grouped, collapsible, icon'd navigation give the admin
-# the full Unfold look instead of the plain Django-admin fallback. Every link
-# uses reverse_lazy and points ONLY at routes/models that exist in this project,
-# so importing settings never resolves URLs (import-safe check/migrate) and the
-# admin never 500s on a missing reverse. Material Symbols names supply the icons.
 UNFOLD = {
     "SITE_TITLE": "Agentic Demo",
     "SITE_HEADER": "Agentic Demo",
@@ -283,10 +233,8 @@ UNFOLD = {
                 ],
             },
             {
-                # Company is its OWN top-level group — it holds only the
-                # company changelist. The chat UI links and chat model
-                # changelists are a SEPARATE top-level "Chat" group below
-                # (standalone in the main menu, not nested under Company).
+
+
                 "title": "Company",
                 "collapsible": True,
                 "items": [
@@ -298,8 +246,8 @@ UNFOLD = {
                 ],
             },
             {
-                # Standalone top-level Chat section in the main menu. No models
-                # or tables moved — this is admin navigation structure only.
+
+
                 "title": "Chat",
                 "collapsible": True,
                 "items": [
@@ -311,9 +259,8 @@ UNFOLD = {
                     {
                         "title": "New chat",
                         "icon": "add_comment",
-                        # Open the chat page with a flag the page JS reads to
-                        # create a new session in-place — NEVER the raw JSON
-                        # new-session endpoint (BUG 1).
+
+
                         "link": format_lazy("{}?new=1", reverse_lazy("chat:home")),
                     },
                     {

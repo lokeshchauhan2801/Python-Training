@@ -42,9 +42,8 @@ class ScrapeJobSerializer(
             self.fields["company"].read_only = True
         if "company" in self.fields:
             self.fields["company"].required = False
-        # title and content are server-managed outputs except title may be set
-        # on create; keep content/error read-only (handled by the mixin for
-        # content via status? no) -> content/error are outputs.
+
+
         for name in ("content", "error"):
             if name in self.fields:
                 self.fields[name].read_only = True

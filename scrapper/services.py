@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_PORTS = {80, 443}
-REQUEST_TIMEOUT = 10  # seconds (connect + read)
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB
+REQUEST_TIMEOUT = 10
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_CONTENT_CHARS = 200_000
 USER_AGENT = "agentic-flow-scraper/1.0"
 
@@ -93,8 +93,8 @@ class _TextExtractor(HTMLParser):
 def _ip_is_blocked(ip_str) -> bool:
     """Return True if an IP falls in any range that must never be fetched."""
     ip = ipaddress.ip_address(ip_str)
-    # Collapse IPv4-mapped / IPv4-compatible IPv6 to the embedded IPv4 so the
-    # same checks apply (e.g. ::ffff:127.0.0.1).
+
+
     if isinstance(ip, ipaddress.IPv6Address):
         mapped = getattr(ip, "ipv4_mapped", None)
         if mapped is not None:
@@ -138,7 +138,7 @@ def _validate_url(url: str) -> tuple[str, int]:
     if not infos:
         raise ScrapeValidationError("Could not reach URL")
 
-    # Reject if ANY resolved address is in a blocked range.
+
     for info in infos:
         sockaddr = info[4]
         ip_str = sockaddr[0]
@@ -161,7 +161,7 @@ class ScrapeService:
             _validate_url(job.url)
             title, content = self._fetch(job.url)
         except ScrapeValidationError as exc:
-            # Expected failure: record a user-safe message, do not log as error.
+
             logger.warning("Scrape rejected for url=%s: %s", job.url, exc)
             return self._fail(job, str(exc), actor)
         except _ScrapeError as exc:

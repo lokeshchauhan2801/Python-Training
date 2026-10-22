@@ -48,7 +48,7 @@ createElement / appendChild, NEVER innerHTML, so content can never execute.
     }
 
     function setStatus(text) {
-      // textContent, never innerHTML.
+
       statusEl.textContent = text;
     }
 
@@ -122,6 +122,6 @@ createElement / appendChild, NEVER innerHTML, so content can never execute.
         .catch(function () { setStatus("Request failed."); });
     });
   })();
-  </script>
+</script>
   {% endif %}
 {% endblock %}

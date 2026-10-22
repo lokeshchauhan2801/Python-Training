@@ -20,7 +20,7 @@ User = get_user_model()
 
 
 def _addrinfo(ip):
-    # (family, type, proto, canonname, sockaddr) with sockaddr[0] == ip
+
     return [(2, 1, 6, "", (ip, 443))]
 
 
