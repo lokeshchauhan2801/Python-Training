@@ -1,15 +1,3 @@
-"""LangGraphChatService — runs one new message through a company's graph.
-
-A turn: resolve the active graph's STEP (router) node and its enabled tools ->
-one structured LLM call picks a tool slug (or __direct__) -> run the handler ->
-persist. The public entry point mirrors ChatService.process_message so
-chat.views.send can call either interchangeably.
-
-The tool seam, the slug->handler registry, the five tool handlers, and the
-GraphState TypedDict all live in THIS file. agents and langgraph are imported
-lazily inside function bodies so importing this module never pulls either.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -254,13 +242,6 @@ class RouterDecision(PydanticBaseModel):
 
 
 class LangGraphChatService:
-    """Run a new chat message through the company's active LangGraph graph.
-
-    Constructed with an injected ``ChatService`` (reused for persistence + RAG
-    internals) and an import-safe Langfuse client (may be a no-op). The LLM seam
-    is taken from the injected ``chat_service`` so tests inject one fake client
-    and both the router and the tool handlers share it.
-    """
 
     def __init__(self, chat_service, langfuse):
         self._chat = chat_service
@@ -394,15 +375,6 @@ class LangGraphChatService:
         enabled_tools,
         llm,
     ):
-        """Build and invoke the StateGraph; return the chosen tool's outcome.
-
-        Returns a dict ``{tool_result, tool_used, node_slug, route_reason,
-        trace_id}``. The graph nodes mutate a captured ``outcome`` dict so the
-        router's choice/execution survives outside the LangGraph state (which
-        only carries JSON-ish scalars).
-        """
-
-
         from agents.models import AgentEdge, AgentNode
 
         node_slug = step_node.slug
@@ -613,12 +585,6 @@ class LangGraphChatService:
         tool_rows,
         llm,
     ):
-        """Pick one enabled tool slug or ``__direct__`` via a structured LLM call.
-
-        Returns ``(selected_slug, route_reason, trace_id)``. With NO enabled
-        tools the router is skipped and ``__direct__`` is forced. An unknown slug
-        from the model is coerced to ``__direct__``.
-        """
         from basics.llm import LLMBackendError, LLMConfigurationError
         from chat.services import ChatProviderError
 
