@@ -883,7 +883,7 @@ def process_document(document: Document) -> Document:
         raise DocumentIndexError(message) from exc
 
 
-RAG_RELEVANCE_MAX_DISTANCE = 0.60
+RAG_RELEVANCE_MAX_DISTANCE = 0.72
 
 
 def _relevance_max_distance() -> float:

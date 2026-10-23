@@ -227,6 +227,7 @@
 
       let currentSessionId = null;
       let pendingAttachmentIds = [];
+      let pendingAttachments = [];
       let chartSeq = 0;
 
       const CHAT_LAYOUT_BOTTOM_MARGIN = 16;
@@ -451,6 +452,18 @@
         text.style.whiteSpace = "pre-wrap";
         bubble.appendChild(text);
 
+        if (isUser && message.attachments && message.attachments.length) {
+          const attachRow = document.createElement("div");
+          attachRow.className = "mt-2 flex flex-wrap gap-1";
+          message.attachments.forEach(function (att) {
+            const chip = document.createElement("span");
+            chip.className = "inline-block border border-white/40 bg-white/15 px-2 py-0.5 rounded-full text-xs";
+            chip.textContent = att.title;
+            attachRow.appendChild(chip);
+          });
+          bubble.appendChild(attachRow);
+        }
+
         if (!isUser) {
           renderCitations(bubble, message.citations);
           renderChart(bubble, message.chart_data);
@@ -493,11 +506,13 @@
 
       function clearAttachmentsUI() {
         pendingAttachmentIds = [];
+        pendingAttachments = [];
         clear(attachmentsEl);
       }
 
       function addAttachmentChip(doc) {
         pendingAttachmentIds.push(doc.id);
+        pendingAttachments.push({ id: doc.id, title: doc.title });
         const chip = document.createElement("span");
         chip.className = "border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
         chip.textContent = doc.title;
@@ -790,8 +805,10 @@
         if (emptyStateEl && emptyStateEl.parentNode) {
           emptyStateEl.parentNode.removeChild(emptyStateEl);
         }
-        renderMessage({ role: "user", content: question, citations: [], metadata: {} });
+        const sentAttachments = pendingAttachments.slice();
+        renderMessage({ role: "user", content: question, citations: [], metadata: {}, attachments: sentAttachments });
         inputEl.value = "";
+        clearAttachmentsUI();
         const placeholder = renderProcessingPlaceholder();
 
         fetch(sendUrlFor(sessionId), {
@@ -810,7 +827,6 @@
             removeProcessingPlaceholder(placeholder);
             if (!res.ok || res.data.error) { setStatus(res.data.error || "Send failed."); return; }
             renderMessage(res.data.assistant);
-            clearAttachmentsUI();
             setStatus("");
             loadSessions();
           })

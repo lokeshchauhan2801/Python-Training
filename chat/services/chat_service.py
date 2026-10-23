@@ -192,6 +192,9 @@ class ChatService:
             f"{pk}:{updated_at.isoformat() if updated_at else ''}:{chunk_count}"
             for pk, updated_at, chunk_count in rows
         )
+        from documents.services import _relevance_max_distance
+
+        payload = f"rt={_relevance_max_distance()}|{payload}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _find_relevant_chunks(self, user, question, conversation=None, company=None):
@@ -313,12 +316,30 @@ class ChatService:
                 "explain that in the response. "
             )
 
+        if has_file_context:
+            grounding_instructions = (
+                "You are a helpful assistant in a private document chat workspace. "
+                "Answer using the retrieved passages from the user's uploaded files when relevant. "
+                "Cite factual claims from those passages with their exact reference "
+                "in square brackets, for example [<reference ULID>]. Never invent "
+                "a source, page, or reference. "
+            )
+        else:
+            grounding_instructions = (
+                "You are a helpful general-purpose assistant. No relevant passages "
+                "were retrieved from the user's uploaded files for this question, "
+                "so answer it directly from your own general knowledge, the same "
+                "way a normal assistant would. Do NOT refuse, and do NOT say the "
+                "workspace only contains certain documents or that you can only "
+                "answer from uploaded files — that restriction does not apply when "
+                "no file context is present. Do not cite any source reference, "
+                "since there are no passages to cite. Ignore any earlier turns in "
+                "this conversation that refused for lack of documents; those do "
+                "not constrain this answer. "
+            )
+
         prompt = (
-            "You are a helpful assistant in a private document chat workspace. "
-            "Answer using the retrieved passages from the user's uploaded files when relevant. "
-            "Cite factual claims from those passages with their exact reference "
-            "in square brackets, for example [<reference ULID>]. Never invent "
-            "a source, page, or reference. "
+            grounding_instructions
             + chart_instructions
             + "The chart must ALWAYS go in the structured chart field only. "
             "NEVER put JSON, code fences, or a chart specification in the "
