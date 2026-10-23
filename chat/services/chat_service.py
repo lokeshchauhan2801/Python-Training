@@ -163,22 +163,6 @@ class ChatService:
         return message
 
     def _context_signature(self, user, company):
-        """Return a cheap hash of the retrievable document context.
-
-        The signature captures what could change retrieval for THIS company so
-        the repeated-query cache can tell whether the document context changed
-        between two identical questions. It is derived from the SAME
-        eligible-document scope retrieval uses (``source=LIBRARY``,
-        ``status=READY``, ``chunk_count>0``, filtered by ``company``), so an
-        unrelated company's upload never affects another company's signature.
-
-        Each eligible document contributes ``"<pk>:<updated_at>:<chunk_count>"``
-        so an upload becoming READY (new pk), a reprocess (``updated_at`` and/or
-        ``chunk_count`` move) and a delete (pk gone) all change the hash. The
-        query loads only three small columns and never reads chunk bodies. An
-        empty eligible set yields a stable, non-null hash so two identical
-        no-file questions still share a signature and stay cacheable.
-        """
         documents = Document.objects.filter(
             source=Document.SOURCE_LIBRARY,
             status=Document.STATUS_READY,
@@ -198,22 +182,6 @@ class ChatService:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _find_relevant_chunks(self, user, question, conversation=None, company=None):
-        """Retrieve grounding passages from the company's library documents.
-
-        Delegates to ``documents.services.find_relevant_chunks`` (which owns the
-        embed-query + Chroma similarity-search + owner-scoped re-mapping). Chart-
-        ish questions widen the ``k`` so the deterministic chart builder has more
-        to work with. Returns an empty list when no company is in scope (there is
-        nothing owner-scoped to search).
-
-        EARLY RETURN (matches the OLD project): if there are NO eligible library
-        documents (``source=LIBRARY``, ``status=READY``, ``chunk_count>0`` for
-        this company) we return ``[]`` immediately and NEVER touch Chroma. With
-        an empty/never-created vector collection this is the difference between a
-        normal general-knowledge answer and a spurious retrieval 502. The
-        ``ChatRetrievalError`` path then only fires when documents DO exist but
-        the search genuinely fails.
-        """
         if company is None:
             return []
         eligible = Document.objects.filter(
@@ -873,20 +841,6 @@ class ChatService:
         current_signature,
         exclude_user_message=None,
     ):
-        """Return a prior assistant answer for an identical question in this
-        conversation, or ``None``.
-
-        Repeated queries are served from the database so the LLM is not called
-        again. Matching is per-conversation and exact (case-insensitive, trimmed)
-        to avoid surfacing another conversation's or user's answer. The cached
-        answer reuses the stored content, citations, and chart_data.
-
-        The cache is context-aware: a text match is only a HIT when the stored
-        answer's ``context_signature`` is non-null AND equals
-        ``current_signature`` (the document context at ask time). A changed
-        signature (file uploaded / reprocessed / deleted / newly READY) or a
-        legacy NULL signature is a MISS, so retrieval and the LLM run again.
-        """
         if conversation is None:
             return None
         normalized = question.strip()
@@ -927,14 +881,6 @@ class ChatService:
         attachment_ids=None,
         model_name=None,
     ):
-        """Run the full RAG pipeline for one user message, persisting Messages.
-
-        Retrieves grounding chunks, builds a cited prompt, asks the LLM for a
-        structured completion (with a deterministic CSV chart fallback for chart
-        requests), and persists the user + assistant ``Message`` rows inside one
-        transaction. Repeated identical questions with an unchanged document
-        context are served from the per-session cache without calling the LLM.
-        """
         if not user or not user.is_authenticated:
             raise ValueError("A signed-in user is required to chat.")
 
@@ -1115,14 +1061,6 @@ class ChatService:
         return session
 
     def _link_attachments(self, user_message, conversation, attachment_ids):
-        """Attach the given chat documents to the user message (and session).
-
-        Attachments are scoped to the conversation's company so one user can
-        never link another company's document onto a message. The documents are
-        linked both to the message (``Message.documents`` M2M) and the session
-        (via ``Document.session``) so the CSV chart builder and future turns can
-        find them.
-        """
         if not attachment_ids:
             return
         documents = list(

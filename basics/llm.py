@@ -278,25 +278,6 @@ class LLMClient:
 
 
 def resolve_provider_model(model_name=None, provider=None):
-    """Map a selected (model, provider) to a concrete ``(provider, model)`` pair.
-
-    Single source of truth for turning the composer's selection into the
-    provider+model the real LLM call should use. Rules (in order):
-
-    1. An explicit, registry-known ``provider`` wins. This disambiguates a model
-       id that two providers might both list; the model is kept as given (or the
-       provider's chat_model/first model when no model was sent).
-    2. Otherwise, scan ``settings.LLM_PROVIDERS`` for the provider whose
-       ``"models"`` list (or ``"chat_model"``) contains ``model_name`` and return
-       that provider with ``model_name``.
-    3. Otherwise (empty/unknown model and no valid explicit provider) fall back
-       to ``settings.LLM_PROVIDER`` and that provider's ``chat_model`` (else its
-       first model, else ``settings.LLM_MODEL``) — preserving today's behaviour
-       exactly when the client sends nothing.
-
-    Returns a plain ``(provider_key, model_id)`` tuple and never constructs a
-    backend client, so callers stay no-key-safe.
-    """
     registry = getattr(settings, "LLM_PROVIDERS", {}) or {}
 
     def _default_model(provider_key):

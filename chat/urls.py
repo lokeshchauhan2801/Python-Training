@@ -1,8 +1,3 @@
-"""URLs for the top-level ``/chat/`` surface (option B).
-
-Mounted at ``/chat/`` in ``base.urls`` BEFORE the admin include so the chat
-page lives outside ``/admin/`` while still rendering inside the admin shell.
-"""
 
 from django.urls import path
 

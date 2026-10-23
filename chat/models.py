@@ -1,14 +1,3 @@
-"""Chat domain models.
-
-``ConversationSession`` groups a sequence of question/response ``Conversation``
-turns. Both compose ``BaseModel`` (audit) + ``SoftDeleteModel`` + a ULID ``id``
-PK and declare their own required ``company`` FK directly. The cross-field invariant
-``Conversation.company ==
-session.company`` is owned by the model: it is declared in ``clean()`` AND
-re-checked inside ``save()`` so admin, serializer, and service saves are all
-guarded (a cross-table rule cannot be a DB ``CheckConstraint``).
-"""
-
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models

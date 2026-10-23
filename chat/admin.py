@@ -1,25 +1,3 @@
-"""Admin for the chat domain, demonstrating ALL FIVE Unfold learning goals.
-
-Goal 1 - app-local ``change_list_template`` / ``change_form_template`` that
-         extend the Unfold templates and add buttons.
-Goal 2 - ``get_urls()`` adds CSRF/permission-protected AJAX endpoints
-         (``detail-json`` GET JSON, ``summarize`` POST CSRF) plus a ``learning``
-         page, all wrapped in ``admin_view`` and registered BEFORE super().
-Goal 3 - ``learning_view`` returns a ``TemplateResponse`` with admin context.
-Goal 4 - full admin config (list_display/filter/search/date_hierarchy/fieldsets/
-         readonly + a ``ConversationInline`` + display methods).
-Goal 5 - Unfold ``actions_row`` / ``actions_detail`` buttons wired to the AJAX
-         endpoints + bulk soft-delete/restore, rendered by the overridden
-         templates.
-
-Security: every custom view is wrapped in ``admin_view`` (login + permission),
-resolves objects from the permission-scoped ``self.get_queryset(request)`` ONLY,
-answers AJAX GET with JSON and validates CSRF on POST, and the client JS renders
-server data with ``textContent`` / ``createElement`` / ``appendChild`` (NEVER
-``innerHTML``) so injected content can never execute. AJAX updates the page
-WITHOUT a full refresh.
-"""
-
 import json
 
 from django.contrib import admin

@@ -1,26 +1,3 @@
-"""Top-level ``/chat/`` surface (option B).
-
-Plain Django views rendered inside the Unfold admin shell (they pull
-``admin.site.each_context`` so the LEFT sidebar + branding match the admin). The
-page itself is wired entirely with AJAX — no full-page navigation — and all
-server-side scope is re-derived here (never trusted from the client) via the
-shared helpers in ``chat.scope``.
-
-JSON endpoints:
-  * ``companies_json`` / ``sessions_json`` / ``messages_json`` — read models.
-  * ``new_session`` — AJAX create, always JSON 201, NEVER a redirect (BUG 1).
-  * ``send`` — runs ``ChatService.process_message`` and returns the persisted
-    user + assistant ``Message`` pair; the first send retitles the session from
-    the message (BUG 2, done in the service).
-  * ``attach`` — stores an uploaded file as a ``source=chat`` Document (not
-    chunked) linked to the session.
-
-Security: ``login_required`` on every view; out-of-scope company/session ids
-resolve to 404 via the scoped querysets; POSTs are CSRF-protected (no
-``csrf_exempt``). The client renders server data with
-``textContent``/``createElement``/``appendChild`` only.
-"""
-
 import json
 import logging
 
@@ -52,27 +29,6 @@ def _chat_service():
 
 
 def _orchestrator_for(company, llm_client=None):
-    """Return the service a NEW message runs through.
-
-    ``LangGraphChatService`` when ``company`` has an active, runnable graph
-    (an active ``AgentGraph`` with a START node and at least one STEP node);
-    otherwise the existing ``ChatService`` (``_chat_service()``), so chat is
-    unchanged where no graph is configured.
-
-    ``llm_client`` is the per-turn client resolved in ``send`` for the model the
-    user picked (``LLMClient(provider=<resolved>, model=<selected>)``). When
-    given, it is injected into whichever service runs this turn so the REAL call
-    honours the selection: the RAG ``ChatService`` is built with it, and the
-    LangGraph service wraps a ``ChatService`` built with it (its tool handlers
-    and router all read ``self._chat._llm``). When ``None`` the default client is
-    used (the no-selection fallback). Note: the ``_chat_service()`` helper is
-    still used as the no-client default so tests that patch it keep working.
-
-    Import-safety: ``agents`` is imported LAZILY here so ``chat`` has no
-    import-time dependency on ``agents`` (and none on ``langgraph``). ANY
-    import/lookup error degrades silently to the RAG path — a missing or
-    unrunnable graph is never an error, just a fallback.
-    """
 
     def _rag_service():
 
@@ -146,31 +102,6 @@ def _provider_display_name(provider):
 @login_required
 @require_http_methods(["GET"])
 def models_json(request):
-    """Return BOTH providers' models so the dropdown can pick either one.
-
-    Every model is tagged with its provider, so the composer can show e.g.
-    "gpt-4o-mini (OpenAI)" and "deepseek-chat (DeepSeek)" in one list and send
-    the chosen model AND provider back on ``send``. The default selection is the
-    chat_model (else first model) of settings.LLM_PROVIDER. Built entirely from
-    settings.LLM_PROVIDERS (no hardcoded model names), active provider first, so
-    switching LLM_PROVIDER only changes which option is pre-selected.
-
-    Response shape::
-
-        {
-          "provider": "openai",            # active default provider
-          "default": "gpt-4o-mini",        # default model id
-          "default_provider": "openai",    # explicit, == provider
-          "models": [                      # list of {id, label, provider}
-            {"id": "gpt-4o-mini", "label": "gpt-4o-mini (OpenAI)",
-             "provider": "openai"},
-            ...
-          ]
-        }
-
-    Degrades to the generic LLM_MODEL/LLM_PROVIDER when the registry is empty,
-    keeping the ``provider``/``default`` keys for backward-compat.
-    """
     from django.conf import settings
 
     provider = getattr(settings, "LLM_PROVIDER", "openai")
@@ -196,22 +127,17 @@ def models_json(request):
         )
 
 
-    ordered_providers = [provider] + [p for p in registry if p != provider]
-
-    models = []
-    for provider_key in ordered_providers:
-        cfg = registry.get(provider_key) or {}
-        display = _provider_display_name(provider_key)
-        for model_id in cfg.get("models") or []:
-            models.append(
-                {
-                    "id": model_id,
-                    "label": "%s (%s)" % (model_id, display),
-                    "provider": provider_key,
-                }
-            )
-
     active_cfg = registry.get(provider) or {}
+    display = _provider_display_name(provider)
+    models = [
+        {
+            "id": model_id,
+            "label": "%s (%s)" % (model_id, display),
+            "provider": provider,
+        }
+        for model_id in active_cfg.get("models") or []
+    ]
+
     default_model = (
         active_cfg.get("chat_model")
         or (active_cfg.get("models") or [None])[0]
