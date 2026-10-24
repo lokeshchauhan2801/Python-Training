@@ -1,0 +1,412 @@
+================================================================================
+ AGENTIC-FLOW — API REFERENCE (for Postman)
+================================================================================
+Generated from the project's URLconfs, views, and serializers.
+Base URL assumed throughout:   http://127.0.0.1:8000
+Change host/port to match where you run `python manage.py runserver`.
+
+--------------------------------------------------------------------------------
+ AUTHENTICATION (IMPORTANT — read first)
+--------------------------------------------------------------------------------
+DRF is configured with:
+    DEFAULT_AUTHENTICATION_CLASSES = SessionAuthentication, BasicAuthentication
+    DEFAULT_PERMISSION_CLASSES     = IsAuthenticated
+
+There is NO token/JWT endpoint. So in Postman you authenticate one of two ways:
+
+A) HTTP Basic Auth (simplest for the /api/v1/ endpoints)
+   - Postman tab: Authorization -> Type: "Basic Auth"
+   - Username: your Django user's username (or email, depending on your user model)
+   - Password: that user's password
+   - Works for every /api/v1/... endpoint below. No CSRF needed with Basic Auth.
+
+B) Session cookie (needed for the browser-style /chat/, /company/ endpoints)
+   1. Log in once via the admin: open http://127.0.0.1:8000/admin/ in a browser,
+      log in. Postman can share the browser cookie if you enable the Postman
+      "Interceptor"/"Cookie" sync, OR:
+   2. Copy the `sessionid` (and `csrftoken`) cookies from the browser dev tools
+      into Postman: Headers -> Cookie: sessionid=<...>; csrftoken=<...>
+   3. For POST/PUT/PATCH/DELETE on session-authenticated endpoints, add header:
+          X-CSRFToken: <value of the csrftoken cookie>
+
+CSRF rules of thumb:
+   - /api/v1/... with Basic Auth  -> no CSRF header required.
+   - /api/v1/... with session cookie -> add X-CSRFToken for write methods.
+   - /chat/..., /company/... (page/AJAX endpoints) -> session cookie +
+     X-CSRFToken required for POST. These are NOT meant for Basic Auth.
+
+Common headers:
+   Accept: application/json
+   Content-Type: application/json         (for JSON bodies)
+   Content-Type: multipart/form-data      (for file uploads — Postman sets this
+                                            automatically when you use form-data)
+
+Notes on scoping:
+   - Almost everything is "company-scoped". Objects belong to a Company you own.
+   - On create, `company` is resolved automatically if you own exactly ONE
+     company; if you own several you must pass `company: <company_id>`.
+   - IDs are ULIDs (26-char strings), not integers.
+   - List endpoints return only rows in your scope; out-of-scope IDs give 404.
+
+================================================================================
+ ROOT URL MAP (from base/urls.py)
+================================================================================
+   /chat/                      -> chat page + AJAX endpoints (session auth)
+   /agent-builder/             -> agent builder HTML page (session auth)
+   /company/                   -> active-company switcher (session auth)
+   /admin/                     -> Django admin (browser)
+   /api/v1/auth/               -> auth API
+   /api/v1/company/            -> company API
+   /api/v1/chat/               -> chat API
+   /api/v1/scrapper/           -> scrapper API
+   /api/v1/documents/          -> documents API
+   /api/v1/agents/             -> agents API
+
+
+================================================================================
+ 1) AUTH API      base: /api/v1/auth/
+================================================================================
+
+1.1  GET /api/v1/auth/user/me/
+     Purpose : return the currently authenticated user.
+     Auth    : required.
+     Body    : none.
+     Postman : GET http://127.0.0.1:8000/api/v1/auth/user/me/
+
+
+================================================================================
+ 2) COMPANY API      base: /api/v1/company/
+================================================================================
+ DRF ModelViewSet (trailing slash required). Company-owner scoped.
+
+2.1  GET  /api/v1/company/company/
+     List companies you own.
+
+2.2  POST /api/v1/company/company/
+     Create a company.
+     Body (JSON):
+       {
+         "name": "Acme Inc",
+         "slug": "acme",                 // optional
+         "description": "",              // optional
+         "is_active": true               // optional
+       }
+     Server-controlled (ignored if sent): owner, created_by, updated_by.
+
+2.3  GET  /api/v1/company/company/{id}/        Retrieve one company.
+
+2.4  PUT  /api/v1/company/company/{id}/        Full update (send all writable fields).
+     Example (note the REQUIRED trailing slash — a PUT without it returns 500):
+       PUT {{base_url}}/api/v1/company/company/01M4Z5TXQ3MH7PT469SY6VY4P0/
+     Headers:
+       Content-Type: application/json
+       Accept: application/json
+       Authorization: Basic <username:password>
+     Body (JSON):
+       {
+         "name": "Acme Inc (updated)",
+         "slug": "acme-inc",
+         "description": "Updated company description.",
+         "is_active": true
+       }
+     Not writable (ignored / read-only): id, owner, created_by, updated_by,
+       created_at, updated_at, is_deleted, deleted_at. `slug` must be unique.
+     404 if the company is not yours (non-superuser). 400 on a duplicate slug.
+
+2.5  PATCH /api/v1/company/company/{id}/       Partial update.
+     Example:
+       PATCH {{base_url}}/api/v1/company/company/01M4Z5TXQ3MH7PT469SY6VY4P0/
+     Body (JSON) — send only the field(s) you want to change:
+       {
+         "name": "New name only"
+       }
+
+2.6  DELETE /api/v1/company/company/{id}/      Delete.
+     Example:
+       DELETE {{base_url}}/api/v1/company/company/01M4Z5TXQ3MH7PT469SY6VY4P0/
+
+
+================================================================================
+ 3) CHAT API      base: /api/v1/chat/
+================================================================================
+
+3.1  POST /api/v1/chat/conversation/ask/
+     Purpose : run ONE chat turn against an existing session (simple Q/A API).
+     Body (JSON):
+       {
+         "session": "<session id — the `id` OR the `session_id` from the list>",
+         "question": "What is in my uploaded document?"
+       }
+     NOTE on the session value: a ConversationSession has TWO ULIDs in the list
+     response — `id` (the primary key) and `session_id` (a public reference).
+     This endpoint accepts EITHER one, so copy whichever you like. (The two
+     values differ; both resolve to the same session.)
+     Returns : the created Conversation turn (question + response).
+     Errors  : 503 if the LLM is not configured; 404 if session not in scope.
+
+ --- ConversationSession ModelViewSet (trailing slash required) ---
+
+3.2  GET  /api/v1/chat/conversation-session/
+     List your conversation sessions.
+
+3.3  POST /api/v1/chat/conversation-session/
+     Create a session.
+     Body (JSON):
+       {
+         "title": "My chat",             // optional (default "New session")
+         "company": "<company_id>",      // optional if you own exactly one company
+         "model_name": "",               // optional
+         "context": {},                  // optional
+         "media": [],                    // optional
+         "metadata": {}                  // optional
+       }
+
+3.4  GET    /api/v1/chat/conversation-session/{id}/    Retrieve one.
+3.5  PUT    /api/v1/chat/conversation-session/{id}/    Full update.
+3.6  PATCH  /api/v1/chat/conversation-session/{id}/    Partial update.
+3.7  DELETE /api/v1/chat/conversation-session/{id}/    Delete.
+
+
+================================================================================
+ 4) DOCUMENTS API      base: /api/v1/documents/
+================================================================================
+ DRF ModelViewSet (trailing slash required). Company-owner scoped.
+
+4.1  GET  /api/v1/documents/document/
+     List documents in your scope.
+
+4.2  POST /api/v1/documents/document/
+     Upload a library document.
+     Use Postman "Body -> form-data" (file upload), NOT raw JSON:
+       Key: file      Type: File     Value: <choose a file>
+       Key: title     Type: Text     Value: My document
+       Key: source    Type: Text     Value: library            // optional
+       Key: company   Type: Text     Value: <company_id>        // if >1 company
+     Server-controlled (cannot be set): uploaded_by, status, processing_*,
+       chunk_count, file_type, content_type, file_size.
+
+4.3  GET  /api/v1/documents/document/{id}/        Retrieve one document.
+4.4  PUT  /api/v1/documents/document/{id}/        Full update.
+4.5  PATCH /api/v1/documents/document/{id}/       Partial update.
+4.6  DELETE /api/v1/documents/document/{id}/      Delete (purges chunks/vectors).
+
+4.7  GET  /api/v1/documents/document/{id}/chunks/
+     List the extracted chunks for a document.
+
+4.8  POST /api/v1/documents/document/{id}/process/
+     Re-run SYNCHRONOUS extraction/embedding for a LIBRARY document.
+     Body    : none.
+     Errors  : 409 if the document is not a library document.
+
+
+================================================================================
+ 5) SCRAPPER API      base: /api/v1/scrapper/
+================================================================================
+ DRF ModelViewSet (trailing slash required). Company-owner scoped.
+
+5.1  GET  /api/v1/scrapper/scrape-job/
+     List scrape jobs.
+
+5.2  POST /api/v1/scrapper/scrape-job/
+     Create a scrape job.
+     Body (JSON):
+       {
+         "url": "https://example.com/page",
+         "title": "Optional title",      // optional
+         "company": "<company_id>",      // optional if you own one company
+         "metadata": {}                  // optional
+       }
+     Server-controlled: status, content, error.
+
+5.3  GET    /api/v1/scrapper/scrape-job/{id}/    Retrieve one.
+5.4  PUT    /api/v1/scrapper/scrape-job/{id}/    Full update.
+5.5  PATCH  /api/v1/scrapper/scrape-job/{id}/    Partial update.
+5.6  DELETE /api/v1/scrapper/scrape-job/{id}/    Delete.
+
+5.7  POST /api/v1/scrapper/scrape-job/{id}/run/
+     Run the scrape (SSRF-safe). Body: none.
+     Returns the job with its resulting status (expected failures come back as
+     an ERROR job with HTTP 200).
+
+
+================================================================================
+ 6) AGENTS API      base: /api/v1/agents/
+================================================================================
+ Four DRF ModelViewSets (trailing slash required). Company-owner scoped.
+ These back the agent-builder canvas.
+
+ --- 6A) GRAPH  /api/v1/agents/graph/ ---
+6.1  GET    /api/v1/agents/graph/                 List graphs.
+6.2  POST   /api/v1/agents/graph/
+       Body (JSON):
+         {
+           "name": "My agent graph",
+           "description": "",            // optional
+           "is_active": false,           // optional
+           "company": "<company_id>"     // optional if you own one company
+         }
+6.3  GET    /api/v1/agents/graph/{id}/            Retrieve.
+6.4  PUT    /api/v1/agents/graph/{id}/            Full update.
+6.5  PATCH  /api/v1/agents/graph/{id}/            Partial update.
+6.6  DELETE /api/v1/agents/graph/{id}/            Delete.
+6.7  GET    /api/v1/agents/graph/{id}/load/
+       Aggregated canvas payload: { graph, nodes, edges, tools }.
+6.8  POST   /api/v1/agents/graph/{id}/activate/
+       Make this the single active graph for its company. Body: none.
+       400 if the graph lacks a START node and at least one STEP node.
+
+ --- 6B) NODE  /api/v1/agents/node/ ---
+6.9  GET    /api/v1/agents/node/                  List nodes.
+6.10 POST   /api/v1/agents/node/
+       Body (JSON):
+         {
+           "graph": "<graph_id>",
+           "slug": "router",
+           "kind": "step",               // start | step | end
+           "label": "Router",            // optional
+           "tools": ["<tool_id>", ...],  // optional
+           "prompt_name": "agent_router",// optional
+           "position": {"x": 100, "y": 60}, // optional object
+           "config": {}                  // optional object
+         }
+       (company is taken from the graph automatically.)
+6.11 GET    /api/v1/agents/node/{id}/             Retrieve.
+6.12 PUT    /api/v1/agents/node/{id}/             Full update.
+6.13 PATCH  /api/v1/agents/node/{id}/             Partial update.
+6.14 DELETE /api/v1/agents/node/{id}/             Delete.
+
+ --- 6C) EDGE  /api/v1/agents/edge/ ---
+6.15 GET    /api/v1/agents/edge/                  List edges.
+6.16 POST   /api/v1/agents/edge/
+       Body (JSON):
+         {
+           "graph": "<graph_id>",
+           "source": "<node_id>",
+           "target": "<node_id>",        // must differ from source, same graph
+           "condition": ""               // optional
+         }
+6.17 GET    /api/v1/agents/edge/{id}/             Retrieve.
+6.18 PUT    /api/v1/agents/edge/{id}/             Full update.
+6.19 PATCH  /api/v1/agents/edge/{id}/             Partial update.
+6.20 DELETE /api/v1/agents/edge/{id}/             Delete.
+
+ --- 6D) TOOL  /api/v1/agents/tool/ ---
+6.21 GET    /api/v1/agents/tool/                  List tools.
+6.22 POST   /api/v1/agents/tool/
+       Body (JSON):
+         {
+           "slug": "document_search",    // must be a known handler slug unless
+                                         // config.kind == "prompt_only"
+           "name": "Document search",
+           "description": "",            // optional
+           "is_enabled": true,           // optional
+           "prompt_name": "tool_document_search", // optional
+           "config": {},                 // optional object
+           "company": "<company_id>"     // optional if you own one company
+         }
+       Known built-in tool slugs: general_assistant, document_search,
+       chat_summarise, web_search, add_to_knowledge_base,
+       document_processing_status.
+6.23 GET    /api/v1/agents/tool/{id}/             Retrieve.
+6.24 PUT    /api/v1/agents/tool/{id}/             Full update.
+6.25 PATCH  /api/v1/agents/tool/{id}/             Partial update.
+6.26 DELETE /api/v1/agents/tool/{id}/             Delete.
+6.27 POST   /api/v1/agents/tool/sync_langfuse/
+       Upsert prompt-only tools from posted Langfuse prompt names.
+       Body (JSON):
+         {
+           "prompt_names": ["my_prompt_a", "my_prompt_b"],
+           "company": "<company_id>"     // optional if you own one company
+         }
+
+
+================================================================================
+ 7) CHAT PAGE / AJAX ENDPOINTS      base: /chat/
+================================================================================
+ These power the chat UI. They use SESSION auth + CSRF (not Basic Auth).
+ For POSTs, send header: X-CSRFToken: <csrftoken cookie value>.
+ {session_id} is a 26-char ULID. Every {session_id} path segment below accepts
+ EITHER the session's `id` (primary key) OR its `session_id` reference value
+ from the list response — both resolve to the same session.
+
+7.1  GET  /chat/                                   HTML chat page.
+7.2  GET  /chat/{session_id}/                       HTML chat page, opens a session.
+7.3  GET  /chat/companies-json/                     List selectable companies.
+7.4  GET  /chat/models-json/                         List available models/providers.
+7.5  GET  /chat/sessions-json/                        List sessions.
+         Optional query: ?company=<company_id>
+7.6  POST /chat/new/
+         Create a session. Body (x-www-form-urlencoded):
+           company=<company_id>          // optional
+7.7  GET  /chat/{session_id}/messages-json/          List messages in a session.
+7.8  POST /chat/{session_id}/send/
+         Send one chat turn. Body (x-www-form-urlencoded or form-data):
+           question=<text>                           // optional if a file is attached
+           model_name=<model id>                     // optional (e.g. deepseek-chat)
+           provider=<provider>                       // optional (openai | deepseek)
+           attachment_ids=<document_id>              // optional, repeatable
+         Behaviours:
+           - file attached + no text  -> assistant asks what to do.
+           - "add this to the knowledge base" + attachment -> Temporal processing.
+           - "what's processing / status of <id>" -> live status report.
+7.9  POST /chat/{session_id}/attach/
+         Upload a file to a session (stored as a chat attachment, not embedded).
+         Body (form-data):
+           file=<File>
+         Returns: { id, title, file_type }. Use the returned id as attachment_ids
+         on /send/.
+7.10 POST /chat/{session_id}/delete/
+         Delete a session. Body (optional): soft=1  (soft-delete; default is hard).
+7.11 POST /chat/{session_id}/reprocess/
+         Retry Temporal processing for a failed knowledge-base document.
+         Body: document_id=<document_id>
+7.12 GET  /chat/{session_id}/doc-status-json/
+         Live processing status for the chat tracker.
+         Optional query: ?ids=<document_id>,<document_id>
+         Returns: { documents: [ {id, workflow_id, temporal_url, title, status,
+                    status_display, stage, progress, backend, error, terminal} ],
+                    all_done }
+
+
+================================================================================
+ 8) COMPANY SWITCHER      base: /company/
+================================================================================
+ Session auth + CSRF. Used by the global active-company switcher.
+
+8.1  POST /company/set-active-company/
+         Set the session's active company.
+         Body (x-www-form-urlencoded):
+           company=<company_id>
+           next=<safe relative url>      // optional (non-AJAX redirect target)
+         For a JSON response instead of a redirect, add header:
+           X-Requested-With: XMLHttpRequest
+         403 if the company is not accessible to you.
+
+
+================================================================================
+ 9) AGENT BUILDER PAGE
+================================================================================
+9.1  GET /agent-builder/            HTML page for the agent-builder canvas
+                                    (session auth; not a JSON API).
+
+
+================================================================================
+ QUICK POSTMAN SETUP CHECKLIST
+================================================================================
+ 1. Create an Environment with variable:  base = http://127.0.0.1:8000
+ 2. For /api/v1/... requests: Authorization = Basic Auth (your Django login).
+ 3. For JSON bodies: Body -> raw -> JSON.
+ 4. For file uploads (documents upload, chat attach): Body -> form-data, set the
+    file field Type to "File".
+ 5. For /chat/ and /company/ endpoints: log in via /admin/ in a browser, copy the
+    `sessionid` + `csrftoken` cookies into Postman, and for POSTs add header
+    X-CSRFToken = <csrftoken value>.
+ 6. Remember the trailing slash on every URL. ULIDs are 26-char strings.
+
+ Typical end-to-end flow:
+   a. POST /api/v1/company/company/                 (create a company)        [if none]
+   b. POST /api/v1/chat/conversation-session/       (create a session)
+   c. POST /chat/{session_id}/attach/               (optional: attach a file)
+   d. POST /chat/{session_id}/send/                 (ask a question / chart / KB add)
+   e. GET  /chat/{session_id}/doc-status-json/      (poll processing status)
+================================================================================
