@@ -72,14 +72,30 @@ def _valid_ulid(value):
 
 
 def _resolve_session(request, session_id):
-    """Resolve a session within the request's scope or raise 404."""
+    """Resolve a session within the request's scope or raise 404.
+
+    Accepts EITHER the primary key (``id``) OR the public ``session_id``
+    reference, so a caller can pass whichever ULID it has without a confusing
+    404 (both are 26-char ULIDs on ConversationSession).
+    """
+    from django.db.models import Q
+
     if not _valid_ulid(session_id):
         raise Http404("Invalid session id.")
-    return get_object_or_404(scoped_sessions(request), pk=session_id)
+    return get_object_or_404(
+        scoped_sessions(request), Q(pk=session_id) | Q(session_id=session_id)
+    )
 
 
 def _message_payload(message):
     """Serialize a Message for the client (ordered, display-ready)."""
+    # Attachments linked to this message (shown as chips on the bubble) so they
+    # survive a reload — the chip was previously only rendered from transient
+    # client state at send time and vanished after refresh.
+    attachments = [
+        {"id": str(doc.id), "title": doc.title}
+        for doc in message.documents.all()
+    ]
     return {
         "id": str(message.id),
         "role": message.role,
@@ -88,6 +104,7 @@ def _message_payload(message):
         "chart_data": message.chart_data,
         "metadata": message.metadata or {},
         "model_name": message.model_name,
+        "attachments": attachments,
         "created_at": message.created_at.isoformat(),
     }
 
@@ -178,10 +195,7 @@ def chat_session(request, session_id):
     blank page (like ``chat_home``) so the panel resets to a New Chat and the
     left list reflects the newly active company.
     """
-    if not _valid_ulid(session_id):
-        raise Http404("Invalid session id.")
-
-    session = get_object_or_404(scoped_sessions(request), pk=session_id)
+    session = _resolve_session(request, session_id)
 
 
     active = active_or_none(request)
@@ -289,6 +303,162 @@ def new_session(request):
     )
 
 
+from chat.services import kb as _kb
+
+# ChatGPT-style phrasing when a file is attached with no message: the assistant
+# asks what to do instead of auto-summarising (Option A). Kept short; the user
+# can then say "summarise", "add to knowledge base", ask a question, etc.
+_EMPTY_ATTACHMENT_REPLY = (
+    "I see you've attached {names}. What would you like me to do with it? "
+    "I can summarise it, pull out the key points, answer questions about it, "
+    "create a chart from its data, or add it to the company knowledge base so "
+    "it's searchable later — just tell me."
+)
+
+
+def _is_add_to_kb_request(text):
+    """True when the message asks to add the attached file to the knowledge base."""
+    return _kb.is_add_to_kb_request(text)
+
+
+def _is_status_request(text):
+    """True when the message asks about document processing status/progress."""
+    return _kb.is_status_request(text)
+
+
+def _attachment_titles(session, attachment_ids):
+    """Human-readable names for the turn's attachments (for the ask-reply)."""
+    docs = Document.objects.filter(pk__in=attachment_ids, company=session.company)
+    titles = [d.title for d in docs]
+    if not titles:
+        return "a file"
+    if len(titles) == 1:
+        return f"“{titles[0]}”"
+    return ", ".join(f"“{t}”" for t in titles[:-1]) + f" and “{titles[-1]}”"
+
+
+def _assistant_turn_response(request, session, user_message, assistant_message):
+    """Serialize a stored (user, assistant) pair in the shape ``send`` returns."""
+    session.refresh_from_db(fields=["title"])
+    return JsonResponse(
+        {
+            "user": _message_payload(user_message) if user_message else None,
+            "assistant": _message_payload(assistant_message),
+            "session": {"id": str(session.id), "title": session.title},
+        },
+        status=201,
+    )
+
+
+def _reply_empty_attachment(request, session, attachment_ids):
+    """Option A: store the attachment turn and ask what to do (no LLM call)."""
+    service = _chat_service()
+    # Empty user content — the attachment chip renders from message.documents,
+    # matching the ChatGPT look (file card, no fabricated text).
+    user_message = service.create_message(
+        session, "user", "", model_name="user", actor=request.user
+    )
+    service._link_attachments(user_message, session, attachment_ids)
+    content = _EMPTY_ATTACHMENT_REPLY.format(
+        names=_attachment_titles(session, attachment_ids)
+    )
+    assistant_message = service.create_message(
+        session, "assistant", content, model_name="assistant", actor=request.user
+    )
+    return _assistant_turn_response(request, session, user_message, assistant_message)
+
+
+def _add_attachments_to_knowledge_base(request, session, question, attachment_ids):
+    """Promote chat attachments to library Documents and dispatch via Temporal.
+
+    Delegates to ``chat.services.kb.add_session_attachments_to_kb`` (dedup +
+    Temporal dispatch; the CHAT path always uses Temporal). Persists the user
+    message and a direct assistant confirmation (no LLM call) that names the
+    Temporal workflow id, and returns the pair in the shape ``send`` returns.
+    When a dispatch fails (transient), the assistant message carries
+    ``metadata.retry_document_ids`` so the chat can render a Retry button.
+    """
+    service = _chat_service()
+
+    result = _kb.add_session_attachments_to_kb(
+        conversation=session,
+        company=session.company,
+        attachment_ids=attachment_ids,
+        actor=request.user,
+    )
+
+    user_message = service.create_message(
+        session, "user", question, model_name="user", actor=request.user
+    )
+    service._link_attachments(user_message, session, attachment_ids)
+
+    assistant_message = service.create_message(
+        session,
+        "assistant",
+        result["content"],
+        model_name="knowledge_base",
+        actor=request.user,
+    )
+    extra_meta = {}
+    if result.get("failed_ids"):
+        extra_meta["retry_document_ids"] = result["failed_ids"]
+    # Quick links to the Temporal workflow(s) for the dispatched file(s).
+    temporal_links = [
+        {"title": q["title"], "url": q["temporal_url"], "workflow_id": q["workflow_id"]}
+        for q in result.get("queued", [])
+        if q.get("temporal_url")
+    ]
+    if temporal_links:
+        extra_meta["temporal_links"] = temporal_links
+    # Live-track the freshly queued documents right in this reply.
+    queued_ids = [q["id"] for q in result.get("queued", [])]
+    if queued_ids:
+        extra_meta["live_status_document_ids"] = queued_ids
+    if extra_meta:
+        assistant_message.metadata = {
+            **(assistant_message.metadata or {}),
+            **extra_meta,
+        }
+        assistant_message.save(
+            actor=request.user, update_fields=["metadata", "updated_at", "updated_by"]
+        )
+
+    return _assistant_turn_response(request, session, user_message, assistant_message)
+
+
+def _answer_document_status(request, session, question, attachment_ids):
+    """Report document processing status directly (no LLM call).
+
+    The assistant message carries ``metadata.live_status_document_ids`` so the
+    chat UI can render a live tracker that polls the status endpoint until the
+    referenced documents reach a terminal state.
+    """
+    service = _chat_service()
+    user_message = service.create_message(
+        session, "user", question, model_name="user", actor=request.user
+    )
+    if attachment_ids:
+        service._link_attachments(user_message, session, attachment_ids)
+    content = _kb.document_status_report(
+        company=session.company, message_text=question
+    )
+    assistant_message = service.create_message(
+        session, "assistant", content, model_name="assistant", actor=request.user
+    )
+    track_ids = _kb.status_document_ids(
+        company=session.company, message_text=question
+    )
+    if track_ids:
+        assistant_message.metadata = {
+            **(assistant_message.metadata or {}),
+            "live_status_document_ids": track_ids,
+        }
+        assistant_message.save(
+            actor=request.user, update_fields=["metadata", "updated_at", "updated_by"]
+        )
+    return _assistant_turn_response(request, session, user_message, assistant_message)
+
+
 @login_required
 @require_http_methods(["POST"])
 def send(request, session_id):
@@ -302,15 +472,35 @@ def send(request, session_id):
         except (ValueError, TypeError):
             question = None
     question = (question or "").strip()
-    if not question:
-        return JsonResponse({"error": "Question is required."}, status=400)
 
     model_name = (request.POST.get("model_name") or "").strip() or None
-
-
     provider = (request.POST.get("provider") or "").strip() or None
     attachment_ids = request.POST.getlist("attachment_ids")
 
+    # A turn needs EITHER text OR at least one attachment. Sending a media file
+    # with no message is allowed; only a turn with neither is rejected.
+    if not question and not attachment_ids:
+        return JsonResponse(
+            {"error": "Type a message or attach a file."}, status=400
+        )
+    # File attached with NO message (ChatGPT/Claude behaviour, Option A): don't
+    # fabricate a prompt or auto-summarise — store the attachment turn and ask
+    # the user what they want to do with it.
+    if not question and attachment_ids:
+        return _reply_empty_attachment(request, session, attachment_ids)
+
+    # Intent net (works for BOTH the LangGraph router path and the plain
+    # ChatService path, i.e. companies with no agent graph):
+    #   * "add/process this file to the knowledge base" -> Temporal processing.
+    #   * "what's processing / status of <id>"          -> status report.
+    # Only treat an add-to-KB message as such when there is actually a file on
+    # the turn or session to add.
+    if attachment_ids and _is_add_to_kb_request(question):
+        return _add_attachments_to_knowledge_base(
+            request, session, question, attachment_ids
+        )
+    if _is_status_request(question):
+        return _answer_document_status(request, session, question, attachment_ids)
 
     resolved_provider, resolved_model = resolve_provider_model(model_name, provider)
 
@@ -369,19 +559,98 @@ def send(request, session_id):
 @login_required
 @require_http_methods(["POST"])
 def delete_session(request, session_id):
-    """Soft-delete one session (and its messages) within the request's scope.
+    """Delete one session (and its messages) within the request's scope.
 
-    Scoped like every other chat endpoint (out-of-scope => 404). Uses the
-    SoftDeleteModel API (``is_deleted=True`` via ``delete``), never a hard
-    DELETE, and soft-deletes the session's messages for consistency.
+    PERMANENT by default: the session and its messages/turns are removed with a
+    real SQL DELETE (``hard_delete``). Soft delete (``is_deleted=True``, kept for
+    audit) happens ONLY when the client explicitly opts in by sending
+    ``soft=1`` (POST body or querystring). Scoped like every other chat endpoint
+    (out-of-scope => 404).
     """
     session = _resolve_session(request, session_id)
 
+    soft = (request.POST.get("soft") or request.GET.get("soft") or "").strip() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
-    session.messages.all().delete(actor=request.user)
-    session.delete(actor=request.user)
+    if soft:
+        session.messages.all().delete(actor=request.user)
+        session.delete(actor=request.user)
+    else:
+        # Permanent removal. Hard-delete children first (messages and turns),
+        # then the session row itself. Use all_objects so already soft-deleted
+        # rows are purged too.
+        from .models import Conversation, Message
 
-    return JsonResponse({"id": str(session.id), "deleted": True})
+        Message.all_objects.filter(conversation=session).hard_delete()
+        Conversation.all_objects.filter(session=session).hard_delete()
+        session.hard_delete()
+
+    return JsonResponse(
+        {"id": str(session.id), "deleted": True, "soft": soft}
+    )
+
+
+@login_required
+@require_http_methods(["POST"])
+def reprocess_document(request, session_id):
+    """Retry Temporal processing for a failed chat knowledge-base document.
+
+    Backs the chat "Retry" button. ``document_id`` is read from the POST body
+    (or JSON) and scoped to the session's company, so a user can never retry
+    another company's document. Returns the new workflow id on success.
+    """
+    session = _resolve_session(request, session_id)
+
+    document_id = request.POST.get("document_id")
+    if document_id is None and request.body:
+        try:
+            document_id = (json.loads(request.body) or {}).get("document_id")
+        except (ValueError, TypeError):
+            document_id = None
+    document_id = (document_id or "").strip()
+    if not document_id:
+        return JsonResponse({"error": "A document_id is required."}, status=400)
+
+    result = _kb.retry_document_processing(
+        document_id=document_id, company=session.company, actor=request.user
+    )
+    return JsonResponse(
+        {
+            "ok": result["ok"],
+            "message": result["content"],
+            "workflow_id": result.get("workflow_id"),
+            "document_id": document_id,
+        },
+        status=200 if result["ok"] else 502,
+    )
+
+
+@login_required
+@require_http_methods(["GET"])
+def document_status_json(request, session_id):
+    """Live status rows for the chat tracker (polled by a status reply).
+
+    Query params:
+      * ``ids`` — comma-separated document ids to report (what a reply tracks).
+    Falls back to the company's in-flight documents when no ids are given.
+    Scoped to the session's company. Returns ``{documents: [...], all_done}``.
+    """
+    session = _resolve_session(request, session_id)
+
+    ids_param = (request.GET.get("ids") or "").strip()
+    document_ids = [i for i in ids_param.split(",") if i] if ids_param else None
+
+    rows = _kb.document_status_rows(
+        company=session.company,
+        document_ids=document_ids,
+        message_text=None if document_ids else "",
+    )
+    all_done = all(row["terminal"] for row in rows) if rows else True
+    return JsonResponse({"documents": rows, "all_done": all_done})
 
 
 @login_required

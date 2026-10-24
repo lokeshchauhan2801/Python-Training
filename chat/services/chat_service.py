@@ -451,7 +451,66 @@ class ChatService:
             )
         )
 
-    def _chat_csv_documents(self, conversation):
+    # The user explicitly wants the raw numbers alongside the chart.
+    _WANTS_DATA_RE = re.compile(
+        r"\b(with|and|also|include|show|list|give|provide)\b.{0,30}"
+        r"\b(data|numbers?|figures?|values?|table|breakdown|details?)\b"
+        r"|\b(data|numbers?|figures?|values?|table)\b.{0,20}\b(too|also|as well)\b",
+        re.IGNORECASE,
+    )
+
+    # A line that is just a data row (bullet / numbered / "Label: value").
+    _DATA_LINE_RE = re.compile(
+        r"^\s*(?:[-*\u2022]|\d+[.)])?\s*\**[^:]{1,60}\**\s*[:\-]\s*\$?\d",
+    )
+
+    _PROVIDER_DISPLAY = {"openai": "OpenAI", "deepseek": "DeepSeek"}
+
+    def _identity_line(self):
+        """System line stating the REAL provider/model serving this turn.
+
+        Injected so the assistant answers "which model are you?" accurately;
+        models otherwise misreport themselves (DeepSeek often claims to be
+        OpenAI GPT because of its training data).
+        """
+        provider = getattr(self._llm, "provider", "") or ""
+        model = getattr(self._llm, "model", "") or ""
+        display = self._PROVIDER_DISPLAY.get(
+            provider, provider.capitalize() or "the configured provider"
+        )
+        return (
+            f"Your identity: you are served by the {display} API using the model "
+            f"'{model}'. If the user asks which model, provider, or LLM you are, "
+            f"answer with exactly this provider and model ({display}, model "
+            f"'{model}'). Do NOT claim to be OpenAI, ChatGPT, GPT-3.5/GPT-4, or "
+            "any other provider/model unless that is the one named here, even if "
+            "your training data suggests otherwise."
+        )
+
+    @classmethod
+    def _chart_caption_only(cls, content, message_text):
+        """Trim a chart reply's prose to a short caption.
+
+        When a chart is returned the chart itself carries the data, so the text
+        should be a brief caption rather than a re-listing of every value. This
+        drops data-listing lines (bullets / "Label: value" rows) and keeps the
+        surrounding sentences. Skipped entirely when the user explicitly asked
+        for the numbers/data/table too (e.g. "create a pie chart and list the
+        values").
+        """
+        if not content:
+            return content
+        if message_text and cls._WANTS_DATA_RE.search(message_text):
+            return content
+        kept = [
+            line
+            for line in content.splitlines()
+            if not cls._DATA_LINE_RE.match(line)
+        ]
+        trimmed = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+        return trimmed or "Here is the chart you requested."
+
+    def _chat_csv_documents(self, conversation, attachment_ids=None):
         """Chat-source CSV documents attached to this session.
 
         A chat-attached CSV is chat data only (never embedded), so chart
@@ -460,7 +519,20 @@ class ChatService:
         through ``ConversationSession.documents``); we also fold in any CSVs
         linked through the session's messages' ``documents`` M2M so a file
         referenced on an individual turn is still reachable.
+
+        ``attachment_ids`` (when given) restricts to THIS turn's attachments —
+        used by the LangGraph path, where the current user message is not linked
+        yet, so the correct file is the one just uploaded, not an earlier one.
         """
+        if attachment_ids:
+            return Document.objects.filter(
+                pk__in=list(attachment_ids),
+                company=conversation.company,
+                source=Document.SOURCE_CHAT,
+                status=Document.STATUS_READY,
+                file_type="csv",
+            ).distinct()
+
         session_docs = conversation.documents.filter(
             source=Document.SOURCE_CHAT,
             status=Document.STATUS_READY,
@@ -478,7 +550,7 @@ class ChatService:
     _MAX_ATTACHMENT_CHARS = 8000
     _MAX_ATTACHMENT_DOCS = 5
 
-    def _chat_attachment_texts(self, conversation):
+    def _chat_attachment_texts(self, conversation, attachment_ids=None):
         """Return ``(title, text)`` for this session's non-CSV chat attachments.
 
         Chat attachments (``source=chat``) are never embedded in the vector
@@ -493,9 +565,80 @@ class ChatService:
         text is read via ``documents.services.extract_document_text`` (which
         OCRs images via tesseract), capped per document, and docs with no usable
         text are skipped. The number of docs folded in is bounded.
+
+        ``attachment_ids`` (when given) restricts to THIS turn's attachments and
+        takes precedence over the "latest user message" heuristic. The LangGraph
+        path passes it because the current user message is not linked yet when
+        the tool runs — without it, document_search grounds on an EARLIER file
+        (the bug where an attached CSV returned the previous letter's answer).
         """
         if conversation is None:
             return []
+
+        if attachment_ids:
+            docs = (
+                Document.objects.filter(
+                    pk__in=list(attachment_ids),
+                    company=conversation.company,
+                    source=Document.SOURCE_CHAT,
+                    status=Document.STATUS_READY,
+                )
+                .exclude(file_type="csv")
+                .distinct()
+            )
+            sections = []
+            for document in docs[: self._MAX_ATTACHMENT_DOCS]:
+                try:
+                    text = document_services.extract_document_text(document)
+                except Exception:
+                    logger.exception(
+                        "Could not extract text from chat attachment %s",
+                        document.pk,
+                    )
+                    continue
+                if text:
+                    sections.append(
+                        (document.title, text[: self._MAX_ATTACHMENT_CHARS])
+                    )
+            return sections
+
+        # Prefer the attachments on the LATEST user message (the current turn):
+        # a file belongs to the message it was sent with, so only that turn's
+        # attachments ground the answer — not every file ever added to the
+        # session. Fall back to session-linked docs only when the latest user
+        # message has none.
+        from chat.models import Message
+
+        latest_user = (
+            conversation.messages.filter(role=Message.ROLE_USER)
+            .order_by("-created_at")
+            .first()
+        )
+        if latest_user is not None:
+            msg_docs = latest_user.documents.filter(
+                source=Document.SOURCE_CHAT,
+                status=Document.STATUS_READY,
+            ).exclude(file_type="csv")
+            if msg_docs.exists():
+                sections = []
+                seen = set()
+                for document in msg_docs[: self._MAX_ATTACHMENT_DOCS]:
+                    if document.pk in seen:
+                        continue
+                    seen.add(document.pk)
+                    try:
+                        text = document_services.extract_document_text(document)
+                    except Exception:
+                        logger.exception(
+                            "Could not extract text from chat attachment %s",
+                            document.pk,
+                        )
+                        continue
+                    if text:
+                        sections.append(
+                            (document.title, text[: self._MAX_ATTACHMENT_CHARS])
+                        )
+                return sections
 
         session_docs = conversation.documents.filter(
             source=Document.SOURCE_CHAT,
@@ -506,7 +649,16 @@ class ChatService:
             source=Document.SOURCE_CHAT,
             status=Document.STATUS_READY,
         ).exclude(file_type="csv")
-        documents = (session_docs | message_docs).distinct()
+        # Dedupe by primary key: a document reachable via BOTH the session and a
+        # message would otherwise appear twice (the earlier OR-union could leak
+        # duplicates across the join), padding the prompt with the same file.
+        seen_pks = set()
+        documents = []
+        for document in list(session_docs) + list(message_docs):
+            if document.pk in seen_pks:
+                continue
+            seen_pks.add(document.pk)
+            documents.append(document)
 
         sections = []
         for document in documents[: self._MAX_ATTACHMENT_DOCS]:
@@ -522,7 +674,9 @@ class ChatService:
             sections.append((document.title, text[: self._MAX_ATTACHMENT_CHARS]))
         return sections
 
-    def _build_csv_distribution_chart(self, conversation, question):
+    def _build_csv_distribution_chart(
+        self, conversation, question, attachment_ids=None
+    ):
         if not self._is_chart_request(question):
             return None
 
@@ -534,7 +688,9 @@ class ChatService:
             or re.search(r"over\s+time", question, re.I)
         )
 
-        documents = self._chat_csv_documents(conversation)
+        documents = self._chat_csv_documents(
+            conversation, attachment_ids=attachment_ids
+        )
         for document in documents:
             try:
                 with document.file.open("rb") as source:
@@ -955,6 +1111,9 @@ class ChatService:
                 chunks,
                 attachment_sections=attachment_sections,
             )
+            # Prepend the REAL provider/model identity so "which model are you?"
+            # is answered correctly (models misreport themselves otherwise).
+            prompt = f"{self._identity_line()}\n\n{prompt}"
 
             completion = None
             provider_error = None
@@ -1000,6 +1159,18 @@ class ChatService:
                 raise ChatProviderError(
                     "The LLM provider failed to generate a response."
                 ) from provider_error
+
+            # With a chart, keep the prose to a short caption — the data lives
+            # in the chart, so don't also dump every value as text (unless the
+            # user explicitly asked for the numbers/table too).
+            if completion.chart is not None:
+                caption = self._chart_caption_only(
+                    completion.response, message_text
+                )
+                if caption != completion.response:
+                    completion = completion.model_copy(
+                        update={"response": caption}
+                    )
         except (ChatRetrievalError, ChatProviderError):
             raise
         except Exception as exc:

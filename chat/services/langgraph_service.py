@@ -1,212 +1,35 @@
 from __future__ import annotations
+"""LangGraph chat runtime.
+
+This file holds ONLY the graph implementation: the router prompt, the
+``LangGraphChatService`` that compiles a company's agent graph into a
+``langgraph`` ``StateGraph``, routes each message to one tool, and persists the
+message pair.
+
+The tools themselves (and the registry) live in ``chat/services/llm_tools.py``.
+They are imported here and the registry symbols are re-exported so existing
+imports of ``chat.services.langgraph_service.available_slugs`` /
+``get_handler`` keep working unchanged.
+"""
 
 import logging
-from dataclasses import dataclass, field
-from typing import Callable, TypedDict
+from typing import TypedDict
 
 from django.db import transaction
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import Field
 
+# Tool plumbing + handlers live in llm_tools; importing the module also
+# registers every @register handler. Re-exported below for back-compat.
+from chat.services.llm_tools import (  # noqa: F401
+    ToolContext,
+    ToolResult,
+    available_slugs,
+    get_handler,
+    register,
+)
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ToolContext:
-
-
-    user: object
-    company: object
-    conversation: object
-    message_text: str
-    history_text: str = ""
-    attachment_ids: list = field(default_factory=list)
-    model_name: str | None = None
-    tool: object | None = None
-    llm: object | None = None
-    langfuse: object | None = None
-
-
-@dataclass
-class ToolResult:
-
-
-    content: str
-    citations: list = field(default_factory=list)
-    chart_data: dict | None = None
-    tool_used: str = ""
-    ok: bool = True
-    error: str | None = None
-
-
-_REGISTRY: dict[str, Callable[["ToolContext"], "ToolResult"]] = {}
-
-
-def register(slug: str):
-    """Decorator registering ``handler`` under ``slug`` in the module registry."""
-
-    def _decorator(handler: Callable[["ToolContext"], "ToolResult"]):
-        _REGISTRY[slug] = handler
-        return handler
-
-    return _decorator
-
-
-def get_handler(slug: str):
-    """Return the handler registered under ``slug``, or ``None`` if unknown."""
-    return _REGISTRY.get(slug)
-
-
-def available_slugs() -> set[str]:
-    """Return the set of slugs with a registered handler."""
-    return set(_REGISTRY.keys())
-
-
-@register("general_assistant")
-def _general_assistant(ctx: ToolContext) -> ToolResult:
-    """``general_assistant`` tool — a plain LLM answer, no retrieval."""
-
-    from chat.models import Message
-
-
-    history = (
-        ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM)
-        .order_by("created_at")
-    )
-    messages = [{"role": m.role, "content": m.content} for m in history]
-    messages.append({"role": "user", "content": ctx.message_text})
-
-
-    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_general_assistant"
-    sys = ctx.langfuse.get_prompt(name, fallback="") if ctx.langfuse else ""
-    if sys.strip():
-        messages.insert(0, {"role": "system", "content": sys})
-
-    content = ctx.llm.complete(messages)
-    return ToolResult(content=content, tool_used="general_assistant")
-
-
-@register("document_search")
-def _document_search(ctx: ToolContext) -> ToolResult:
-    """``document_search`` tool — the RAG/document path reused as a tool."""
-
-
-    from chat.services import ChatCompletion, ChatService
-
-    service = ChatService()
-    chunks = service._find_relevant_chunks(
-        ctx.user,
-        ctx.message_text,
-        conversation=ctx.conversation,
-        company=ctx.company,
-    )
-    prompt, citations = service._build_prompt(
-        ctx.history_text,
-        ctx.message_text,
-        chunks,
-    )
-
-
-    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_document_search"
-    pre = ctx.langfuse.get_prompt(name, fallback="") if ctx.langfuse else ""
-    if pre.strip():
-        prompt = f"{pre.strip()}\n\n{prompt}"
-    completion = ctx.llm.generate_structured(prompt, ChatCompletion)
-    chart_data = (
-        completion.chart.model_dump(mode="json") if completion.chart else None
-    )
-    return ToolResult(
-        content=completion.response.strip(),
-        citations=citations,
-        chart_data=chart_data,
-        tool_used="document_search",
-    )
-
-
-@register("chat_summarise")
-def _chat_summarise(ctx: ToolContext) -> ToolResult:
-    """``chat_summarise`` tool — summarise the conversation's prior history."""
-
-
-    from chat.models import Message
-    from chat.services import ChatService, _SUMMARY_SYSTEM_PROMPT
-
-    service = ChatService()
-    history = list(
-        ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM).order_by(
-            "created_at"
-        )
-    )
-    conversation_context = service._build_conversation_context(history)
-
-
-    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
-    sys = (
-        ctx.langfuse.get_prompt(name, fallback=_SUMMARY_SYSTEM_PROMPT)
-        if ctx.langfuse
-        else _SUMMARY_SYSTEM_PROMPT
-    )
-
-    try:
-
-
-        if "{{conversation}}" in sys or "{{history}}" in sys:
-            system_content = sys.replace(
-                "{{conversation}}", conversation_context
-            ).replace("{{history}}", conversation_context)
-            messages = [{"role": "system", "content": system_content}]
-        else:
-            messages = [
-                {"role": "system", "content": sys},
-                {"role": "user", "content": conversation_context},
-            ]
-    except Exception:
-        messages = [
-            {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": conversation_context},
-        ]
-
-    content = ctx.llm.complete(messages)
-    return ToolResult(content=content, tool_used="chat_summarise")
-
-
-@register("web_search")
-def _web_search(ctx: ToolContext) -> ToolResult:
-    """``web_search`` tool — STUB seam for a real provider (wire it in here)."""
-
-
-    return ToolResult(
-        content="Web search is not configured on this server.",
-        ok=False,
-        error="web_search_not_configured",
-        tool_used="web_search",
-    )
-
-
-@register("prompt_tool")
-def _prompt_tool(ctx: ToolContext) -> ToolResult:
-    """``prompt_tool`` — generic prompt-only tool driven by a Langfuse prompt."""
-
-    from chat.models import Message
-
-
-    history = (
-        ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM)
-        .order_by("created_at")
-    )
-    messages = [{"role": m.role, "content": m.content} for m in history]
-    messages.append({"role": "user", "content": ctx.message_text})
-
-
-    name = (ctx.tool.prompt_name if ctx.tool else "") or ""
-    sys = ctx.langfuse.get_prompt(name, fallback="") if (ctx.langfuse and name) else ""
-    if sys.strip():
-        messages.insert(0, {"role": "system", "content": sys})
-
-    content = ctx.llm.complete(messages)
-
-    used = (ctx.tool.slug if ctx.tool and ctx.tool.slug else "prompt_tool")
-    return ToolResult(content=content, tool_used=used)
 
 
 class GraphState(TypedDict, total=False):
@@ -242,8 +65,30 @@ _FALLBACK_ROUTER_PROMPT = (
     "review this conversation (e.g. 'chat summary', 'summarise this chat', "
     "'give me a summary'). This takes priority over document_search for explicit "
     "summary requests.\n"
-    "- Choose 'web_search' only for current/external web information.\n\n"
+    "- Choose 'web_search' for current/external web information, AND for chart "
+    "requests whose data comes from general world knowledge rather than the "
+    "user's files (e.g. 'pie chart of India's GDP growth last 5 years', 'bar "
+    "chart of world populations') — but ONLY when NO file is attached on this "
+    "message. It can build the chart from its own knowledge.\n"
+    "- Choose 'document_search' for chart/graph requests whose data comes from "
+    "an attached or uploaded file (e.g. 'make a bar chart from my CSV', 'chart "
+    "the figures in this document'). IMPORTANT: when a file IS attached on this "
+    "message (see the attachment note below), a bare chart request such as "
+    "'create a pie chart' means chart THAT attached file — choose "
+    "'document_search', never 'web_search'/'general_assistant', and never reuse "
+    "data from an earlier turn.\n"
+    "- Choose 'add_to_knowledge_base' when the user asks to ADD, SAVE, STORE, "
+    "UPLOAD, INDEX, or PROCESS an attached file into the knowledge base / "
+    "document library / company documents (e.g. 'add this file to the knowledge "
+    "base', 'process this document'). This triggers background Temporal "
+    "processing (chunk + embed); do NOT use it for merely asking questions about "
+    "a file.\n"
+    "- Choose 'document_processing_status' when the user asks about the STATUS, "
+    "PROGRESS, or count of documents being processed, or the status of a "
+    "specific document/task id (e.g. 'what's processing right now', 'is my file "
+    "done', 'status of doc-01H...').\n\n"
     "Conversation so far:\n{history}\n\n"
+    "{attachment_note}\n"
     "User message:\n{question}\n\n"
     "Choose exactly one tool slug from the list above, or '__direct__' to answer "
     "directly without a tool. Respond with the chosen slug and a short reason."
@@ -443,15 +288,36 @@ class LangGraphChatService:
                 result.tool_used = handler_slug
             return result
 
+        has_attachment = bool(attachment_ids)
+
         def _router_body(state):
-            selected, reason, trace_id = self._route(
-                message_text=message_text,
-                history_text=history_text,
-                enabled_tools=enabled_tools,
-                step_node=step_node,
-                tool_rows=tool_rows,
-                llm=llm,
-            )
+            from chat.services.chat_service import ChatService
+
+            # Deterministic rule: a chart request WITH a file attached this turn
+            # must chart THAT file (never world-knowledge / a previous turn's
+            # data). Force document_search, bypassing the LLM router, so e.g.
+            # "create a pie chart" + attached CSV never reuses an earlier chart.
+            if (
+                has_attachment
+                and ChatService._is_chart_request(message_text)
+                and "document_search" in enabled_tools
+            ):
+                selected = "document_search"
+                reason = (
+                    "file attached this turn + chart request -> chart the "
+                    "attached file"
+                )
+                trace_id = None
+            else:
+                selected, reason, trace_id = self._route(
+                    message_text=message_text,
+                    history_text=history_text,
+                    enabled_tools=enabled_tools,
+                    step_node=step_node,
+                    tool_rows=tool_rows,
+                    llm=llm,
+                    has_attachment=has_attachment,
+                )
             result = _execute(selected)
             outcome["tool_result"] = result
             outcome["tool_used"] = result.tool_used
@@ -600,6 +466,7 @@ class LangGraphChatService:
         step_node,
         tool_rows,
         llm,
+        has_attachment=False,
     ):
         from basics.llm import LLMBackendError, LLMConfigurationError
         from chat.services import ChatProviderError
@@ -615,23 +482,37 @@ class LangGraphChatService:
             f"{slug}: {self._tool_description(tool_rows.get(slug), slug)}"
             for slug in enabled_tools
         )
+        attachment_note = (
+            "Attachment note: the user attached a file on THIS message, so a "
+            "chart request means chart that file and any file question is about "
+            "it — strongly prefer 'document_search'."
+            if has_attachment
+            else "Attachment note: no file is attached on this message."
+        )
         prompt_name = step_node.prompt_name or "agent_router"
         template = self._langfuse.get_prompt(
             prompt_name, fallback=_FALLBACK_ROUTER_PROMPT
         )
+        fmt = {
+            "question": message_text,
+            "tools": tools_desc,
+            "history": history_text or "(no prior conversation)",
+            "attachment_note": attachment_note,
+        }
         try:
-            router_prompt = template.format(
-                question=message_text,
-                tools=tools_desc,
-                history=history_text or "(no prior conversation)",
-            )
+            router_prompt = template.format(**fmt)
         except (KeyError, IndexError):
-
-            router_prompt = _FALLBACK_ROUTER_PROMPT.format(
-                question=message_text,
-                tools=tools_desc,
-                history=history_text or "(no prior conversation)",
-            )
+            # A managed prompt may omit {attachment_note}; fall back to the
+            # built-in template, appending the note so routing stays correct.
+            try:
+                router_prompt = _FALLBACK_ROUTER_PROMPT.format(**fmt)
+            except (KeyError, IndexError):
+                router_prompt = template.format(
+                    question=message_text,
+                    tools=tools_desc,
+                    history=history_text or "(no prior conversation)",
+                )
+                router_prompt = f"{router_prompt}\n\n{attachment_note}"
 
         trace_id = None
         with self._langfuse.trace("agent_router") as span:

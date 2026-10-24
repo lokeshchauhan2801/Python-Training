@@ -11,21 +11,37 @@ from basics.llm import LLMBackendError, LLMConfigurationError
 
 from django.utils.html import format_html
 
+from unfold.contrib.filters.admin import (
+    BooleanRadioFilter,
+    ChoicesDropdownFilter,
+    RangeDateTimeFilter,
+)
+
 from .models import Conversation, ConversationSession, Message, MessageVersion
 from .scope import allowed_companies as _allowed_companies_for
 from .scope import scoped_sessions as _scoped_sessions_for
 from .services import ChatService
 
 
-class ConversationInline(admin.TabularInline):
-    model = Conversation
+class SessionMessageInline(admin.TabularInline):
+    """The actual chat of a session. The conversation lives in ``Message``
+    (role/content), not the legacy ``Conversation`` turns model, so this inline
+    reads ``Message`` and shows the real messages at the bottom of the form."""
+
+    model = Message
+    fk_name = "conversation"
     extra = 0
-    fields = ("question", "response", "model_name", "created_at")
-    readonly_fields = ("created_at",)
-    show_change_link = True
+    fields = ("role", "content", "model_name", "created_at")
+    readonly_fields = ("role", "content", "model_name", "created_at")
+    # Newest message first (most recent at the top).
+    ordering = ("-created_at",)
+    show_change_link = False
+    can_delete = False
 
     def has_add_permission(self, request, obj=None):
+        return False
 
+    def has_change_permission(self, request, obj=None):
         return False
 
 
@@ -49,12 +65,15 @@ class ConversationSessionAdmin(BaseModelAdmin):
     list_filter = ("company", "model_name", "is_deleted", "created_at")
     search_fields = ("title", "session_id", "user__email")
     date_hierarchy = "created_at"
-    inlines = [ConversationInline]
+    inlines = [SessionMessageInline]
 
+    # `id` is hidden (users reference a session by `session_id`). The empty
+    # free-text/JSON fields (content, context, media, metadata) are dropped from
+    # the form as noise; they are not user-edited for a session. The whole chat
+    # shows in the SessionMessageInline at the bottom.
     fieldsets = (
-        (None, {"fields": ("id", "session_id", "title", "user", "company")}),
-        ("Content", {"fields": ("content", "model_name", "summary")}),
-        ("Meta", {"fields": ("context", "media", "metadata")}),
+        (None, {"fields": ("session_id", "title", "user", "company")}),
+        ("Content", {"fields": ("model_name", "summary")}),
         (
             "Audit",
             {
@@ -70,13 +89,27 @@ class ConversationSessionAdmin(BaseModelAdmin):
         ),
     )
 
-
     readonly_fields = ("session_id",)
 
+    def get_readonly_fields(self, request, obj=None):
+        """A session's owner (``user``) and ``company`` are fixed once created.
 
-    @admin.display(description="Turns")
+        Reassigning either would move an existing conversation to a different
+        user/company, which is illogical and a data-integrity/scoping hazard.
+        They remain editable only when adding a new session; on an existing
+        session they are read-only.
+        """
+        readonly = list(super().get_readonly_fields(request, obj))
+        if obj is not None:
+            for name in ("user", "company"):
+                if name not in readonly:
+                    readonly.append(name)
+        return readonly
+
+
+    @admin.display(description="Messages")
     def turn_count(self, obj):
-        return obj.turns.count()
+        return obj.messages.count()
 
     @admin.display(description="Summary")
     def short_summary(self, obj):
@@ -421,7 +454,15 @@ class MessageAdmin(BaseModelAdmin):
         "created_at",
         "is_deleted",
     )
-    list_filter = ("role", "company", "is_deleted", "created_at")
+    # Use Unfold's dropdown/range filter widgets so the Filters panel is
+    # actually interactive. The changelist is already scoped to the active
+    # company (BaseModelAdmin.get_queryset), so a company filter is redundant
+    # and omitted here.
+    list_filter = (
+        ("role", ChoicesDropdownFilter),
+        ("is_deleted", BooleanRadioFilter),
+        ("created_at", RangeDateTimeFilter),
+    )
     search_fields = ("content", "conversation__session_id")
     inlines = [MessageVersionInline]
 

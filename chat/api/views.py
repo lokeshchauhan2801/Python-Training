@@ -42,13 +42,20 @@ class AskView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        from django.db.models import Q
+
         user = request.user
         sessions = (
             ConversationSession.objects.all()
             if user.is_superuser
             else ConversationSession.objects.filter(company__owner=user)
         )
-        session = get_object_or_404(sessions, pk=data["session"])
+        # Accept EITHER the primary key (`id`) OR the public `session_id`
+        # reference, so a client can pass whichever ULID it copied from the
+        # list response without hitting a confusing 404.
+        session = get_object_or_404(
+            sessions, Q(pk=data["session"]) | Q(session_id=data["session"])
+        )
 
         try:
             turn = ChatService().ask(
