@@ -33,14 +33,22 @@ def allowed_companies_for_user(user):
     Ordered ``-created_at, -id`` so the "default" (first) is the most-recently
     created company, matching the old ``_resolve_active_company`` behaviour.
     """
+    from django.db.models import Q
+
     from company.models import Company
 
     if not getattr(user, "is_authenticated", False):
         return Company.objects.none()
     if user.is_superuser:
         return Company.objects.filter(is_active=True).order_by("-created_at", "-id")
-    return Company.objects.filter(owner=user, is_active=True).order_by(
-        "-created_at", "-id"
+    # Access = companies the user OWNS or is a MEMBER of (via CompanyMembership).
+    return (
+        Company.objects.filter(
+            Q(owner=user) | Q(memberships__user=user),
+            is_active=True,
+        )
+        .distinct()
+        .order_by("-created_at", "-id")
     )
 
 

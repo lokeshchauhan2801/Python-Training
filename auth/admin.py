@@ -16,7 +16,17 @@ from unfold.admin import ModelAdmin as UnfoldModelAdmin
 
 from basics.admin import AuditAdminMixin, SoftDeleteAdminMixin
 
-from .models import User
+from .models import CompanyMembership, User
+
+
+class CompanyMembershipInline(admin.TabularInline):
+    """Assign a user to one or more companies, each with a role."""
+
+    model = CompanyMembership
+    fk_name = "user"
+    extra = 1
+    fields = ("company", "role")
+    autocomplete_fields = ("company",)
 
 
 @admin.register(User)
@@ -26,6 +36,7 @@ class UserAdmin(
     UnfoldModelAdmin,
     DjangoUserAdmin,
 ):
+    inlines = [CompanyMembershipInline]
     list_display = (
         "email",
         "username",
@@ -41,21 +52,12 @@ class UserAdmin(
     ordering = ("-date_joined",)
     date_hierarchy = "date_joined"
 
+    # Edit form: only the fields that make sense to edit. The password hash
+    # widget, groups, and user_permissions are removed; dates are read-only.
     fieldsets = (
-        (None, {"fields": ("id", "email", "username", "password")}),
+        (None, {"fields": ("id", "email", "username")}),
         ("Personal info", {"fields": ("first_name", "last_name")}),
-        (
-            "Permissions",
-            {
-                "fields": (
-                    "is_active",
-                    "is_staff",
-                    "is_superuser",
-                    "groups",
-                    "user_permissions",
-                )
-            },
-        ),
+            ("Access", {"fields": ("is_active", "is_staff", "is_superuser")}),
         ("Dates", {"fields": ("last_login", "date_joined")}),
         (
             "Audit",
@@ -71,12 +73,25 @@ class UserAdmin(
             },
         ),
     )
+
+    def get_readonly_fields(self, request, obj=None):
+        """Dates (and audit fields via the mixin) are not editable."""
+        readonly = list(super().get_readonly_fields(request, obj))
+        for name in ("last_login", "date_joined"):
+            if name not in readonly:
+                readonly.append(name)
+        return readonly
     add_fieldsets = (
         (
             None,
             {
                 "classes": ("wide",),
-                "fields": ("email", "password1", "password2", "username"),
+                "fields": (
+                    "email",
+                    "password1",
+                    "password2",
+                    "username",
+                ),
             },
         ),
     )

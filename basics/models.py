@@ -1,22 +1,3 @@
-"""Composable abstract base models.
-
-Three independent, composable pieces (ONE each, no per-module variants):
-
-* ``BaseModel`` — the single audit base inherited by EVERY model (including
-  ``accounts.User``). It holds EXACTLY FOUR fields: ``created_at``,
-  ``updated_at``, ``created_by``, ``updated_by``, plus the actor-aware ``save``
-  that stamps the audit actors. Nothing else.
-* The ULID primary key is a SEPARATE reusable field (``basics.ulid.ULIDField``);
-  each model declares its own ``id = ULIDField()``. The PK is NOT on ``BaseModel``.
-* ``SoftDeleteModel`` — a SEPARATE abstract mixin holding ``is_deleted`` /
-  ``deleted_at`` and the actor-aware soft ``delete``/``restore``/``hard_delete``.
-  Applied only to the models that need soft-delete, together with the
-  soft-delete managers. Soft-delete is NOT on ``BaseModel``.
-
-A fully-featured model composes ``BaseModel`` + ``SoftDeleteModel`` + an
-``id = ULIDField()`` PK (and, for non-auth models, a required ``company`` FK).
-"""
-
 from django.conf import settings
 from django.db import models
 from django.utils import timezone

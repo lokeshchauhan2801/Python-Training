@@ -166,11 +166,24 @@ class CompanyScopedAdminMixin:
 
 
     def delete_model(self, request, obj):
-        obj.delete(actor=request.user)
+        """Permanent delete (real SQL DELETE). Soft delete is the explicit
+        ``soft_delete_selected`` action instead."""
+        obj.hard_delete()
 
     def delete_queryset(self, request, queryset):
-        for obj in queryset:
-            obj.delete(actor=request.user)
+        """Permanent bulk delete for the built-in "Delete selected" action.
+
+        Uses the queryset ``hard_delete`` so the rows are actually removed, not
+        just flagged ``is_deleted`` (which left them visible in the changelist,
+        since it reads from ``all_objects``). Users who want the reversible soft
+        delete pick the explicit "Soft delete selected" action below.
+        """
+        hard = getattr(queryset, "hard_delete", None)
+        if callable(hard):
+            hard()
+        else:
+            for obj in queryset:
+                obj.hard_delete()
 
     def soft_delete_selected(self, request, queryset):
         for obj in queryset:
@@ -202,6 +215,35 @@ class BaseModelAdmin(
         if self.actor_field and self.actor_field not in readonly:
             readonly.append(self.actor_field)
         return readonly
+
+    def get_fieldsets(self, request, obj=None):
+        """Hide auto/audit fields on the ADD form; show them when editing.
+
+        Audit fields (id, created_at/by, updated_at/by, is_deleted, deleted_at)
+        are populated automatically at creation, so they are just empty boxes on
+        the add form. On add (``obj is None``) we drop the whole "Audit"
+        fieldset and strip any audit field from the remaining fieldsets. On an
+        existing object they are shown (read-only) so the recorded values are
+        visible. Applies to every admin built on ``BaseModelAdmin``.
+        """
+        fieldsets = super().get_fieldsets(request, obj)
+        if obj is not None:
+            return fieldsets
+
+        cleaned = []
+        for name, opts in fieldsets:
+            if name == "Audit":
+                # Drop the dedicated audit section entirely on add.
+                continue
+            fields = tuple(
+                f for f in opts.get("fields", ()) if f not in AUDIT_FIELD_NAMES
+            )
+            if not fields:
+                continue
+            new_opts = dict(opts)
+            new_opts["fields"] = fields
+            cleaned.append((name, new_opts))
+        return tuple(cleaned)
 
     def save_model(self, request, obj, form, change):
 
