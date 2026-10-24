@@ -16,7 +16,7 @@ class Document(BaseModel, SoftDeleteModel):
         (STATUS_UPLOADED, "Uploaded"),
         (STATUS_QUEUED, "Queued"),
         (STATUS_PROCESSING, "Processing"),
-        (STATUS_READY, "Ready"),
+        (STATUS_READY, "Processed"),
         (STATUS_FAILED, "Failed"),
     ]
     SOURCE_CHAT = "chat"

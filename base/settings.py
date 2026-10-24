@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 
 from django.urls import reverse_lazy
-from django.utils.text import format_lazy
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -107,12 +106,9 @@ if _database_url:
         }
     )
 
-AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
-]
+# Password validators disabled: the add-user form no longer shows the four
+# password rule help-text lines.
+AUTH_PASSWORD_VALIDATORS = []
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Asia/Kolkata"
@@ -197,7 +193,7 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8080")
+TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8081")
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -257,31 +253,14 @@ UNFOLD = {
                         "link": reverse_lazy("chat:home"),
                     },
                     {
-                        "title": "New chat",
-                        "icon": "add_comment",
-
-
-                        "link": format_lazy("{}?new=1", reverse_lazy("chat:home")),
-                    },
-                    {
                         "title": "Conversation sessions",
                         "icon": "forum",
                         "link": reverse_lazy("admin:chat_conversationsession_changelist"),
                     },
                     {
-                        "title": "Conversations",
-                        "icon": "chat_bubble",
-                        "link": reverse_lazy("admin:chat_conversation_changelist"),
-                    },
-                    {
                         "title": "Messages",
                         "icon": "mail",
                         "link": reverse_lazy("admin:chat_message_changelist"),
-                    },
-                    {
-                        "title": "Message versions",
-                        "icon": "history",
-                        "link": reverse_lazy("admin:chat_messageversion_changelist"),
                     },
                 ],
             },
@@ -304,11 +283,6 @@ UNFOLD = {
                         "title": "Documents",
                         "icon": "description",
                         "link": reverse_lazy("admin:documents_document_changelist"),
-                    },
-                    {
-                        "title": "Document chunks",
-                        "icon": "auto_stories",
-                        "link": reverse_lazy("admin:documents_documentchunk_changelist"),
                     },
                     {
                         "title": "Queue messages",

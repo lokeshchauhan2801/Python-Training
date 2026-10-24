@@ -84,6 +84,18 @@ class DocumentAdmin(BaseModelAdmin):
     form = DocumentAdminForm
 
 
+    def get_queryset(self, request):
+        """Show only LIBRARY documents in the changelist.
+
+        Chat attachments (``source=chat``) are uploaded in chat and must NOT
+        appear in the document library. They become library documents only when
+        the user explicitly asks to add them to the knowledge base (which flips
+        the source to ``library``). This keeps the Documents list to the real
+        knowledge base.
+        """
+        return super().get_queryset(request).filter(source=Document.SOURCE_LIBRARY)
+
+
     def delete_model(self, request, obj):
         purge_document(obj)
 
@@ -95,7 +107,8 @@ class DocumentAdmin(BaseModelAdmin):
     change_list_template = "admin/documents/document/change_list.html"
 
 
-    actions_row = ("show_chunks",)
+    # The per-row "Show" (chunks) button is intentionally not surfaced.
+    actions_row = ()
 
     list_display = (
         "id_short",
@@ -106,6 +119,7 @@ class DocumentAdmin(BaseModelAdmin):
         "processing_backend",
         "schedule_column",
         "info_column",
+        "temporal_link",
         "created_by",
         "created_at",
     )
@@ -344,6 +358,28 @@ class DocumentAdmin(BaseModelAdmin):
             str(obj.pk),
         )
 
+    @admin.display(description="Workflow")
+    def temporal_link(self, obj):
+        """Quick link to this document's workflow in the Temporal Web UI.
+
+        Only shown for temporal-backed documents; the base URL comes from
+        ``settings.TEMPORAL_UI_URL`` (default http://localhost:8081).
+        """
+        from chat.services.kb import temporal_ui_url, workflow_id_for
+
+        if obj.processing_backend != "temporal":
+            return "—"
+        url = temporal_ui_url(workflow_id_for(obj.pk))
+        if not url:
+            return "—"
+        return format_html(
+            '<a href="{}" target="_blank" rel="noopener noreferrer" '
+            'class="inline-flex items-center gap-1 rounded-default border '
+            'border-base-200 dark:border-base-700 px-2 py-1 text-xs '
+            'hover:bg-base-100 dark:hover:bg-base-800">Open in Temporal</a>',
+            url,
+        )
+
     def save_model(self, request, obj, form, change):
 
 
@@ -544,11 +580,14 @@ class DocumentAdmin(BaseModelAdmin):
                 }
             ]
 
+        from chat.services.kb import temporal_ui_url
+
         workflow_id = f"doc-{document.pk}"
         if document.processing_backend == "temporal":
             info = TemporalProcessingBackend().get_status(workflow_id)
             payload = {
                 "workflow_id": workflow_id,
+                "temporal_url": temporal_ui_url(workflow_id),
                 "status": info.get("status", "unknown"),
                 "run_id": info.get("run_id"),
                 "started": info.get("started"),
@@ -595,10 +634,73 @@ class DocumentAdmin(BaseModelAdmin):
                 status=400,
             )
 
+        # Deduplicate: a document already processed (ready/processed with chunks)
+        # is NOT reprocessed. Re-embedding the same content wastes work and
+        # creates duplicate vectors.
+        if (
+            document.status == Document.STATUS_READY
+            and (document.chunk_count or 0) > 0
+        ):
+            return JsonResponse(
+                {
+                    "status": document.status,
+                    "status_display": dict(Document.STATUS_CHOICES)[document.status],
+                    "backend": document.processing_backend,
+                    "document_id": str(document.pk),
+                    "title": document.title,
+                    "message": (
+                        "Already processed; skipped (document is embedded with "
+                        f"{document.chunk_count} chunks)."
+                    ),
+                },
+                status=200,
+            )
 
-        backend = None if choice == "now" else choice
-        if backend is not None:
-            document.processing_backend = backend
+        # "now" runs synchronously through the Django processing manager
+        # (process_document) — NOT celery/kafka/temporal. Other choices keep
+        # their async backend.
+        if choice == "now":
+            from documents.services import process_document
+
+            document.processing_backend = "django"
+            document.save(update_fields=["processing_backend", "updated_at"])
+            self._reset_for_reprocess(document)
+            try:
+                process_document(document)
+            except Exception as exc:  # noqa: BLE001 - surface as JSON, not 500
+                document.refresh_from_db()
+                return JsonResponse(
+                    {
+                        "status": document.status,
+                        "status_display": dict(Document.STATUS_CHOICES).get(
+                            document.status, document.status
+                        ),
+                        "document_id": str(document.pk),
+                        "title": document.title,
+                        "message": f"Processing failed: {exc}",
+                    },
+                    status=200,
+                )
+            document.refresh_from_db()
+            return JsonResponse(
+                {
+                    "status": document.status,
+                    "status_display": dict(Document.STATUS_CHOICES).get(
+                        document.status, document.status
+                    ),
+                    "backend": "django",
+                    "document_id": str(document.pk),
+                    "title": document.title,
+                    "message": (
+                        f"Processed synchronously via the Django manager "
+                        f"({document.chunk_count} chunks)."
+                    ),
+                },
+                status=200,
+            )
+
+        backend = choice
+        document.processing_backend = backend
         self._reset_for_reprocess(document)
         _job_id, resolved = enqueue_document_processing(
             str(document.pk), backend=backend
