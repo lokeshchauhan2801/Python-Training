@@ -95,6 +95,869 @@
     body.chat-fixed-viewport #chat-sessions-head {
       flex: 0 0 auto;
     }
+
+    /* ------------------------------------------------------------------
+       Chat UI polish (presentation only). Unlayered rules here override
+       Unfold's @layer utilities, so existing utility classes stay in the
+       markup untouched; values come from Unfold's theme variables.
+       ------------------------------------------------------------------ */
+    #chat-root {
+      --chat-r: var(--border-radius, 6px);
+      --chat-ring: 0 0 0 3px color-mix(in oklch, var(--color-primary-500) 25%, transparent);
+    }
+
+    /* Page frame */
+    #chat-header {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    #chat-empty {
+      margin-bottom: .75rem;
+    }
+
+    #chat-layout {
+      gap: 0;
+    }
+
+    #chat-sessions-col,
+    #chat-panel-col {
+      padding: 0;
+      background: #fff;
+      border: 1px solid var(--color-base-200);
+      border-radius: var(--chat-r);
+      overflow: hidden;
+    }
+
+    html.dark #chat-sessions-col,
+    html.dark #chat-panel-col {
+      background: var(--color-base-900);
+      border-color: var(--color-base-800);
+    }
+
+    /* Shared focus treatment */
+    #chat-root :is(button, select, textarea, [tabindex]):focus-visible {
+      outline: 2px solid var(--color-primary-500);
+      outline-offset: 2px;
+    }
+
+    #chat-root .chat-ui-composer-box textarea:focus-visible {
+      outline: none;
+    }
+
+    .chat-ui-icon-btn {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--color-font-subtle-light);
+      cursor: pointer;
+      transition: background-color .12s, color .12s;
+    }
+
+    .chat-ui-icon-btn:hover {
+      background: var(--color-base-100);
+      color: var(--color-font-important-light);
+    }
+
+    .chat-ui-icon-btn:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+
+    .chat-ui-icon-btn.hidden {
+      display: none;
+    }
+
+    html.dark .chat-ui-icon-btn {
+      color: var(--color-font-subtle-dark);
+    }
+
+    html.dark .chat-ui-icon-btn:hover {
+      background: var(--color-base-800);
+      color: var(--color-font-important-dark);
+    }
+
+    /* Chats panel */
+    #chat-sessions-head {
+      margin: 0;
+      padding: .75rem .75rem .5rem 1rem;
+      align-items: center;
+    }
+
+    #chat-sessions-head h2 {
+      margin: 0;
+      font-size: .8125rem;
+      line-height: 1.25rem;
+      font-weight: 600;
+      color: var(--color-font-important-light);
+    }
+
+    html.dark #chat-sessions-head h2 {
+      color: var(--color-font-important-dark);
+    }
+
+    #chat-new {
+      width: 2rem;
+      height: 2rem;
+      border-radius: var(--chat-r);
+      background: var(--color-primary-600);
+      color: #fff;
+      transition: background-color .12s;
+    }
+
+    #chat-new:hover:not(:disabled) {
+      background: var(--color-primary-700);
+    }
+
+    #chat-session-list {
+      list-style: none;
+      margin: 0;
+      padding: 0 .5rem .5rem;
+      scrollbar-width: thin;
+    }
+
+    .chat-session-row {
+      height: 3.5rem;
+      margin: 0 0 2px;
+      padding: 0 .5rem 0 .75rem;
+      border-radius: .5rem;
+      border-color: transparent;
+      background: transparent;
+      cursor: pointer;
+      transition: background-color .12s;
+    }
+
+    html.dark .chat-session-row {
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .chat-session-row:hover {
+      background: var(--color-base-100);
+    }
+
+    html.dark .chat-session-row:hover {
+      background: color-mix(in oklch, #fff 6%, transparent);
+    }
+
+    .chat-session-row.chat-ui-session--active {
+      background: color-mix(in oklch, var(--color-primary-600) 10%, transparent);
+    }
+
+    html.dark .chat-session-row.chat-ui-session--active {
+      background: color-mix(in oklch, var(--color-primary-400) 16%, transparent);
+    }
+
+    .chat-ui-session-main {
+      align-self: stretch;
+      padding-right: 2rem;
+      color: inherit;
+    }
+
+    .chat-ui-session-main:focus-visible {
+      border-radius: .375rem;
+    }
+
+    .chat-ui-session-title {
+      font-size: .875rem;
+      line-height: 1.25rem;
+      font-weight: 500;
+      color: var(--color-font-important-light);
+    }
+
+    html.dark .chat-ui-session-title {
+      color: var(--color-font-important-dark);
+    }
+
+    .chat-ui-session--active .chat-ui-session-title {
+      font-weight: 600;
+      color: var(--color-primary-700);
+    }
+
+    html.dark .chat-ui-session--active .chat-ui-session-title {
+      color: var(--color-primary-300);
+    }
+
+    .chat-ui-session-time {
+      display: block;
+      margin-top: 2px;
+      font-size: .75rem;
+      line-height: 1rem;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-session-time {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-session-delete {
+      position: absolute;
+      right: .375rem;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      border-radius: .375rem;
+      background: transparent;
+      color: var(--color-font-subtle-light);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .12s, background-color .12s, color .12s;
+    }
+
+    html.dark .chat-ui-session-delete {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-session-row:hover .chat-ui-session-delete,
+    .chat-session-row:focus-within .chat-ui-session-delete,
+    .chat-ui-session--active .chat-ui-session-delete,
+    .chat-ui-session-delete:focus-visible {
+      opacity: 1;
+    }
+
+    @media (hover: none) {
+      .chat-ui-session-delete {
+        opacity: 1;
+      }
+    }
+
+    .chat-ui-session-delete:hover,
+    .chat-ui-session-delete:focus-visible {
+      color: var(--color-red-600);
+      background: color-mix(in oklch, var(--color-red-500) 12%, transparent);
+    }
+
+    html.dark .chat-ui-session-delete:hover,
+    html.dark .chat-ui-session-delete:focus-visible {
+      color: var(--color-red-400);
+      background: color-mix(in oklch, var(--color-red-500) 12%, transparent);
+    }
+
+    /* Collapse + resize */
+    .chat-ui-resizer {
+      flex: 0 0 .75rem;
+      align-self: stretch;
+      position: relative;
+      cursor: col-resize;
+      touch-action: none;
+    }
+
+    .chat-ui-resizer::after {
+      content: "";
+      position: absolute;
+      top: .5rem;
+      bottom: .5rem;
+      left: 50%;
+      width: 2px;
+      margin-left: -1px;
+      border-radius: 2px;
+      background: transparent;
+      transition: background-color .12s;
+    }
+
+    .chat-ui-resizer:hover::after,
+    .chat-ui-resizer:focus-visible::after,
+    body.chat-ui-resizing .chat-ui-resizer::after {
+      background: var(--color-primary-500);
+    }
+
+    #chat-root .chat-ui-resizer:focus-visible {
+      outline: none;
+    }
+
+    body.chat-ui-resizing {
+      cursor: col-resize;
+      user-select: none;
+    }
+
+    #chat-layout.chat-ui-sidebar-collapsed #chat-sessions-col,
+    #chat-layout.chat-ui-sidebar-collapsed #chat-sidebar-resizer {
+      display: none !important;
+    }
+
+    /* Conversation header */
+    #chat-conv-header {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      min-height: 3.25rem;
+      margin: 0;
+      padding: .625rem 1rem;
+      border-bottom: 1px solid var(--color-base-200);
+    }
+
+    html.dark #chat-conv-header {
+      border-bottom-color: var(--color-base-800);
+    }
+
+    #chat-conv-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0;
+      font-size: .9375rem;
+      line-height: 1.5rem;
+      font-weight: 600;
+    }
+
+    #chat-root .chat-ui-model {
+      flex: 0 1 auto;
+      max-width: 15rem;
+      height: 2rem;
+      padding: 0 2rem 0 .75rem;
+      border: 1px solid var(--color-base-200);
+      border-radius: 999px;
+      background-color: var(--color-base-100);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right .625rem center;
+      background-size: 14px 14px;
+      box-shadow: none;
+      font-size: .8125rem;
+      line-height: 1.875rem;
+      font-weight: 500;
+      color: var(--color-font-default-light);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+
+    html.dark #chat-root .chat-ui-model {
+      border-color: var(--color-base-700);
+      background-color: var(--color-base-800);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+      color: var(--color-font-default-dark);
+    }
+
+    /* Messages */
+    #chat-messages {
+      display: flex;
+      flex-direction: column;
+      padding: 1.5rem 1rem 1rem;
+      scroll-behavior: auto;
+      scrollbar-width: thin;
+    }
+
+    #chat-messages > * {
+      flex-shrink: 0;
+      width: 100%;
+      max-width: 48rem;
+      margin-inline: auto;
+    }
+
+    #chat-messages > .chat-ui-empty {
+      margin: auto;
+    }
+
+    .chat-ui-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .75rem;
+      text-align: center;
+      font-size: .9375rem;
+      line-height: 1.5rem;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-empty {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-empty::before {
+      content: "";
+      width: 48px;
+      height: 48px;
+      border-radius: 999px;
+      background-color: var(--color-base-100);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: center;
+      background-size: 22px 22px;
+    }
+
+    html.dark .chat-ui-empty::before {
+      background-color: var(--color-base-800);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/%3E%3C/svg%3E");
+    }
+
+    .chat-ui-msg {
+      display: flex;
+      margin-bottom: 1.25rem;
+    }
+
+    .chat-ui-msg--user {
+      justify-content: flex-end;
+    }
+
+    .chat-ui-msg--assistant {
+      justify-content: flex-start;
+    }
+
+    .chat-ui-bubble {
+      min-width: 0;
+    }
+
+    .chat-ui-bubble--user {
+      max-width: min(80%, 36rem);
+      padding: .625rem 1rem;
+      border: 0;
+      border-radius: 1.25rem;
+      border-bottom-right-radius: .375rem;
+      background: var(--color-base-100);
+      color: var(--color-font-important-light);
+    }
+
+    html.dark .chat-ui-bubble--user {
+      background: var(--color-base-800);
+      color: var(--color-font-important-dark);
+    }
+
+    .chat-ui-bubble--assistant {
+      flex: 1 1 auto;
+      width: 100%;
+      max-width: 100%;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--color-font-default-light);
+    }
+
+    html.dark .chat-ui-bubble--assistant {
+      color: var(--color-font-default-dark);
+    }
+
+    .chat-ui-text {
+      font-size: .9375rem;
+      line-height: 1.65;
+      overflow-wrap: anywhere;
+    }
+
+    .chat-ui-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .25rem;
+      max-width: 16rem;
+      height: 1.5rem;
+      padding: 0 .625rem;
+      border: 1px solid var(--color-base-200);
+      border-radius: 999px;
+      background: var(--color-base-50);
+      font-size: .75rem;
+      line-height: 1rem;
+      font-weight: 500;
+      color: var(--color-font-default-light);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    html.dark .chat-ui-chip {
+      border-color: var(--color-base-700);
+      background: var(--color-base-800);
+      color: var(--color-font-default-dark);
+    }
+
+    .chat-ui-chip > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chat-ui-chip--attachment {
+      display: inline-block;
+      line-height: 1.375rem;
+      background: #fff;
+    }
+
+    html.dark .chat-ui-chip--attachment {
+      border-color: var(--color-base-600);
+      background: var(--color-base-700);
+    }
+
+    .chat-ui-chip--attachment::before {
+      content: "";
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      margin-right: .25rem;
+      vertical-align: -1px;
+      background-color: currentColor;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'/%3E%3C/svg%3E") center / contain no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
+
+    .chat-ui-attachments-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .375rem;
+      margin-top: .5rem;
+    }
+
+    .chat-ui-citations {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .375rem;
+      margin-top: .75rem;
+    }
+
+    .chat-ui-cite {
+      cursor: pointer;
+      transition: border-color .12s, color .12s;
+    }
+
+    .chat-ui-cite:hover {
+      border-color: var(--color-primary-400);
+      color: var(--color-primary-700);
+    }
+
+    html.dark .chat-ui-cite:hover {
+      border-color: var(--color-primary-400);
+      color: var(--color-primary-300);
+    }
+
+    .chat-ui-cite-popover {
+      margin-top: .5rem;
+      padding: .75rem;
+      max-height: 14rem;
+      overflow: auto;
+      border: 1px solid var(--color-base-200);
+      border-radius: .75rem;
+      background: var(--color-base-50);
+      font-size: .8125rem;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    html.dark .chat-ui-cite-popover {
+      border-color: var(--color-base-700);
+      background: var(--color-base-800);
+    }
+
+    .chat-ui-cite-title {
+      margin-bottom: .25rem;
+      font-weight: 600;
+      color: var(--color-font-important-light);
+    }
+
+    html.dark .chat-ui-cite-title {
+      color: var(--color-font-important-dark);
+    }
+
+    .chat-ui-chart,
+    .chat-ui-chart-table {
+      display: block;
+      width: 100%;
+      margin-top: .75rem;
+      padding: .75rem;
+      box-sizing: border-box;
+      border: 1px solid var(--color-base-200);
+      border-radius: .75rem;
+      background: #fff;
+    }
+
+    html.dark .chat-ui-chart,
+    html.dark .chat-ui-chart-table {
+      border-color: var(--color-base-700);
+      background: var(--color-base-900);
+    }
+
+    .chat-ui-chart-table {
+      display: table;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: .875rem;
+    }
+
+    .chat-ui-chart-table td {
+      padding: .25rem .5rem;
+      border-bottom: 1px solid var(--color-base-200);
+    }
+
+    html.dark .chat-ui-chart-table td {
+      border-bottom-color: var(--color-base-700);
+    }
+
+    .chat-ui-chart-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .chat-ui-meta {
+      display: flex;
+      align-items: center;
+      gap: .375rem;
+      margin-top: .625rem;
+      font-size: .75rem;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-meta {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-chip--muted {
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-chip--muted {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-typing {
+      color: var(--color-font-subtle-light);
+      font-size: .9375rem;
+      line-height: 1.65;
+    }
+
+    html.dark .chat-ui-typing {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-typing::after {
+      content: "\2022\2022\2022";
+      display: inline-block;
+      margin-left: .375rem;
+      letter-spacing: .15em;
+      animation: chat-ui-pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes chat-ui-pulse {
+      0%, 100% { opacity: .25; }
+      50% { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .chat-ui-typing::after {
+        animation: none;
+      }
+    }
+
+    /* Composer */
+    #chat-composer {
+      margin-top: 0;
+      padding: .5rem 1rem 1rem;
+      border-top: 0;
+    }
+
+    .chat-ui-composer-box {
+      max-width: 48rem;
+      margin-inline: auto;
+      padding: .5rem .5rem .5rem 1rem;
+      border: 1px solid var(--color-base-300);
+      border-radius: 1.5rem;
+      background: #fff;
+      box-shadow: 0 1px 2px rgb(0 0 0 / .05);
+      transition: border-color .12s, box-shadow .12s;
+    }
+
+    html.dark .chat-ui-composer-box {
+      border-color: var(--color-base-700);
+      background: var(--color-base-800);
+    }
+
+    .chat-ui-composer-box:focus-within,
+    html.dark .chat-ui-composer-box:focus-within {
+      border-color: var(--color-primary-500);
+      box-shadow: var(--chat-ring);
+    }
+
+    #chat-input {
+      display: block;
+      width: 100%;
+      min-height: 2.75rem;
+      max-height: 12rem;
+      margin: 0;
+      padding: .5rem 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      outline: none;
+      resize: none;
+      field-sizing: content;
+      overflow-y: auto;
+      font-size: .9375rem;
+      line-height: 1.5;
+      color: var(--color-font-important-light);
+    }
+
+    html.dark #chat-input {
+      background: transparent;
+      color: var(--color-font-important-dark);
+    }
+
+    #chat-input::placeholder {
+      color: var(--color-font-subtle-light);
+      opacity: 1;
+    }
+
+    html.dark #chat-input::placeholder {
+      color: var(--color-font-subtle-dark);
+    }
+
+    #chat-input:disabled {
+      cursor: not-allowed;
+      opacity: .7;
+    }
+
+    #chat-attachments {
+      gap: .375rem;
+      margin-top: .25rem;
+    }
+
+    #chat-attachments:empty {
+      display: none;
+    }
+
+    .chat-ui-chip--pending {
+      padding-right: .25rem;
+    }
+
+    .chat-ui-chip-remove {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-left: .125rem;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      font-size: .875rem;
+      line-height: 1;
+      color: var(--color-font-subtle-light);
+      cursor: pointer;
+    }
+
+    html.dark .chat-ui-chip-remove {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-chip-remove:hover,
+    html.dark .chat-ui-chip-remove:hover {
+      color: var(--color-red-600);
+      background: color-mix(in oklch, var(--color-red-500) 12%, transparent);
+    }
+
+    .chat-ui-composer-toolbar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-top: .25rem;
+    }
+
+    #chat-attach-btn {
+      width: 2.25rem;
+      height: 2.25rem;
+      border: 0;
+      border-radius: 999px;
+    }
+
+    html.dark #chat-attach-btn:hover {
+      background: var(--color-base-700);
+    }
+
+    #chat-status {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: .75rem;
+      line-height: 1rem;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark #chat-status {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-send {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: .375rem;
+      height: 2.25rem;
+      padding: 0 1rem;
+      border: 0;
+      border-radius: 999px;
+      background: var(--color-primary-600);
+      font-size: .875rem;
+      line-height: 1.25rem;
+      font-weight: 600;
+      color: #fff;
+      transition: background-color .12s, opacity .12s;
+    }
+
+    .chat-ui-send:hover:not(:disabled) {
+      background: var(--color-primary-700);
+    }
+
+    .chat-ui-send:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+
+    /* Responsive */
+    @media (max-width: 767.98px) {
+      body.chat-fixed-viewport #chat-layout {
+        flex-direction: column !important;
+        gap: .5rem;
+      }
+
+      body.chat-fixed-viewport #chat-sessions-col {
+        width: auto !important;
+        flex: 0 0 auto !important;
+        max-height: 11.5rem;
+      }
+
+      #chat-sidebar-resizer {
+        display: none;
+      }
+
+      body.chat-fixed-viewport #chat-panel-col {
+        flex: 1 1 auto !important;
+        min-height: 0;
+      }
+
+      #chat-messages {
+        padding: 1rem .75rem;
+      }
+
+      .chat-ui-bubble--user {
+        max-width: 88%;
+      }
+
+      #chat-composer {
+        padding: .5rem .5rem .75rem;
+      }
+
+      #chat-root .chat-ui-model {
+        max-width: 9rem;
+      }
+    }
 </style>
 {% endblock %}
 
@@ -140,49 +1003,74 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
           </button>
         </div>
-        <ul id="chat-session-list" class="flex-1 list-none m-0 overflow-y-auto p-0"></ul>
+        <ul id="chat-session-list" class="flex-1 list-none m-0 overflow-y-auto p-0" aria-label="{% translate 'Chats' %}"></ul>
       </div>
+
+      <div id="chat-sidebar-resizer" class="chat-ui-resizer"
+           role="separator" aria-orientation="vertical"
+           aria-controls="chat-sessions-col"
+           aria-label="{% translate 'Resize chats panel' %}"
+           aria-valuemin="200" aria-valuemax="480"
+           tabindex="0"></div>
 
       <div id="chat-panel-col"
            class="flex flex-1 flex-col min-w-0 min-h-0 border border-base-200 rounded-default p-3 dark:border-base-700"
            style="flex:1 1 24rem;min-width:0;">
         <div id="chat-conv-header"
              class="flex items-center justify-between gap-2 mb-3 pb-2 border-b border-base-200 dark:border-base-700">
+          <button type="button" id="chat-sidebar-toggle" class="chat-ui-icon-btn"
+                  aria-controls="chat-sessions-col" aria-expanded="true"
+                  aria-label="{% translate 'Hide chats' %}"
+                  title="{% translate 'Hide chats' %}"
+                  data-label-hide="{% translate 'Hide chats' %}"
+                  data-label-show="{% translate 'Show chats' %}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path></svg>
+          </button>
+          <button type="button" id="chat-new-collapsed" class="chat-ui-icon-btn hidden"
+                  aria-label="{% translate 'New chat' %}"
+                  title="{% translate 'New chat' %}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"></path></svg>
+          </button>
           <h2 id="chat-conv-title"
               class="font-semibold text-sm truncate text-font-important-light dark:text-font-important-dark">
             {% translate "Conversation" %}
           </h2>
+          <select id="chat-model"
+                  title="{% translate 'Model' %}"
+                  aria-label="{% translate 'Model' %}"
+                  data-models-url="{% url 'chat:models_json' %}"
+                  class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark chat-ui-model"></select>
         </div>
 
-        <div id="chat-messages" class="flex-1 min-h-0 overflow-y-auto">
+        <div id="chat-messages" class="flex-1 min-h-0 overflow-y-auto" role="log" aria-live="polite">
           <p id="chat-empty-state"
-             class="text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark">
+             class="text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark chat-ui-empty">
             {% translate "No messages yet. Say hello!" %}
           </p>
         </div>
 
         <div id="chat-composer" class="flex-none mt-auto border-t border-base-200 pt-4 dark:border-base-700">
-          <textarea id="chat-input" rows="3"
-                    class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
-                    placeholder="{% translate 'Type a message...' %}"></textarea>
-          <div id="chat-attachments" class="flex flex-wrap gap-2 mt-2"></div>
-          <div class="flex items-center gap-3 mt-2">
-            <button type="button" id="chat-send"
-                    class="border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-2 rounded-default text-sm text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50">
-              {% translate "Send" %}
-            </button>
-            <button type="button" id="chat-attach-btn"
-                    title="{% translate 'Attach a document (PDF, text, etc.)' %}"
-                    aria-label="{% translate 'Attach a document' %}"
-                    class="border border-base-200 cursor-pointer flex h-9 items-center justify-center rounded-default text-font-default-light w-9 hover:bg-base-100 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-            </button>
-            <input type="file" id="chat-attach-input" class="hidden" />
-            <select id="chat-model"
-                    title="{% translate 'Model' %}"
-                    data-models-url="{% url 'chat:models_json' %}"
-                    class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"></select>
-            <span id="chat-status" class="text-font-subtle-light text-sm dark:text-font-subtle-dark"></span>
+          <div class="chat-ui-composer-box">
+            <textarea id="chat-input" rows="2"
+                      aria-label="{% translate 'Message' %}"
+                      class="appearance-none border border-base-200 bg-white px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm w-full focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark"
+                      placeholder="{% translate 'Type a message...' %}"></textarea>
+            <div id="chat-attachments" class="flex flex-wrap gap-2 mt-2"></div>
+            <div class="chat-ui-composer-toolbar">
+              <button type="button" id="chat-attach-btn"
+                      title="{% translate 'Attach a document (PDF, text, etc.)' %}"
+                      aria-label="{% translate 'Attach a document' %}"
+                      class="border border-base-200 cursor-pointer flex h-9 items-center justify-center rounded-default text-font-default-light w-9 hover:bg-base-100 dark:border-base-700 dark:text-font-default-dark dark:hover:bg-base-800 chat-ui-icon-btn">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+              </button>
+              <span id="chat-status" class="text-font-subtle-light text-sm dark:text-font-subtle-dark" role="status" aria-live="polite"></span>
+              <input type="file" id="chat-attach-input" class="hidden" />
+              <button type="button" id="chat-send"
+                      class="border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-2 rounded-default text-sm text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50 chat-ui-send">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"></path><path d="m5 12 7-7 7 7"></path></svg>
+                <span>{% translate "Send" %}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -242,6 +1130,8 @@
       function messagesUrlFor(id) { return baseUrl + id + "/messages-json/"; }
       function sendUrlFor(id) { return baseUrl + id + "/send/"; }
       function attachUrlFor(id) { return baseUrl + id + "/attach/"; }
+      function reprocessUrlFor(id) { return baseUrl + id + "/reprocess/"; }
+      function docStatusUrlFor(id) { return baseUrl + id + "/doc-status-json/"; }
       function pageUrlFor(id) { return baseUrl + id + "/"; }
 
       function clear(el) {
@@ -317,14 +1207,14 @@
       function renderCitations(container, citations) {
         if (!citations || !citations.length) { return; }
         const wrap = document.createElement("div");
-        wrap.className = "flex flex-wrap gap-1 mt-2";
+        wrap.className = "flex flex-wrap gap-1 mt-2 chat-ui-citations";
         const popover = document.createElement("div");
-        popover.className = "border border-base-200 bg-white mt-2 p-2 rounded-default text-xs dark:border-base-700 dark:bg-base-900";
+        popover.className = "border border-base-200 bg-white mt-2 p-2 rounded-default text-xs dark:border-base-700 dark:bg-base-900 chat-ui-cite-popover";
         popover.style.display = "none";
         citations.forEach(function (cite, idx) {
           const chip = document.createElement("button");
           chip.type = "button";
-          chip.className = "border border-base-200 bg-base-100 cursor-pointer px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+          chip.className = "border border-base-200 bg-base-100 cursor-pointer px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800 chat-ui-chip chat-ui-cite";
           const label = cite.reference_id || ("[" + (idx + 1) + "]");
           chip.textContent = label;
           const excerpt = cite.excerpt || cite.filename || "";
@@ -332,7 +1222,7 @@
           chip.addEventListener("click", function () {
             popover.textContent = "";
             const t = document.createElement("div");
-            t.className = "font-semibold mb-1";
+            t.className = "font-semibold mb-1 chat-ui-cite-title";
             t.textContent = cite.filename || label;
             popover.appendChild(t);
             const b = document.createElement("div");
@@ -360,7 +1250,7 @@
 
         if (typeof Chart === "undefined") {
           const table = document.createElement("table");
-          table.className = "mt-2 text-sm";
+          table.className = "mt-2 text-sm chat-ui-chart-table";
           points.forEach(function (p) {
             const tr = document.createElement("tr");
             const l = document.createElement("td");
@@ -381,11 +1271,40 @@
 
         const canvas = document.createElement("canvas");
         canvas.id = "chat-chart-" + (chartSeq++);
-        canvas.className = "mt-2";
+        canvas.className = "mt-2 chat-ui-chart";
         canvas.style.maxHeight = "20rem";
         container.appendChild(canvas);
 
-        const type = chartData.type || "bar";
+        applyChartTheme();
+        const chart = new Chart(canvas.getContext("2d"), chartConfigFrom(chartData));
+
+        addChartDownload(container, canvas, chart, chartData);
+      }
+
+      function applyChartTheme() {
+        // Theme-aware text/grid colors (presentation only).
+        try {
+          const css = getComputedStyle(document.documentElement);
+          const isDark = document.documentElement.classList.contains("dark");
+          const textColor = css.getPropertyValue(isDark ? "--color-base-400" : "--color-base-500").trim();
+          if (textColor) {
+            Chart.defaults.color = textColor;
+            Chart.defaults.borderColor = "color-mix(in oklch, " + css.getPropertyValue("--color-base-500").trim() + " 20%, transparent)";
+          }
+        } catch (e) {  }
+      }
+
+      function chartConfigFrom(chartData) {
+        // Build a Chart.js config from structured chart_data. Shared by the
+        // inline chart and the enlarged modal so both render identically.
+        const points = chartData.data || [];
+        const seriesNames = chartData.series || [];
+        const seriesCount = Math.max(seriesNames.length, 1);
+        function valueAt(p, i) {
+          const vals = p.values || [];
+          const v = vals[i];
+          return typeof v === "number" ? v : null;
+        }
         const datasets = [];
         for (let i = 0; i < seriesCount; i++) {
           datasets.push({
@@ -393,15 +1312,144 @@
             data: points.map(function (p) { return valueAt(p, i); })
           });
         }
-
-        new Chart(canvas.getContext("2d"), {
-          type: type,
+        return {
+          type: chartData.type || "bar",
           data: {
             labels: points.map(function (p) { return p.label; }),
             datasets: datasets
           },
-          options: { responsive: true }
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              title: chartData.title
+                ? { display: true, text: chartData.title }
+                : { display: false }
+            }
+          }
+        };
+      }
+
+      function openChartModal(chartData) {
+        if (typeof Chart === "undefined") { return; }
+        const overlay = document.createElement("div");
+        overlay.className = "chat-ui-chart-modal";
+        overlay.style.cssText =
+          "position:fixed;inset:0;z-index:1000;display:flex;align-items:center;" +
+          "justify-content:center;background:rgba(0,0,0,0.7);padding:2rem;";
+
+        const panel = document.createElement("div");
+        panel.className = "rounded-default bg-white dark:bg-base-900 shadow-xl";
+        panel.style.cssText =
+          "position:relative;width:min(1100px,95vw);height:min(80vh,800px);" +
+          "display:flex;flex-direction:column;padding:1rem;";
+
+        const bar = document.createElement("div");
+        bar.className = "mb-2 flex items-center justify-end gap-2";
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "inline-flex items-center gap-1 border border-base-200 dark:border-base-700 px-3 py-1 rounded-default text-sm";
+        dlBtn.textContent = "Download chart";
+        const closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.setAttribute("aria-label", "Close");
+        closeBtn.className = "inline-flex items-center gap-1 border border-base-200 dark:border-base-700 px-3 py-1 rounded-default text-sm";
+        closeBtn.textContent = "Close";
+        bar.appendChild(dlBtn);
+        bar.appendChild(closeBtn);
+
+        const body = document.createElement("div");
+        body.style.cssText = "position:relative;flex:1 1 auto;min-height:0;";
+        const canvas = document.createElement("canvas");
+        canvas.id = "chat-chart-modal-" + (chartSeq++);
+        body.appendChild(canvas);
+
+        panel.appendChild(bar);
+        panel.appendChild(body);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+
+        applyChartTheme();
+        const chart = new Chart(canvas.getContext("2d"), chartConfigFrom(chartData));
+
+        function close() {
+          document.removeEventListener("keydown", onKey);
+          try { chart.destroy(); } catch (e) {  }
+          if (overlay.parentNode) { overlay.parentNode.removeChild(overlay); }
+        }
+        function onKey(e) { if (e.key === "Escape") { close(); } }
+
+        dlBtn.addEventListener("click", function () {
+          downloadChartPng(canvas, chart, chartData);
         });
+        closeBtn.addEventListener("click", close);
+        overlay.addEventListener("click", function (e) {
+          if (e.target === overlay) { close(); }
+        });
+        document.addEventListener("keydown", onKey);
+      }
+
+      function downloadChartPng(canvas, chart, chartData) {
+        // Composite the (transparent) chart onto a white background so the PNG
+        // looks right in any viewer, then trigger a download.
+        let dataUrl;
+        try {
+          const out = document.createElement("canvas");
+          out.width = canvas.width;
+          out.height = canvas.height;
+          const ctx = out.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, out.width, out.height);
+          ctx.drawImage(canvas, 0, 0);
+          dataUrl = out.toDataURL("image/png");
+        } catch (e) {
+          try {
+            dataUrl = chart && chart.toBase64Image
+              ? chart.toBase64Image()
+              : canvas.toDataURL("image/png");
+          } catch (e2) { return; }
+        }
+        const title = (chartData && chartData.title) ? chartData.title : "chart";
+        const name = title.replace(/[^a-z0-9\-_]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "chart";
+        const a = document.createElement("a");
+        a.href = dataUrl;
+        a.download = name + ".png";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+
+      function addChartDownload(container, canvas, chart, chartData) {
+        // Clicking the chart opens it enlarged in a modal; explicit Expand and
+        // Download buttons are provided too. Presentation only — no data change.
+        canvas.style.cursor = "zoom-in";
+        canvas.title = "Click to view this chart larger";
+        canvas.addEventListener("click", function () {
+          openChartModal(chartData);
+        });
+
+        const row = document.createElement("div");
+        row.className = "mt-1 flex justify-end gap-2 chat-ui-chart-actions";
+
+        const expandBtn = document.createElement("button");
+        expandBtn.type = "button";
+        expandBtn.className = "inline-flex items-center gap-1 border border-base-200 dark:border-base-700 px-2 py-1 rounded-default text-xs chat-ui-chart-expand";
+        expandBtn.textContent = "View large";
+        expandBtn.addEventListener("click", function () {
+          openChartModal(chartData);
+        });
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "inline-flex items-center gap-1 border border-base-200 dark:border-base-700 px-2 py-1 rounded-default text-xs chat-ui-chart-download";
+        btn.textContent = "Download chart";
+        btn.addEventListener("click", function () {
+          downloadChartPng(canvas, chart, chartData);
+        });
+
+        row.appendChild(expandBtn);
+        row.appendChild(btn);
+        container.appendChild(row);
       }
 
       const TOOL_LABELS = {
@@ -424,40 +1472,197 @@
 
       function renderToolBadge(container, message) {
         const row = document.createElement("div");
-        row.className = "mt-2 flex items-center gap-1";
+        row.className = "mt-2 flex items-center gap-1 chat-ui-meta";
         const label = document.createElement("span");
         label.className = "text-xs text-font-subtle-light dark:text-font-subtle-dark";
         label.textContent = "Method:";
         const pill = document.createElement("span");
-        pill.className = "inline-block border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
+        pill.className = "inline-block border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800 chat-ui-chip chat-ui-chip--muted";
         pill.textContent = methodLabel(message);
         row.appendChild(label);
         row.appendChild(pill);
         container.appendChild(row);
       }
 
+      function renderRetry(bubble, message) {
+        // Show a "Retry" button when a knowledge-base dispatch failed
+        // (transient). metadata.retry_document_ids carries the failed doc ids.
+        const meta = message.metadata || {};
+        const ids = meta.retry_document_ids;
+        if (!Array.isArray(ids) || !ids.length || !currentSessionId) { return; }
+        const row = document.createElement("div");
+        row.className = "mt-2 flex flex-wrap gap-2 chat-ui-retry-row";
+        ids.forEach(function (docId) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "inline-flex items-center gap-1 border border-base-200 dark:border-base-700 px-2 py-1 rounded-default text-xs chat-ui-retry-btn";
+          btn.textContent = "Retry processing";
+          btn.setAttribute("data-document-id", docId);
+          btn.addEventListener("click", function () {
+            btn.disabled = true;
+            btn.textContent = "Retrying…";
+            const body = new URLSearchParams();
+            body.append("document_id", docId);
+            fetch(reprocessUrlFor(currentSessionId), {
+              method: "POST",
+              headers: jsonHeaders({
+                "X-CSRFToken": getCookie("csrftoken"),
+                "Content-Type": "application/x-www-form-urlencoded"
+              }),
+              credentials: "same-origin",
+              body: body
+            })
+              .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+              .then(function (res) {
+                if (res.ok && res.data && res.data.ok) {
+                  btn.textContent = "Processing started";
+                  setStatus(res.data.message || "Processing restarted.");
+                } else {
+                  btn.disabled = false;
+                  btn.textContent = "Retry processing";
+                  setStatus((res.data && res.data.message) || "Retry failed.");
+                }
+              })
+              .catch(function () {
+                btn.disabled = false;
+                btn.textContent = "Retry processing";
+                setStatus("Retry failed.");
+              });
+          });
+          row.appendChild(btn);
+        });
+        bubble.appendChild(row);
+      }
+
+      function temporalLink(url, label) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.className = "inline-flex items-center gap-1 text-xs underline text-primary-600 dark:text-primary-400 chat-ui-temporal-link";
+        a.textContent = label || "View Temporal workflow";
+        return a;
+      }
+
+      function renderTemporalLinks(bubble, message) {
+        // Quick links to the Temporal workflow(s) for a knowledge-base reply.
+        const meta = message.metadata || {};
+        const links = meta.temporal_links;
+        if (!Array.isArray(links) || !links.length) { return; }
+        const row = document.createElement("div");
+        row.className = "mt-2 flex flex-col gap-1 chat-ui-temporal-links";
+        links.forEach(function (l) {
+          if (!l || !l.url) { return; }
+          row.appendChild(temporalLink(l.url, "View workflow for " + (l.title || l.workflow_id)));
+        });
+        if (row.childNodes.length) { bubble.appendChild(row); }
+      }
+
+      function renderLiveStatus(bubble, message) {
+        // On-demand live tracker: when a status reply carries document ids,
+        // render progress bars that poll the status endpoint until every
+        // tracked document reaches a terminal state (ready/failed), then stop.
+        const meta = message.metadata || {};
+        const ids = meta.live_status_document_ids;
+        if (!Array.isArray(ids) || !ids.length || !currentSessionId) { return; }
+
+        const sessionAtRender = currentSessionId;
+        const panel = document.createElement("div");
+        panel.className = "mt-2 chat-ui-live-status";
+        bubble.appendChild(panel);
+
+        function row(doc) {
+          const wrap = document.createElement("div");
+          wrap.className = "mb-2 chat-ui-live-row";
+          const head = document.createElement("div");
+          head.className = "flex items-center justify-between gap-2 text-xs";
+          const name = document.createElement("span");
+          name.className = "truncate";
+          name.textContent = doc.title;
+          const state = document.createElement("span");
+          state.className = "shrink-0 chat-ui-live-state";
+          const stage = doc.stage ? " · " + doc.stage : "";
+          state.textContent = doc.status_display + " (" + doc.progress + "%)" + stage;
+          head.appendChild(name);
+          head.appendChild(state);
+          const track = document.createElement("div");
+          track.className = "mt-1 h-1.5 w-full rounded-full bg-base-200 dark:bg-base-700 overflow-hidden";
+          const fill = document.createElement("div");
+          fill.className = "h-full rounded-full " +
+            (doc.status === "failed" ? "bg-red-500" : "bg-primary-600");
+          fill.style.width = Math.max(2, Math.min(100, doc.progress)) + "%";
+          track.appendChild(fill);
+          wrap.appendChild(head);
+          wrap.appendChild(track);
+          if (doc.status === "failed" && doc.error) {
+            const err = document.createElement("div");
+            err.className = "mt-1 text-xs text-red-500";
+            err.textContent = doc.error;
+            wrap.appendChild(err);
+          }
+          if (doc.temporal_url) {
+            const linkRow = document.createElement("div");
+            linkRow.className = "mt-1";
+            linkRow.appendChild(temporalLink(doc.temporal_url, "View Temporal workflow"));
+            wrap.appendChild(linkRow);
+          }
+          return wrap;
+        }
+
+        function render(docs) {
+          clear(panel);
+          docs.forEach(function (d) { panel.appendChild(row(d)); });
+        }
+
+        let timer = null;
+        function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+        function poll() {
+          // Stop if the user navigated away to another session.
+          if (currentSessionId !== sessionAtRender) { stop(); return; }
+          fetch(docStatusUrlFor(sessionAtRender) + "?ids=" + encodeURIComponent(ids.join(",")), {
+            method: "GET",
+            headers: jsonHeaders({}),
+            credentials: "same-origin"
+          })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+              if (!data || !Array.isArray(data.documents)) { return; }
+              render(data.documents);
+              if (data.all_done) { stop(); }
+            })
+            .catch(function () { /* transient; keep polling */ });
+        }
+
+        poll();
+        timer = setInterval(poll, 3000);
+      }
+
       function renderMessage(message) {
         const isUser = message.role === "user";
         const wrap = document.createElement("div");
-        wrap.className = "mb-3 flex " + (isUser ? "justify-end" : "justify-start");
+        wrap.className = "mb-3 flex " + (isUser ? "justify-end" : "justify-start") +
+          " chat-ui-msg " + (isUser ? "chat-ui-msg--user" : "chat-ui-msg--assistant");
 
         const bubble = document.createElement("div");
         bubble.className = "max-w-[80%] px-3 py-2 rounded-default text-sm " +
           (isUser
             ? "bg-primary-600 text-white"
-            : "border border-base-200 text-font-default-light dark:border-base-700 dark:text-font-default-dark");
+            : "border border-base-200 text-font-default-light dark:border-base-700 dark:text-font-default-dark") +
+          " chat-ui-bubble " + (isUser ? "chat-ui-bubble--user" : "chat-ui-bubble--assistant");
 
         const text = document.createElement("div");
+        text.className = "chat-ui-text";
         text.textContent = message.content || "";
         text.style.whiteSpace = "pre-wrap";
         bubble.appendChild(text);
 
         if (isUser && message.attachments && message.attachments.length) {
           const attachRow = document.createElement("div");
-          attachRow.className = "mt-2 flex flex-wrap gap-1";
+          attachRow.className = "mt-2 flex flex-wrap gap-1 chat-ui-attachments-row";
           message.attachments.forEach(function (att) {
             const chip = document.createElement("span");
-            chip.className = "inline-block border border-white/40 bg-white/15 px-2 py-0.5 rounded-full text-xs";
+            chip.className = "inline-block border border-white/40 bg-white/15 px-2 py-0.5 rounded-full text-xs chat-ui-chip chat-ui-chip--attachment";
             chip.textContent = att.title;
             attachRow.appendChild(chip);
           });
@@ -468,6 +1673,9 @@
           renderCitations(bubble, message.citations);
           renderChart(bubble, message.chart_data);
           renderToolBadge(bubble, message);
+          renderRetry(bubble, message);
+          renderTemporalLinks(bubble, message);
+          renderLiveStatus(bubble, message);
         }
 
         wrap.appendChild(bubble);
@@ -479,7 +1687,7 @@
         clear(messagesEl);
         if (!messages || !messages.length) {
           const p = document.createElement("p");
-          p.className = "text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark";
+          p.className = "text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark chat-ui-empty";
           p.textContent = "No messages yet. Say hello!";
           messagesEl.appendChild(p);
           return;
@@ -489,10 +1697,10 @@
 
       function renderProcessingPlaceholder() {
         const wrap = document.createElement("div");
-        wrap.className = "mb-3 flex justify-start";
+        wrap.className = "mb-3 flex justify-start chat-ui-msg chat-ui-msg--assistant";
         wrap.setAttribute("data-processing", "1");
         const bubble = document.createElement("div");
-        bubble.className = "max-w-[80%] px-3 py-2 rounded-default text-sm border border-base-200 text-font-subtle-light dark:border-base-700 dark:text-font-subtle-dark";
+        bubble.className = "max-w-[80%] px-3 py-2 rounded-default text-sm border border-base-200 text-font-subtle-light dark:border-base-700 dark:text-font-subtle-dark chat-ui-bubble chat-ui-bubble--assistant chat-ui-typing";
         bubble.textContent = "Processing…";
         wrap.appendChild(bubble);
         messagesEl.appendChild(wrap);
@@ -510,13 +1718,35 @@
         clear(attachmentsEl);
       }
 
+      function removeAttachment(id) {
+        pendingAttachmentIds = pendingAttachmentIds.filter(function (x) { return x !== id; });
+        pendingAttachments = pendingAttachments.filter(function (a) { return a.id !== id; });
+        renderAttachmentChips();
+      }
+
+      function renderAttachmentChips() {
+        clear(attachmentsEl);
+        pendingAttachments.forEach(function (a) {
+          const chip = document.createElement("span");
+          chip.className = "inline-flex items-center gap-1 border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800 chat-ui-chip chat-ui-chip--pending";
+          const label = document.createElement("span");
+          label.textContent = a.title;
+          chip.appendChild(label);
+          const x = document.createElement("button");
+          x.type = "button";
+          x.textContent = "\u00d7";
+          x.setAttribute("aria-label", "Remove " + a.title);
+          x.className = "ml-1 leading-none text-font-subtle-light hover:text-red-600 dark:text-font-subtle-dark chat-ui-chip-remove";
+          x.addEventListener("click", function () { removeAttachment(a.id); });
+          chip.appendChild(x);
+          attachmentsEl.appendChild(chip);
+        });
+      }
+
       function addAttachmentChip(doc) {
         pendingAttachmentIds.push(doc.id);
         pendingAttachments.push({ id: doc.id, title: doc.title });
-        const chip = document.createElement("span");
-        chip.className = "border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800";
-        chip.textContent = doc.title;
-        attachmentsEl.appendChild(chip);
+        renderAttachmentChips();
       }
 
       function loadSession(id, push, quiet) {
@@ -567,8 +1797,12 @@
           if (!row) { return; }
           if (b.getAttribute("data-session-id") === id) {
             row.classList.add("bg-base-100", "dark:bg-base-800");
+            row.classList.add("chat-ui-session--active");
+            b.setAttribute("aria-current", "true");
           } else {
             row.classList.remove("bg-base-100", "dark:bg-base-800");
+            row.classList.remove("chat-ui-session--active");
+            b.removeAttribute("aria-current");
           }
         });
       }
@@ -582,10 +1816,10 @@
           const btn = document.createElement("button");
           btn.type = "button";
           btn.setAttribute("data-session-id", session.id);
-          btn.className = "flex-1 min-w-0 flex flex-col justify-center bg-transparent border-0 p-0 pr-6 cursor-pointer text-left text-font-default-light dark:text-font-default-dark";
+          btn.className = "flex-1 min-w-0 flex flex-col justify-center bg-transparent border-0 p-0 pr-6 cursor-pointer text-left text-font-default-light dark:text-font-default-dark chat-ui-session-main";
 
           const title = document.createElement("div");
-          title.className = "font-medium text-sm leading-5";
+          title.className = "font-medium text-sm leading-5 chat-ui-session-title";
           title.style.overflow = "hidden";
           title.style.textOverflow = "ellipsis";
           title.style.whiteSpace = "nowrap";
@@ -593,12 +1827,13 @@
           btn.appendChild(title);
 
           const ts = document.createElement("small");
-          ts.className = "block leading-4 text-font-subtle-light dark:text-font-subtle-dark";
+          ts.className = "block leading-4 text-font-subtle-light dark:text-font-subtle-dark chat-ui-session-time";
           ts.style.overflow = "hidden";
           ts.style.textOverflow = "ellipsis";
           ts.style.whiteSpace = "nowrap";
           ts.textContent = session.created_at ? new Date(session.created_at).toLocaleString() : "\u00a0";
           btn.appendChild(ts);
+          btn.title = title.textContent + (session.created_at ? " \u00b7 " + ts.textContent : "");
 
           btn.addEventListener("click", function () { loadSession(session.id, true); });
           li.appendChild(btn);
@@ -608,7 +1843,7 @@
           del.setAttribute("data-row-delete-session-id", session.id);
           del.title = "Delete chat";
           del.setAttribute("aria-label", "Delete chat");
-          del.className = "absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-default cursor-pointer text-font-subtle-light hover:bg-base-200 hover:text-red-600 focus:text-red-600 dark:text-font-subtle-dark dark:hover:bg-base-700 dark:hover:text-red-500";
+          del.className = "absolute right-2 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-default cursor-pointer text-font-subtle-light hover:bg-base-200 hover:text-red-600 focus:text-red-600 dark:text-font-subtle-dark dark:hover:bg-base-700 dark:hover:text-red-500 chat-ui-session-delete";
           const delIcon = makeTrashIcon();
           delIcon.setAttribute("width", "16");
           delIcon.setAttribute("height", "16");
@@ -843,7 +2078,9 @@
 
       function sendMessage() {
         const question = inputEl.value.trim();
-        if (!question) { return; }
+        // Allow sending with text OR at least one attached file (a media file
+        // can be sent without a message). Block only when there is neither.
+        if (!question && pendingAttachmentIds.length === 0) { return; }
 
         inputEl.disabled = true;
         sendBtn.disabled = true;
@@ -930,6 +2167,109 @@
       sizeChatLayout();
       window.addEventListener("resize", sizeChatLayout);
       window.setTimeout(sizeChatLayout, 0);
+
+      // Presentation-only: collapsible + drag-resizable Chats panel,
+      // persisted in localStorage. No data/network logic here.
+      (function initSidebarControls() {
+        const sessionsCol = document.getElementById("chat-sessions-col");
+        const resizer = document.getElementById("chat-sidebar-resizer");
+        const toggleBtn = document.getElementById("chat-sidebar-toggle");
+        const newCollapsedBtn = document.getElementById("chat-new-collapsed");
+        if (!layoutEl || !sessionsCol || !resizer || !toggleBtn) { return; }
+
+        const MIN = 200;
+        const MAX = 480;
+        const DEFAULT = window.innerWidth < 1024 ? 256 : 304;
+        const KEY_WIDTH = "chat.sidebarWidth";
+        const KEY_COLLAPSED = "chat.sidebarCollapsed";
+        const labelHide = toggleBtn.getAttribute("data-label-hide") || "Hide chats";
+        const labelShow = toggleBtn.getAttribute("data-label-show") || "Show chats";
+        let currentWidth = DEFAULT;
+        let preferredWidth = DEFAULT;
+
+        function readStore(key) {
+          try { return window.localStorage.getItem(key); } catch (e) { return null; }
+        }
+        function writeStore(key, value) {
+          try { window.localStorage.setItem(key, value); } catch (e) {  }
+        }
+
+        function applyWidth(w, persist) {
+          const avail = layoutEl.clientWidth - 360;
+          const upper = Math.max(MIN, Math.min(MAX, avail));
+          const clamped = Math.round(Math.max(MIN, Math.min(upper, w)));
+          currentWidth = clamped;
+          sessionsCol.style.width = clamped + "px";
+          sessionsCol.style.flexBasis = clamped + "px";
+          resizer.setAttribute("aria-valuenow", String(clamped));
+          if (persist !== false) {
+            preferredWidth = clamped;
+            writeStore(KEY_WIDTH, String(clamped));
+          }
+        }
+
+        function setCollapsed(collapsed, persist) {
+          layoutEl.classList.toggle("chat-ui-sidebar-collapsed", collapsed);
+          toggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          toggleBtn.setAttribute("aria-label", collapsed ? labelShow : labelHide);
+          toggleBtn.title = collapsed ? labelShow : labelHide;
+          if (newCollapsedBtn) { newCollapsedBtn.classList.toggle("hidden", !collapsed); }
+          if (persist !== false) { writeStore(KEY_COLLAPSED, collapsed ? "1" : "0"); }
+        }
+
+        toggleBtn.addEventListener("click", function () {
+          setCollapsed(!layoutEl.classList.contains("chat-ui-sidebar-collapsed"));
+        });
+
+        if (newCollapsedBtn) {
+          newCollapsedBtn.addEventListener("click", function () {
+            if (!newBtn.disabled) { newBtn.click(); }
+          });
+        }
+
+        resizer.addEventListener("pointerdown", function (ev) {
+          if (ev.button !== 0) { return; }
+          ev.preventDefault();
+          try { resizer.setPointerCapture(ev.pointerId); } catch (e) {  }
+          document.body.classList.add("chat-ui-resizing");
+        });
+        resizer.addEventListener("pointermove", function (ev) {
+          if (!document.body.classList.contains("chat-ui-resizing")) { return; }
+          applyWidth(ev.clientX - sessionsCol.getBoundingClientRect().left);
+        });
+        function endDrag(ev) {
+          if (!document.body.classList.contains("chat-ui-resizing")) { return; }
+          try { resizer.releasePointerCapture(ev.pointerId); } catch (e) {  }
+          document.body.classList.remove("chat-ui-resizing");
+        }
+        resizer.addEventListener("pointerup", endDrag);
+        resizer.addEventListener("pointercancel", endDrag);
+        resizer.addEventListener("dblclick", function () { applyWidth(DEFAULT); });
+
+        resizer.addEventListener("keydown", function (ev) {
+          const step = ev.shiftKey ? 48 : 16;
+          let next = null;
+          if (ev.key === "ArrowLeft") { next = currentWidth - step; }
+          else if (ev.key === "ArrowRight") { next = currentWidth + step; }
+          else if (ev.key === "Home") { next = MIN; }
+          else if (ev.key === "End") { next = MAX; }
+          if (next === null) { return; }
+          ev.preventDefault();
+          applyWidth(next);
+        });
+
+        const storedWidth = parseInt(readStore(KEY_WIDTH) || "", 10);
+        preferredWidth = isNaN(storedWidth) ? DEFAULT : storedWidth;
+        applyWidth(preferredWidth, false);
+        setCollapsed(readStore(KEY_COLLAPSED) === "1", false);
+
+        function reclamp() { applyWidth(preferredWidth, false); }
+        window.addEventListener("resize", reclamp);
+        // The layout may not have its final width yet during this inline
+        // script; re-apply once it has settled.
+        window.setTimeout(reclamp, 0);
+        window.addEventListener("load", reclamp);
+      })();
 
       setComposerEnabled(false, true);
 
