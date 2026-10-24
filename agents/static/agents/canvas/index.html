@@ -781,7 +781,7 @@
           const promptName = addInput.value.trim();
           if (!promptName) { showStatus("Enter a Langfuse prompt name.", "err"); return; }
           try {
-            const tools = await api("POST", "tool/sync_langfuse/", { prompt_names: [promptName] });
+            const tools = await api("POST", "tool/sync_langfuse/", withCompany({ prompt_names: [promptName] }));
             if (Array.isArray(tools)) {
               const byId = {};
               state.tools.forEach((x) => { byId[x.id] = x; });
@@ -840,7 +840,7 @@
         const list = await api("GET", "graph/");
         const rows = Array.isArray(list) ? list : (list.results || []);
         if (rows.length) {
-          state.graph = rows[0];
+          state.graph = rows.find((g) => g && g.is_active) || rows[0];
         } else {
           state.graph = await api("POST", "graph/", withCompany({ name: "Graph Workflow" }));
           showStatus("Created a new graph.", "ok");
@@ -874,28 +874,47 @@
         try {
           await ensureGraph();
 
-
           const existing = new Set(state.nodes.map((n) => n.slug));
-          let slug = existing.has("chat_agent") ? null : "chat_agent";
-          if (!slug) {
-            let i = 2;
-            while (existing.has("step_" + i)) i++;
-            slug = "step_" + i;
+          const hasStart = state.nodes.some((n) => n.kind === "start");
+          const hasEnd = state.nodes.some((n) => n.kind === "end");
+
+          // Ensure a runnable shape: first create START, then at least one END,
+          // then STEP nodes. A graph with no START never routes (the chat
+          // runtime requires START + >=1 STEP), so "+ New Node" fills the
+          // required nodes first instead of only ever adding steps.
+          let kind = "step";
+          let slug;
+          let label;
+          if (!hasStart) {
+            kind = "start"; slug = "start"; label = "Start";
+          } else if (!hasEnd) {
+            kind = "end"; slug = "end"; label = "End";
+          } else {
+            kind = "step";
+            label = "New step";
+            slug = existing.has("chat_agent") ? null : "chat_agent";
+            if (!slug) {
+              let i = 2;
+              while (existing.has("step_" + i)) i++;
+              slug = "step_" + i;
+            }
           }
           const node = await api("POST", "node/", {
-
             graph: state.graph.id,
-            kind: "step",
+            kind: kind,
             slug: slug,
-            label: "New step",
-
-
+            label: label,
             position: nextFreePosition(),
           });
           state.nodes.push(node);
           render();
           selectNode(node.id);
-          showStatus("Step node added. Pick its tools, then Save.", "ok");
+          const hint = kind === "start"
+            ? "Start node added. Add an End node, then a Step node and pick its tools."
+            : kind === "end"
+              ? "End node added. Now add a Step node and pick its tools."
+              : "Step node added. Pick its tools, then Save, then connect start \u2192 step \u2192 end and Activate.";
+          showStatus(hint, "ok");
         } catch (e) { showStatus(e.message, "err"); }
       }
 

@@ -48,6 +48,35 @@ class AgentGraphViewSet(ScopedModelViewSet):
         active graphs (which the partial unique constraint would reject).
         """
         graph = self.get_object()
+
+        # A graph only routes in chat when it has a START node AND at least one
+        # STEP node (see chat.views._orchestrator_for). Activating a graph that
+        # lacks either would silently fall back to the plain RAG path, which
+        # looks like "activation did nothing". Reject it with a clear message so
+        # the canvas surfaces the real reason instead of appearing to succeed.
+        has_start = AgentNode.objects.filter(
+            graph=graph, kind=AgentNode.KIND_START
+        ).exists()
+        has_step = AgentNode.objects.filter(
+            graph=graph, kind=AgentNode.KIND_STEP
+        ).exists()
+        if not (has_start and has_step):
+            missing = []
+            if not has_start:
+                missing.append("a START node")
+            if not has_step:
+                missing.append("at least one STEP node")
+            return Response(
+                {
+                    "detail": (
+                        "This graph is not runnable yet: add "
+                        + " and ".join(missing)
+                        + " before activating."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         with transaction.atomic():
             AgentGraph.objects.filter(
                 company=graph.company, is_active=True
@@ -84,7 +113,24 @@ class ToolViewSet(ScopedModelViewSet):
         are left untouched).
         """
         context = self.get_serializer_context()
-        company = ToolSerializer(context=context)._resolve_company(None)
+        serializer = ToolSerializer(context=context)
+
+        # Resolve the company the same way create does: an explicit company id
+        # from the request (body or ?company= querystring) is validated against
+        # ownership; only when none is supplied do we fall back to the user's
+        # single owned company. Without this, a multi-company user hit
+        # "ambiguous; specify a company" because sync_langfuse passed None even
+        # though the canvas sends the active company.
+        supplied_id = (
+            request.data.get("company")
+            or request.query_params.get("company")
+        )
+        supplied = None
+        if supplied_id:
+            from company.models import Company
+
+            supplied = Company.objects.filter(pk=supplied_id).first()
+        company = serializer._resolve_company(supplied)
 
         names = request.data.get("prompt_names") or []
         if isinstance(names, str):

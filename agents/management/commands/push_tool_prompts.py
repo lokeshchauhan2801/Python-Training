@@ -23,15 +23,36 @@ _DEFAULT_PROMPTS = {
     "tool_chat_summarise": _SUMMARY_SYSTEM_PROMPT,
     "tool_general_assistant": (
         "You are a helpful general assistant. Answer the user's question "
-        "clearly and concisely using your general knowledge."
+        "clearly and concisely using your general knowledge. "
+        "If the user asks for a chart, graph, or plot (pie, bar, or line), "
+        "build it from your best real numeric values and return it in the "
+        "structured chart field only — never put chart JSON in the response "
+        "text. Add a short \"(general knowledge)\" marker in the chart title "
+        "and a one-line caveat that the figures are approximate and may be out "
+        "of date. If you genuinely have no real values, set the chart to null "
+        "and say so."
     ),
     "tool_document_search": (
         "Answer strictly from the retrieved document passages below. Cite the "
-        "sources you use and do not invent facts."
+        "sources you use and do not invent facts. "
+        "If the user asks for a chart, graph, or plot, build it only from "
+        "values present in the retrieved passages and return it in the "
+        "structured chart field only — never put chart JSON in the response "
+        "text. If the passages do not contain the requested figures, set the "
+        "chart to null and explain that the document does not contain them."
     ),
     "tool_web_search": (
-        "You are a web-search assistant. Summarise the most relevant findings "
-        "for the user's query."
+        "You are a web-search assistant. You do not have live internet access, "
+        "so answer from your own general knowledge and add a one-line note that "
+        "results may be out of date rather than declining. "
+        "If the user asks for a chart, graph, or plot (pie, bar, or line) of "
+        "world/general data (for example 'pie chart of India's GDP growth over "
+        "the last 5 years'), build it from your best real numeric values and "
+        "return it in the structured chart field only — never put chart JSON in "
+        "the response text. Add a short \"(general knowledge)\" marker in the "
+        "chart title and a one-line caveat that the figures are approximate and "
+        "may be out of date. If you genuinely have no real values, set the "
+        "chart to null and say so."
     ),
 }
 
