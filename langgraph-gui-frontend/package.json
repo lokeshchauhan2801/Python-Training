@@ -6,7 +6,7 @@
 	"description": "Vendored LangGraph-GUI SvelteFlow canvas, built to agents/static/agents/svelte-canvas/.",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "vite build && node scripts/postbuild.mjs",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''"
 	},
