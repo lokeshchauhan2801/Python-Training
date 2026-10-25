@@ -54,7 +54,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
 
     list_display = (
         "title",
-        "session_id",
+        "id",
         "user",
         "company",
         "model_name",
@@ -63,16 +63,16 @@ class ConversationSessionAdmin(BaseModelAdmin):
         "is_deleted",
     )
     list_filter = ("company", "model_name", "is_deleted", "created_at")
-    search_fields = ("title", "session_id", "user__email")
+    search_fields = ("title", "id", "user__email")
     date_hierarchy = "created_at"
     inlines = [SessionMessageInline]
 
-    # `id` is hidden (users reference a session by `session_id`). The empty
-    # free-text/JSON fields (content, context, media, metadata) are dropped from
-    # the form as noise; they are not user-edited for a session. The whole chat
-    # shows in the SessionMessageInline at the bottom.
+    # The ULID ``id`` is the single session identifier (shown read-only). The
+    # empty free-text/JSON fields (content, context, media, metadata) are
+    # dropped from the form as noise; they are not user-edited for a session.
+    # The whole chat shows in the SessionMessageInline at the bottom.
     fieldsets = (
-        (None, {"fields": ("session_id", "title", "user", "company")}),
+        (None, {"fields": ("id", "title", "user", "company")}),
         ("Content", {"fields": ("model_name", "summary")}),
         (
             "Audit",
@@ -89,7 +89,7 @@ class ConversationSessionAdmin(BaseModelAdmin):
         ),
     )
 
-    readonly_fields = ("session_id",)
+    readonly_fields = ("id",)
 
     def get_readonly_fields(self, request, obj=None):
         """A session's owner (``user``) and ``company`` are fixed once created.
@@ -205,7 +205,6 @@ class ConversationSessionAdmin(BaseModelAdmin):
         return JsonResponse(
             {
                 "id": str(session.id),
-                "session_id": session.session_id,
                 "title": session.title,
                 "model_name": session.model_name,
                 "summary": session.summary,
@@ -286,7 +285,6 @@ class ConversationSessionAdmin(BaseModelAdmin):
             payload.append(
                 {
                     "id": str(session.id),
-                    "session_id": session.session_id,
                     "title": session.title,
                     "hint": hint,
                 }
@@ -311,7 +309,6 @@ class ConversationSessionAdmin(BaseModelAdmin):
         return JsonResponse(
             {
                 "id": str(session.id),
-                "session_id": session.session_id,
                 "title": session.title,
                 "company_id": str(session.company_id),
                 "turns": turns,
@@ -346,7 +343,6 @@ class ConversationSessionAdmin(BaseModelAdmin):
         return JsonResponse(
             {
                 "id": str(session.id),
-                "session_id": session.session_id,
                 "title": session.title,
             },
             status=201,
@@ -403,7 +399,7 @@ class ConversationAdmin(BaseModelAdmin):
         "is_deleted",
     )
     list_filter = ("company", "model_name", "is_deleted", "created_at")
-    search_fields = ("question", "response", "session__session_id")
+    search_fields = ("question", "response", "session__id")
     date_hierarchy = "created_at"
 
     fieldsets = (
@@ -463,7 +459,7 @@ class MessageAdmin(BaseModelAdmin):
         ("is_deleted", BooleanRadioFilter),
         ("created_at", RangeDateTimeFilter),
     )
-    search_fields = ("content", "conversation__session_id")
+    search_fields = ("content", "conversation__id")
     inlines = [MessageVersionInline]
 
     fieldsets = (
@@ -518,7 +514,7 @@ class MessageVersionAdmin(BaseModelAdmin):
         "is_deleted",
     )
     list_filter = ("company", "is_deleted", "created_at")
-    search_fields = ("content", "message__conversation__session_id")
+    search_fields = ("content", "message__conversation__id")
 
     fieldsets = (
         (None, {"fields": ("id", "message", "company", "version")}),

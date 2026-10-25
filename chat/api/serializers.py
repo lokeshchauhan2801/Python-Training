@@ -53,7 +53,6 @@ class ConversationSessionSerializer(
         model = ConversationSession
         fields = [
             "id",
-            "session_id",
             "title",
             "content",
             "user",

@@ -120,7 +120,7 @@ class ChatInvariantTests(TestCase):
         self.assertIsNotNone(turn.pk)
 
     def test_session_id_is_26_char_ulid(self):
-        self.assertEqual(len(self.session.session_id), 26)
+        self.assertEqual(len(str(self.session.id)), 26)
 
 
 class ChatServiceTests(TestCase):
@@ -184,7 +184,7 @@ class AdminDetailJsonTests(TestCase):
         self.assertEqual(resp["Content-Type"], "application/json")
         data = resp.json()
         self.assertEqual(data["title"], "Admin session")
-        self.assertEqual(data["session_id"], self.session.session_id)
+        self.assertEqual(data["id"], str(self.session.id))
 
     def test_anonymous_is_blocked(self):
         resp = self.client.get(self._url())
@@ -380,7 +380,7 @@ class AdminChatUITests(TestCase):
         self.assertEqual(resp.status_code, 201)
 
         self.assertEqual(resp["Content-Type"], "application/json")
-        self.assertIn("session_id", resp.json())
+        self.assertIn("id", resp.json())
         created = ConversationSession.objects.filter(
             user=self.alice, company=self.alice_co, title="New chat"
         )
@@ -407,7 +407,7 @@ class AdminChatUITests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp["Content-Type"], "application/json")
         self.assertNotIn("Location", resp)
-        self.assertIn("session_id", resp.json())
+        self.assertIn("id", resp.json())
 
 
         no_co_user = User.objects.create_user(
@@ -1020,7 +1020,7 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp["Content-Type"], "application/json")
         self.assertNotIn("Location", resp)
-        self.assertIn("session_id", resp.json())
+        self.assertIn("id", resp.json())
         after = ConversationSession.objects.filter(company=self.alice_co).count()
         self.assertEqual(after - before, 1)
 

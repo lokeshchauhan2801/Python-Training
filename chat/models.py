@@ -4,7 +4,7 @@ from django.db import models
 
 from basics.managers import AllObjectsManager, SoftDeleteManager
 from basics.models import BaseModel, SoftDeleteModel
-from basics.ulid import ULIDField, new_ulid
+from basics.ulid import ULIDField
 
 
 class ConversationSession(BaseModel, SoftDeleteModel):
@@ -14,9 +14,6 @@ class ConversationSession(BaseModel, SoftDeleteModel):
         on_delete=models.CASCADE,
         related_name="%(app_label)s_%(class)s_set",
         db_index=True,
-    )
-    session_id = models.CharField(
-        max_length=26, unique=True, default=new_ulid, editable=False
     )
     title = models.CharField(max_length=200, default="New session")
     content = models.TextField(blank=True)
@@ -39,11 +36,10 @@ class ConversationSession(BaseModel, SoftDeleteModel):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["user", "created_at"]),
-            models.Index(fields=["session_id"]),
         ]
 
     def __str__(self) -> str:
-        return self.title or self.session_id
+        return self.title or str(self.id)
 
 
 class Conversation(BaseModel, SoftDeleteModel):
@@ -83,6 +79,8 @@ class Conversation(BaseModel, SoftDeleteModel):
 
     def __str__(self) -> str:
         return f"{self.session_id}: {self.question[:50]}"
+    # NOTE: here ``session_id`` is the FK id of Conversation.session (auto
+    # attribute), NOT the removed ConversationSession.session_id field.
 
     def _validate_company_matches_session(self):
         """A turn must belong to the same company as its session."""

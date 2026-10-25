@@ -74,17 +74,13 @@ def _valid_ulid(value):
 def _resolve_session(request, session_id):
     """Resolve a session within the request's scope or raise 404.
 
-    Accepts EITHER the primary key (``id``) OR the public ``session_id``
-    reference, so a caller can pass whichever ULID it has without a confusing
-    404 (both are 26-char ULIDs on ConversationSession).
+    The ``session_id`` argument is the session's primary key (``id``). (The
+    ULID ``id`` is the single session identifier; the old separate
+    ``session_id`` field was removed.)
     """
-    from django.db.models import Q
-
     if not _valid_ulid(session_id):
         raise Http404("Invalid session id.")
-    return get_object_or_404(
-        scoped_sessions(request), Q(pk=session_id) | Q(session_id=session_id)
-    )
+    return get_object_or_404(scoped_sessions(request), pk=session_id)
 
 
 def _message_payload(message):
@@ -235,7 +231,6 @@ def sessions_json(request):
     payload = [
         {
             "id": str(session.id),
-            "session_id": session.session_id,
             "title": session.title,
             "company_id": str(session.company_id),
             "created_at": session.created_at.isoformat(),
@@ -256,7 +251,6 @@ def messages_json(request, session_id):
     return JsonResponse(
         {
             "id": str(session.id),
-            "session_id": session.session_id,
             "title": session.title,
             "company_id": str(session.company_id),
             "messages": messages,
@@ -295,7 +289,6 @@ def new_session(request):
     return JsonResponse(
         {
             "id": str(session.id),
-            "session_id": session.session_id,
             "title": session.title,
             "company_id": str(session.company_id),
         },
