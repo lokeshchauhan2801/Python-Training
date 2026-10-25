@@ -15,6 +15,8 @@ urlpatterns = [
 
     path("agent-builder/", include("agents.urls")),
 
+    path("agent-builder-v2/", include("agents.urls_v2")),
+
 
     path("company/", include("company.urls")),
     path("admin/", admin.site.urls),

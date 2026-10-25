@@ -302,6 +302,11 @@ UNFOLD = {
                         "icon": "account_tree",
                         "link": reverse_lazy("agents:agent_builder"),
                     },
+                    {
+                        "title": "LangGraph (Svelte)",
+                        "icon": "polyline",
+                        "link": reverse_lazy("agents_v2:agent_builder_v2"),
+                    },
                 ],
             },
         ],
