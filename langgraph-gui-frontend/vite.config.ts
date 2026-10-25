@@ -41,7 +41,11 @@ export default defineConfig({
 		}
 	},
 	test: {
-		environment: 'jsdom',
+		// FEAT-002's logic modules (api/adapter/run) are pure, DOM-free TS
+		// (design §8), so they run under the lightweight node environment.
+		// Any future DOM-coupled component tests can opt into jsdom per-file via
+		// a `// @vitest-environment jsdom` docblock.
+		environment: 'node',
 		include: ['src/**/*.{test,spec}.{js,ts}']
 	}
 });
