@@ -24,41 +24,41 @@
 </script>
 
 {#if $openConfigWindow}
-	<div class="bg-opacity-50 fixed inset-0 z-50 flex items-center justify-center">
-		<div class="w-96 rounded-lg bg-white p-6 shadow-lg">
+	<div class="modal-overlay fixed inset-0 z-50 flex items-center justify-center">
+		<div class="modal-panel w-96 rounded-lg p-6 shadow-lg">
 			<h2 class="mb-4 text-xl font-semibold">Settings</h2>
 
 			<!-- Username (read-only) -->
 			<div class="mb-3">
-				<label for="username" class="mb-1 block text-sm">Username:</label>
+				<label for="username" class="modal-label mb-1 block text-sm">Username:</label>
 				<input
 					type="text"
 					id="username"
 					bind:value={$username}
 					readonly
-					class="w-full cursor-not-allowed rounded border border-gray-300 bg-gray-100 p-2 text-gray-600"
+					class="modal-input modal-input-readonly w-full cursor-not-allowed rounded p-2"
 				/>
 			</div>
 
 			<!-- LLM model -->
 			<div class="mb-3">
-				<label for="llmModel" class="mb-1 block text-sm">LLM model:</label>
+				<label for="llmModel" class="modal-label mb-1 block text-sm">LLM model:</label>
 				<input
 					type="text"
 					id="llmModel"
 					bind:value={llmModelValue}
-					class="w-full rounded border border-gray-300 p-2 focus:outline-none"
+					class="modal-input w-full rounded p-2 focus:outline-none"
 				/>
 			</div>
 
 			<!-- API Key -->
 			<div class="mb-4">
-				<label for="apiKey" class="mb-1 block text-sm">API key:</label>
+				<label for="apiKey" class="modal-label mb-1 block text-sm">API key:</label>
 				<input
 					type="text"
 					id="apiKey"
 					bind:value={apiKeyValue}
-					class="w-full rounded border border-gray-300 p-2 focus:outline-none"
+					class="modal-input w-full rounded p-2 focus:outline-none"
 				/>
 			</div>
 
@@ -80,3 +80,30 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	/* Dark modal, legible on the #0b1020 shell. Styling only — logic unchanged. */
+	.modal-overlay {
+		background: rgba(5, 8, 18, 0.6);
+	}
+	.modal-panel {
+		background: #0f1629;
+		color: #e6ebf5;
+		border: 1px solid #2a3657;
+	}
+	.modal-label {
+		color: #cdd6ec;
+	}
+	.modal-input {
+		background: #0b1020;
+		border: 1px solid #2a3657;
+		color: #e6ebf5;
+	}
+	.modal-input:focus {
+		border-color: #7c5cff;
+	}
+	.modal-input-readonly {
+		background: #121a30;
+		color: #8a97b5;
+	}
+</style>

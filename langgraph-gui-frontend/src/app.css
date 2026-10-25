@@ -1,1 +1,15 @@
 @import 'tailwindcss';
+
+/*
+  The canvas is iframed into the DARK django-unfold admin shell. Fill the iframe
+  with the product's dark background (#0b1020) and prevent the document itself
+  from scrolling — only the SvelteFlow viewport pans/zooms internally.
+*/
+html,
+body {
+	height: 100%;
+	margin: 0;
+	background: #0b1020;
+	color: #e6ebf5;
+	overflow: hidden;
+}

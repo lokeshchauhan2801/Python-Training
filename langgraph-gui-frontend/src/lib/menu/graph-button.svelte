@@ -126,12 +126,13 @@
 	}
 	.context-menu {
 		position: absolute;
-		background: white;
-		border: 1px solid #888;
+		background: #121a30;
+		border: 1px solid #2a3657;
+		color: #e6ebf5;
 		padding: 0.5em;
 		z-index: 10;
 		border-radius: 4px;
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 	}
 	.context-menu button {
 		display: block;
@@ -139,10 +140,11 @@
 		padding: 0.5em;
 		border: none;
 		background: none;
+		color: #e6ebf5;
 		text-align: left;
 		cursor: pointer;
 	}
 	.context-menu button:hover {
-		background: #f0f0f0;
+		background: #1b2746;
 	}
 </style>

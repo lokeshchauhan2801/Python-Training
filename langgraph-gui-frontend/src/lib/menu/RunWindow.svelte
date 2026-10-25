@@ -64,17 +64,17 @@
 </script>
 
 {#if $openRunWindow}
-	<div class="bg-opacity-50 fixed inset-0 z-11 flex items-center justify-center">
-		<div class="flex h-4/5 w-4/5 flex-col rounded bg-white p-5 shadow-md">
+	<div class="modal-overlay fixed inset-0 z-11 flex items-center justify-center">
+		<div class="modal-panel flex h-4/5 w-4/5 flex-col rounded p-5 shadow-md">
 			<h2 class="mb-1 text-lg font-bold">Run graph</h2>
-			<p class="mb-3 text-xs text-gray-500">
+			<p class="modal-muted mb-3 text-xs">
 				CONDITION branches are editorial in v1 — the runtime does not branch on them.
 			</p>
 
-			<label for="run-prompt" class="mb-1 block text-sm text-gray-700">Prompt</label>
+			<label for="run-prompt" class="modal-label mb-1 block text-sm">Prompt</label>
 			<textarea
 				id="run-prompt"
-				class="mb-3 h-24 w-full resize-none rounded border border-gray-300 p-2 text-sm text-black focus:outline-none"
+				class="modal-input mb-3 h-24 w-full resize-none rounded p-2 text-sm focus:outline-none"
 				placeholder="Message to run the graph against…"
 				bind:value={prompt}
 				disabled={isRunning}
@@ -101,22 +101,22 @@
 				</button>
 			</div>
 
-			<div class="mt-2 flex-1 overflow-y-auto rounded bg-gray-100 p-2 text-black">
+			<div class="modal-output mt-2 flex-1 overflow-y-auto rounded p-2">
 				{#if isRunning}
-					<p class="text-sm text-gray-500">Running…</p>
+					<p class="modal-muted text-sm">Running…</p>
 				{:else if outcome && !outcome.ok}
-					<p class="text-sm text-red-700">{outcome.error}</p>
+					<p class="text-sm text-red-400">{outcome.error}</p>
 				{:else if outcome && outcome.ok}
 					<pre class="whitespace-pre-wrap text-sm">{outcome.text}</pre>
 					{#if outcome.chartJson}
 						<div class="mt-3">
-							<div class="text-xs font-semibold text-gray-500">chart_data</div>
+							<div class="modal-muted text-xs font-semibold">chart_data</div>
 							<pre class="whitespace-pre-wrap text-xs">{outcome.chartJson}</pre>
 						</div>
 					{/if}
 					{#if outcome.citations && outcome.citations.length > 0}
 						<div class="mt-3">
-							<div class="text-xs font-semibold text-gray-500">Citations</div>
+							<div class="modal-muted text-xs font-semibold">Citations</div>
 							{#each outcome.citations as c (c)}
 								<p class="text-xs">{c}</p>
 							{/each}
@@ -127,3 +127,34 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	/* Dark modal, legible on the #0b1020 shell. Styling only — logic unchanged. */
+	.modal-overlay {
+		background: rgba(5, 8, 18, 0.6);
+	}
+	.modal-panel {
+		background: #0f1629;
+		color: #e6ebf5;
+		border: 1px solid #2a3657;
+	}
+	.modal-label {
+		color: #cdd6ec;
+	}
+	.modal-muted {
+		color: #8a97b5;
+	}
+	.modal-input {
+		background: #0b1020;
+		border: 1px solid #2a3657;
+		color: #e6ebf5;
+	}
+	.modal-input:focus {
+		border-color: #7c5cff;
+	}
+	.modal-output {
+		background: #0b1020;
+		color: #e6ebf5;
+		border: 1px solid #2a3657;
+	}
+</style>
