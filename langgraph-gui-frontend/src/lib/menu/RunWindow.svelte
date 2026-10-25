@@ -1,96 +1,58 @@
-<!-- src/routes/graph/menu/RunWindow.svelte -->
+<!-- src/lib/menu/RunWindow.svelte — vendored shell, REWIRED to lib/run.ts (FEAT-003). -->
+<!--
+  The single text area is the run PROMPT (design 4.2: the langgraph runtime is
+  message-driven, so a run requires an input message). "Run" calls lib/run.ts's
+  activate -> new session -> send sequence (design 4.3); the upstream FastAPI
+  /upload + /run calls are gone. Output is rendered per design 4.3 step 5:
+  assistant.content as text, chart_data in a <pre>, citations as plain text —
+  NO chart rendering in v1 (the charted view lives at /chat/). CONDITION branches
+  are editorial in v1 (the runtime ignores edge.condition).
+-->
 <script lang="ts">
-	import { openRunWindow, username, llmModel, apiKey } from './menu.store';
 	import { get } from 'svelte/store';
-	import { graphs } from '../flow/graphs.store.svelte';
-
-	import type { ExportedGraph } from '../flow/graphs-algo.svelte';
-	import { GraphsToJson } from '../flow/graphs-algo.svelte';
-
-	const SERVER_URL = import.meta.env.VITE_BACKEND_URL;
+	import { openRunWindow } from './menu.store';
+	import { api } from '../api';
+	import { newSession, send } from '../api';
+	import { run, type RunOutcome } from '../run';
+	import {
+		graphId,
+		loadedGraphCompany,
+		activeCompanyId,
+		saveIfDirty,
+		reload
+	} from '../canvas.store.svelte';
 
 	// local UI state
 	let isRunning = $state(false);
-	let responseMessage = $state('');
+	let prompt = $state('');
+	let outcome = $state<RunOutcome | null>(null);
 
 	async function handleRun() {
+		const id = get(graphId);
+		if (!id) {
+			outcome = { ok: false, error: 'No graph loaded.' };
+			return;
+		}
 		isRunning = true;
-		responseMessage = '';
-
+		outcome = null;
 		try {
-			// 1. serialize your graphs
-			const gm = get(graphs);
-			const workflowJsonArray: ExportedGraph[] = GraphsToJson(gm);
-			const jsonString = JSON.stringify(workflowJsonArray, null, 2);
-
-			// 2. wrap in a File object
-			const blob = new Blob([jsonString], { type: 'application/json' });
-			const workflowFile = new File([blob], 'workflow.json', {
-				type: 'application/json'
-			});
-
-			// 3. put it in FormData under "files"
-			const formData = new FormData();
-			formData.append('files', workflowFile);
-
-			// 4. POST to your existing upload endpoint
-			const user = get(username);
-			let res = await fetch(`${SERVER_URL}/upload/${encodeURIComponent(user)}`, {
-				method: 'POST',
-				body: formData
-			});
-
-			if (!res.ok) {
-				// parse server error payload if it sent JSON
-				let errMsg = res.statusText;
-				try {
-					const err = await res.json();
-					errMsg = err.error || errMsg;
-				} catch (err) {
-					responseMessage = err instanceof Error ? err.message : `${err}`;
-				}
-				throw new Error(`Upload failed: ${errMsg}`);
-			}
-
-			// 5. now call /run with JSON payload
-			const payload = {
-				username: user,
-				llm_model: get(llmModel),
-				api_key: get(apiKey)
-			};
-
-			res = await fetch(`${SERVER_URL}/run/${encodeURIComponent(user)}`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(payload)
-			});
-
-			if (!res.ok || !res.body) {
-				const text = await res.text();
-				throw new Error(`Run failed: ${text || res.statusText}`);
-			}
-
-			// 6. stream the response
-			const reader = res.body.getReader();
-			const decoder = new TextDecoder();
-			let done = false;
-			let buffer = '';
-
-			while (!done) {
-				const { value, done: doneReading } = await reader.read();
-				done = doneReading;
-				if (value) {
-					buffer += decoder.decode(value, { stream: true });
-					// update UI as chunks arrive
-					responseMessage = buffer;
-				}
-			}
-
-			// final decode (in case any remains)
-			buffer += decoder.decode();
-			responseMessage = buffer;
+			outcome = await run(
+				{
+					api,
+					newSession,
+					send,
+					saveIfDirty: () => saveIfDirty(api),
+					reload: () => reload(api)
+				},
+				{
+					graphId: id,
+					loadedGraphCompany: get(loadedGraphCompany),
+					activeCompanyId: get(activeCompanyId)
+				},
+				prompt
+			);
 		} catch (err) {
-			responseMessage = err instanceof Error ? err.message : `${err}`;
+			outcome = { ok: false, error: err instanceof Error ? err.message : `${err}` };
 		} finally {
 			isRunning = false;
 		}
@@ -104,7 +66,19 @@
 {#if $openRunWindow}
 	<div class="bg-opacity-50 fixed inset-0 z-11 flex items-center justify-center">
 		<div class="flex h-4/5 w-4/5 flex-col rounded bg-white p-5 shadow-md">
-			<h2 class="mb-4 text-lg font-bold">Run Script</h2>
+			<h2 class="mb-1 text-lg font-bold">Run graph</h2>
+			<p class="mb-3 text-xs text-gray-500">
+				CONDITION branches are editorial in v1 — the runtime does not branch on them.
+			</p>
+
+			<label for="run-prompt" class="mb-1 block text-sm text-gray-700">Prompt</label>
+			<textarea
+				id="run-prompt"
+				class="mb-3 h-24 w-full resize-none rounded border border-gray-300 p-2 text-sm text-black focus:outline-none"
+				placeholder="Message to run the graph against…"
+				bind:value={prompt}
+				disabled={isRunning}
+			></textarea>
 
 			<div class="mb-4 flex justify-end">
 				<button
@@ -127,8 +101,28 @@
 				</button>
 			</div>
 
-			<div class="mt-4 flex-1 overflow-y-auto rounded bg-gray-100 p-2">
-				<pre class="whitespace-pre-wrap text-black">{responseMessage}</pre>
+			<div class="mt-2 flex-1 overflow-y-auto rounded bg-gray-100 p-2 text-black">
+				{#if isRunning}
+					<p class="text-sm text-gray-500">Running…</p>
+				{:else if outcome && !outcome.ok}
+					<p class="text-sm text-red-700">{outcome.error}</p>
+				{:else if outcome && outcome.ok}
+					<pre class="whitespace-pre-wrap text-sm">{outcome.text}</pre>
+					{#if outcome.chartJson}
+						<div class="mt-3">
+							<div class="text-xs font-semibold text-gray-500">chart_data</div>
+							<pre class="whitespace-pre-wrap text-xs">{outcome.chartJson}</pre>
+						</div>
+					{/if}
+					{#if outcome.citations && outcome.citations.length > 0}
+						<div class="mt-3">
+							<div class="text-xs font-semibold text-gray-500">Citations</div>
+							{#each outcome.citations as c (c)}
+								<p class="text-xs">{c}</p>
+							{/each}
+						</div>
+					{/if}
+				{/if}
 			</div>
 		</div>
 	</div>
