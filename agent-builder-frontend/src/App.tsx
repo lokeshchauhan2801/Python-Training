@@ -194,10 +194,12 @@ export default function App() {
   );
 
   const removeNode = useCallback(
-    async (nodeId: string) => {
-      if (!confirm(`Delete node ${nodeId}? This cannot be undone.`)) return;
+    async (node: Node) => {
+      // Use node label instead of technical ID for friendlier message
+      const nodeName = node.label || node.slug || 'this node';
+      if (!confirm(`Delete "${nodeName}"? This cannot be undone.`)) return;
       try {
-        await api.deleteNode(nodeId);
+        await api.deleteNode(node.id);
         setSelectedNodeId(null);
         await refresh();
       } catch (e) {
@@ -328,7 +330,6 @@ export default function App() {
             onToggleTool={(toolId, checked) =>
               toggleNodeTool(selectedNode, toolId, checked)
             }
-            onDelete={() => removeNode(selectedNode.id)}
           />
         )}
 
@@ -378,10 +379,9 @@ interface NodeEditorProps {
   tools: Tool[];
   onRename: (label: string) => void;
   onToggleTool: (toolId: number, checked: boolean) => void;
-  onDelete: () => void;
 }
 
-function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }: NodeEditorProps) {
+function NodeEditor({ node, tools, onRename, onToggleTool }: NodeEditorProps) {
   const [label, setLabel] = useState(node.label || "");
   const nodeToolIds = new Set((node.tools || []).map(String));
   
@@ -418,14 +418,6 @@ function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }: NodeEdito
           ))}
         </>
       )}
-
-      <button
-        className="ab-btn"
-        style={{ marginTop: 12 }}
-        onClick={onDelete}
-      >
-        Delete node
-      </button>
     </div>
   );
 }
