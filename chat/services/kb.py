@@ -129,6 +129,22 @@ def add_session_attachments_to_kb(
             )
         )
 
+    # When multiple session files exist and no explicit IDs were passed, ask the user
+    # which file(s) to add instead of silently processing all of them.
+    if not ids and len(documents) > 1:
+        file_list = "\n".join(f"- {doc.title}" for doc in documents)
+        return {
+            "content": (
+                f"I found {len(documents)} files attached to this chat:\n\n"
+                f"{file_list}\n\n"
+                "Which file(s) would you like to add to the knowledge base? "
+                "You can name specific files or say 'all' to add them all."
+            ),
+            "queued": [],
+            "skipped": [],
+            "failed_ids": [],
+        }
+
     if not documents:
         return {
             "content": (
