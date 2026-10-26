@@ -17,7 +17,7 @@ export interface Graph {
 }
 
 export interface Node {
-  id: number;
+  id: string; // ULID string, not integer
   graph: number;
   slug: string;
   kind: "start" | "step" | "end" | "tool" | "condition";
@@ -29,7 +29,7 @@ export interface Node {
 }
 
 export interface Edge {
-  id: number;
+  id: string; // ULID string, not integer
   graph: number;
   source: string;
   target: string;
@@ -142,13 +142,13 @@ export const api = {
 
   // Node operations
   createNode: (data: Partial<Node> & { graph: number }) => request<Node>("POST", "/node/", data),
-  updateNode: (id: number, data: Partial<Node>) => request<Node>("PATCH", `/node/${id}/`, data),
-  deleteNode: (id: number) => request<void>("DELETE", `/node/${id}/`),
+  updateNode: (id: string | number, data: Partial<Node>) => request<Node>("PATCH", `/node/${id}/`, data),
+  deleteNode: (id: string | number) => request<void>("DELETE", `/node/${id}/`),
 
   // Edge operations
   createEdge: (data: { graph: number; source: string; target: string }) => 
     request<Edge>("POST", "/edge/", data),
-  deleteEdge: (id: number) => request<void>("DELETE", `/edge/${id}/`),
+  deleteEdge: (id: string | number) => request<void>("DELETE", `/edge/${id}/`),
 
   // Tool operations
   listTools: () => request<Tool[]>("GET", "/tool/"),

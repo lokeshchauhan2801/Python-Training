@@ -34,6 +34,19 @@ function toFlowNode(node: Node, toolsBySlugId: Record<number, string>): FlowNode
     .map((id) => toolsBySlugId[id])
     .filter(Boolean);
   
+  // Node content must be JSX wrapped in a div, cannot be a fragment
+  const nodeContent = (
+    <div>
+      <div className="ab-node-kind">{node.kind}</div>
+      <div className="ab-node-label">{node.label || node.slug}</div>
+      {node.kind === "step" && (
+        <div className="ab-node-tools">
+          {toolNames.length ? toolNames.join(", ") : "no tools"}
+        </div>
+      )}
+    </div>
+  );
+  
   return {
     id: String(node.id),
     position: {
@@ -42,19 +55,10 @@ function toFlowNode(node: Node, toolsBySlugId: Record<number, string>): FlowNode
     },
     data: {
       raw: node,
-      label: (
-        <div className={KIND_CLASS[node.kind] || "ab-node ab-node-step"}>
-          <div className="ab-node-kind">{node.kind}</div>
-          <div className="ab-node-label">{node.label || node.slug}</div>
-          {node.kind === "step" && (
-            <div className="ab-node-tools">
-              {toolNames.length ? toolNames.join(", ") : "no tools"}
-            </div>
-          )}
-        </div>
-      ),
+      label: nodeContent,
     },
     type: "default",
+    className: KIND_CLASS[node.kind] || "ab-node ab-node-step",
   };
 }
 
@@ -180,7 +184,8 @@ export default function App() {
   const persistPosition = useCallback(
     async (node: FlowNode) => {
       try {
-        await api.updateNode(parseInt(node.id), { position: node.position });
+        // Use node.id as-is (ULID string), not parseInt
+        await api.updateNode(node.id, { position: node.position });
       } catch (e) {
         showError(e);
       }
@@ -189,7 +194,7 @@ export default function App() {
   );
 
   const removeNode = useCallback(
-    async (id: number) => {
+    async (id: string) => {
       try {
         await api.deleteNode(id);
         setSelectedNodeId(null);
@@ -282,7 +287,7 @@ export default function App() {
           onNodeClick={(_e, node) => setSelectedNodeId(node.id)}
           onPaneClick={() => setSelectedNodeId(null)}
           onEdgesDelete={(deleted) =>
-            deleted.forEach((e) => api.deleteEdge(parseInt(e.id)).catch(showError))
+            deleted.forEach((e) => api.deleteEdge(e.id).catch(showError))
           }
           fitView
         >
