@@ -225,12 +225,25 @@
         });
       })
       .then(function (data) {
-        if (data && data.status_display) {
-          updateRowStatus(docId, data.status_display);
+        // Check if processing was skipped (already-processed document)
+        var isSkipped = data && data.message && data.message.indexOf("Already processed") === 0;
+        
+        if (isSkipped) {
+          // Revert optimistic updates for already-processed documents
+          if (currentBackend) {
+            updateProcessingBackend(docId, currentBackend);
+          }
+          enableScheduleButton(docId);
+        } else {
+          // Normal processing: confirm optimistic updates
+          if (data && data.status_display) {
+            updateRowStatus(docId, data.status_display);
+          }
+          if (data && data.backend) {
+            updateProcessingBackend(docId, data.backend);
+          }
         }
-        if (data && data.backend) {
-          updateProcessingBackend(docId, data.backend);
-        }
+        
         showNotice(
           (data && data.message) || "Task queued for processing.",
           false
@@ -304,13 +317,13 @@
   (function initializeButtonStates() {
     var rows = document.querySelectorAll("table tbody tr");
     for (var i = 0; i < rows.length; i++) {
-      var statusBadge = rows[i].querySelector(".field-status_badge span");
+      var statusBadge = rows[i].querySelector(".field-status_badge span[data-status]");
       if (!statusBadge) {
         continue;
       }
-      var statusText = statusBadge.textContent.trim();
-      // Disable button if status is "Queued" or "Processing"
-      if (statusText === "Queued" || statusText === "Processing") {
+      var status = statusBadge.getAttribute("data-status");
+      // Disable button if status is "queued" or "processing"
+      if (status === "queued" || status === "processing") {
         var toggle = rows[i].querySelector(".schedule-toggle");
         if (toggle) {
           var docId = toggle.getAttribute("data-doc-id");

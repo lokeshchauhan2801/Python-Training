@@ -251,8 +251,9 @@ class DocumentAdmin(BaseModelAdmin):
     def status_badge(self, obj):
         color = _STATUS_COLORS.get(obj.status, "#6b7280")
         return format_html(
-            '<span style="color:{}; font-weight:600;">{}</span>',
+            '<span style="color:{}; font-weight:600;" data-status="{}">{}</span>',
             color,
+            obj.status,
             obj.get_status_display(),
         )
 

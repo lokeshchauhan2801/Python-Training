@@ -17,7 +17,7 @@
   var lastStatus = {};
   var firstPass = true;
   var pollRetries = 0;
-  var MAX_POLL_RETRIES = 5;
+  var MAX_POLL_RETRIES = 10;
 
   function toastContainer() {
     var existing = document.getElementById("documents-toast-container");
