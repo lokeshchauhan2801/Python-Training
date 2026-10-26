@@ -59,7 +59,21 @@ def _is_already_embedded(document: Document) -> bool:
 
 
 def _find_existing_kb_document(company, title: str) -> Document | None:
-    """Find an already-processed document in the KB with the same title."""
+    """Find an already-processed document in the KB with the same title.
+    
+    Matches are case-sensitive and title-exact. If a document with the same
+    filename but different content already exists in the KB, this check will
+    skip reprocessing the new upload. This is an acceptable limitation:
+    true content deduplication would require file hashing, which is beyond
+    the scope of this fix.
+    
+    Args:
+        company: The Company to search within (multi-tenant scoping)
+        title: The document title (filename) to match
+        
+    Returns:
+        The first matching Document if found, None otherwise
+    """
     return Document.objects.filter(
         company=company,
         source=Document.SOURCE_LIBRARY,
