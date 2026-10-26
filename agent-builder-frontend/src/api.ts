@@ -23,7 +23,7 @@ export interface Node {
   kind: "start" | "step" | "end" | "tool" | "condition";
   label: string;
   position: Position;
-  tools: number[];
+  tools: string[]; // Array of tool ULID strings
   created_at: string;
   updated_at: string;
 }
@@ -38,7 +38,7 @@ export interface Edge {
 }
 
 export interface Tool {
-  id: number;
+  id: string; // ULID string, not integer
   slug: string;
   name: string;
   is_enabled: boolean;
@@ -153,7 +153,7 @@ export const api = {
   // Tool operations
   listTools: () => request<Tool[]>("GET", "/tool/"),
   createTool: (data: Partial<Tool>) => request<Tool>("POST", "/tool/", data),
-  updateTool: (id: number, data: Partial<Tool>) => request<Tool>("PATCH", `/tool/${id}/`, data),
+  updateTool: (id: string | number, data: Partial<Tool>) => request<Tool>("PATCH", `/tool/${id}/`, data),
 
   // Chat operations (form-urlencoded, not JSON)
   createChatSession: (companyId: number) => 

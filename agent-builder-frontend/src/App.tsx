@@ -28,16 +28,13 @@ interface NodeData {
   label: React.ReactNode;
 }
 
-function toFlowNode(node: Node, toolsBySlugId: Record<number, string>): FlowNode<NodeData> {
+function toFlowNode(node: Node, toolsBySlugId: Record<string, string>): FlowNode<NodeData> {
   const pos = node.position && typeof node.position === "object" ? node.position : {};
   
-  // Get tool names for display on the node
+  // Get tool names for display on the node - tools are ULID strings
   const toolNames = (node.tools || [])
-    .map((id) => {
-      // Ensure id is a number and lookup by id
-      const numId = typeof id === 'number' ? id : parseInt(String(id), 10);
-      return toolsBySlugId[numId];
-    })
+    .map((id) => String(id)) // Ensure it's a string
+    .map((id) => toolsBySlugId[id])
     .filter(Boolean);
   
   // Node content must be JSX wrapped in a div, cannot be a fragment
@@ -119,10 +116,10 @@ export default function App() {
       setGraph(payload.graph);
       setTools(payload.tools || []);
       
-      // Build tool lookup by ID (not slug)
-      const byId: Record<number, string> = {};
+      // Build tool lookup by string ID (ULIDs)
+      const byId: Record<string, string> = {};
       (payload.tools || []).forEach((t) => {
-        byId[t.id] = t.name || t.slug;
+        byId[String(t.id)] = t.name || t.slug;
       });
       
       // Deduplicate nodes by ULID id
@@ -239,19 +236,22 @@ export default function App() {
   );
 
   const toggleNodeTool = useCallback(
-    async (node: Node, toolId: number, checked: boolean) => {
-      // Validate toolId
-      if (!Number.isFinite(toolId) || toolId <= 0) {
+    async (node: Node, toolId: string, checked: boolean) => {
+      // toolId is a ULID string
+      if (!toolId || typeof toolId !== 'string') {
         showError(`Invalid tool ID: ${toolId}`);
         return;
       }
       
-      const current = new Set((node.tools || []).filter(Number.isFinite));
-      if (checked) current.add(toolId);
-      else current.delete(toolId);
+      const current = new Set((node.tools || []).map(String));
+      if (checked) {
+        current.add(toolId);
+      } else {
+        current.delete(toolId);
+      }
       
-      // Filter and validate before sending
-      const validTools = Array.from(current).filter(id => Number.isFinite(id) && id > 0);
+      // Convert to array of strings
+      const validTools = Array.from(current).filter(id => id && typeof id === 'string');
       
       try {
         await api.updateNode(node.id, { tools: validTools });
@@ -415,10 +415,7 @@ export default function App() {
                 }
               }}
             />
-            <span>
-              {t.name || t.slug}
-              {!t.is_enabled && " (disabled)"}
-            </span>
+            <span>{t.name || t.slug}</span>
           </div>
         ))}
       </aside>
@@ -439,7 +436,7 @@ interface NodeEditorProps {
   node: Node;
   tools: Tool[];
   onRename: (label: string) => void;
-  onToggleTool: (toolId: number, checked: boolean) => void;
+  onToggleTool: (toolId: string, checked: boolean) => void;
   onDelete: () => void;
 }
 
