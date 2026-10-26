@@ -194,9 +194,10 @@ export default function App() {
   );
 
   const removeNode = useCallback(
-    async (id: string) => {
+    async (nodeId: string) => {
+      if (!confirm(`Delete node ${nodeId}? This cannot be undone.`)) return;
       try {
-        await api.deleteNode(id);
+        await api.deleteNode(nodeId);
         setSelectedNodeId(null);
         await refresh();
       } catch (e) {
