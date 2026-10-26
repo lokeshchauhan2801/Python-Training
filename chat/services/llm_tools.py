@@ -287,9 +287,15 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     # Deterministic CSV chart: an attached CSV + a chart request is charted from
     # the file's real values by the local builder, not the LLM. This is the
     # reliable path for "create a pie chart" on a CSV like county_uk.csv.
-    if attachment_ids and service._is_chart_request(ctx.message_text):
+    if service._is_chart_request(ctx.message_text):
+        # With a file attached this turn, ground on exactly that file
+        # (current-turn-wins). Without one, pass no attachment_ids so the
+        # session-scoped CSV fallback in _chat_csv_documents reaches an earlier
+        # session CSV — the follow-up "create a bar chart" case.
         local = service._build_csv_distribution_chart(
-            ctx.conversation, ctx.message_text, attachment_ids=attachment_ids
+            ctx.conversation,
+            ctx.message_text,
+            attachment_ids=attachment_ids or None,
         )
         if local is not None:
             response_text, chart = local
