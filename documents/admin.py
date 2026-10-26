@@ -345,7 +345,7 @@ class DocumentAdmin(BaseModelAdmin):
             reverse("admin:documents_document_chunks", args=[document.pk])
         )
 
-    @admin.display(description="Temporal")
+    @admin.display(description="Info")
     def info_column(self, obj):
 
 
@@ -583,9 +583,11 @@ class DocumentAdmin(BaseModelAdmin):
         from chat.services.kb import temporal_ui_url
 
         workflow_id = f"doc-{document.pk}"
-        if document.processing_backend == "temporal":
+        backend = document.processing_backend or ""
+        if backend == "temporal":
             info = TemporalProcessingBackend().get_status(workflow_id)
             payload = {
+                "processing_backend": backend,
                 "workflow_id": workflow_id,
                 "temporal_url": temporal_ui_url(workflow_id),
                 "status": info.get("status", "unknown"),
@@ -600,17 +602,15 @@ class DocumentAdmin(BaseModelAdmin):
         else:
 
             payload = {
+                "processing_backend": backend,
                 "workflow_id": workflow_id,
-                "status": "n/a",
+                "status": document.status,
                 "run_id": None,
                 "started": None,
                 "closed": None,
                 "result": None,
                 "degraded": False,
-                "note": (
-                    "This document is processed by the "
-                    f"'{document.processing_backend}' backend, not Temporal."
-                ),
+                "note": "",
                 "stages": stages,
             }
         return JsonResponse(payload)

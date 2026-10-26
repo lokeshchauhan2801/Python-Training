@@ -13,8 +13,16 @@
 
   var POLL_MS = 2000;
 
-
-  var POLLING_STATUSES = { RUNNING: true };
+  // "RUNNING" is Temporal's own (uppercase) status; "processing"/"queued" are
+  // this project's Document.STATUS_* values used by celery/kafka/the inline
+  // "django" (Process now) path. Keep polling for EITHER convention so the
+  // modal doesn't stop refreshing after one fetch for a non-Temporal document
+  // that is still actually processing.
+  var POLLING_STATUSES = {
+    RUNNING: true,
+    processing: true,
+    queued: true,
+  };
 
   var STATUS_COLORS = {
     completed: "#16a34a",
@@ -23,12 +31,25 @@
     failed: "#dc2626",
   };
 
+  var BACKEND_LABELS = {
+    temporal: "Temporal",
+    celery: "Celery",
+    "local-background": "Celery (inline)",
+    django: "Django (process now)",
+    kafka: "Kafka",
+  };
+
+  function backendLabel(backend) {
+    return BACKEND_LABELS[backend] || backend || "processing";
+  }
+
 
   var overlayEl = null;
   var pollTimer = null;
   var currentDocId = null;
   var triggerEl = null;
   var bodyEl = null;
+  var headingEl = null;
 
   function infoUrl(docId) {
     return urlTemplate.replace("__PK__", encodeURIComponent(docId));
@@ -48,6 +69,7 @@
     }
     overlayEl = null;
     bodyEl = null;
+    headingEl = null;
     currentDocId = null;
     document.removeEventListener("keydown", onKeydown);
     if (triggerEl && typeof triggerEl.focus === "function") {
@@ -87,7 +109,7 @@
     var card = document.createElement("div");
     card.setAttribute("role", "dialog");
     card.setAttribute("aria-modal", "true");
-    card.setAttribute("aria-label", "Temporal workflow info");
+    card.setAttribute("aria-label", "Processing info");
     card.style.position = "relative";
     card.style.background = "#fff";
     card.style.color = "#111827";
@@ -99,12 +121,13 @@
     card.style.boxSizing = "border-box";
 
     var heading = document.createElement("div");
-    heading.textContent = "Temporal workflow info";
+    heading.textContent = "Processing info";
     heading.style.fontSize = "16px";
     heading.style.fontWeight = "700";
     heading.style.marginBottom = "12px";
     heading.style.paddingRight = "24px";
     card.appendChild(heading);
+    headingEl = heading;
 
     var close = document.createElement("button");
     close.type = "button";
@@ -226,13 +249,17 @@
     }
     bodyEl.textContent = "";
 
-    if (data.note) {
-      var note = document.createElement("div");
-      note.textContent = data.note;
-      note.style.marginBottom = "10px";
-      note.style.color = "#6b7280";
-      bodyEl.appendChild(note);
+    var backend = data.processing_backend || "";
+    var isTemporal = backend === "temporal";
+
+    // The heading (and the data shown below) reflects the backend that is
+    // ACTUALLY processing this document — never hardcoded to "Temporal".
+    // Before this fix every document showed "Temporal workflow info" even
+    // when it ran on celery/kafka/the inline "django" (Process now) path.
+    if (headingEl) {
+      headingEl.textContent = backendLabel(backend) + " processing info";
     }
+
     if (data.degraded) {
       var degraded = document.createElement("div");
       degraded.textContent =
@@ -242,12 +269,19 @@
       bodyEl.appendChild(degraded);
     }
 
-    bodyEl.appendChild(labeledRow("Workflow id:", data.workflow_id));
+    bodyEl.appendChild(labeledRow("Backend:", backendLabel(backend)));
     bodyEl.appendChild(labeledRow("Status:", data.status));
-    bodyEl.appendChild(labeledRow("Run ID:", data.run_id));
-    bodyEl.appendChild(labeledRow("Started:", data.started));
-    bodyEl.appendChild(labeledRow("Closed:", data.closed));
-    bodyEl.appendChild(labeledRow("Result:", data.result));
+
+    // Temporal-specific identifiers only make sense for a Temporal-backed
+    // document; celery/kafka/django have no workflow/run id, so omit these
+    // rows entirely rather than showing meaningless "—" placeholders.
+    if (isTemporal) {
+      bodyEl.appendChild(labeledRow("Workflow id:", data.workflow_id));
+      bodyEl.appendChild(labeledRow("Run ID:", data.run_id));
+      bodyEl.appendChild(labeledRow("Started:", data.started));
+      bodyEl.appendChild(labeledRow("Closed:", data.closed));
+      bodyEl.appendChild(labeledRow("Result:", data.result));
+    }
     bodyEl.appendChild(buildStagesTable(data.stages));
   }
 
