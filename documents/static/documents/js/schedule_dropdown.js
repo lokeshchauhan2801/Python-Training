@@ -15,6 +15,18 @@
     return urlTemplate.replace("__PK__", encodeURIComponent(docId));
   }
 
+  var BACKEND_LABELS = {
+    temporal: "Temporal",
+    celery: "Celery",
+    "local-background": "Celery (inline)",
+    django: "Django (process now)",
+    kafka: "Kafka",
+  };
+
+  function backendLabel(backend) {
+    return BACKEND_LABELS[backend] || backend || "processing";
+  }
+
 
   function getCookie(name) {
     var cookies = (document.cookie || "").split(";");
@@ -90,6 +102,24 @@
     }
   }
 
+  function updateProcessingBackend(docId, backend) {
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    if (!toggle) {
+      return;
+    }
+    var row = toggle.closest("tr");
+    if (!row) {
+      return;
+    }
+    var cell = row.querySelector(".field-processing_backend");
+    if (!cell) {
+      return;
+    }
+    cell.textContent = backendLabel(backend);
+  }
+
   function showNotice(message, isError) {
     var existing = document.getElementById("documents-dispatch-notice");
     if (existing) {
@@ -148,6 +178,9 @@
       .then(function (data) {
         if (data && data.status_display) {
           updateRowStatus(docId, data.status_display);
+        }
+        if (data && data.backend) {
+          updateProcessingBackend(docId, data.backend);
         }
         showNotice(
           (data && data.message) || "Task queued for processing.",

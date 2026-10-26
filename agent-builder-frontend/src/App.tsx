@@ -166,12 +166,13 @@ export default function App() {
       setIsCreatingNode(true);
       try {
         const slug = `${kind}-${Date.now().toString(36)}`;
+        // Position new nodes in the CENTER of viewport
         await api.createNode({
           graph: graphId,
           slug,
           kind,
           label: kind === "step" ? "New step" : kind,
-          position: { x: 120 + Math.random() * 320, y: 80 + Math.random() * 240 },
+          position: { x: 400, y: 250 }, // Center of typical viewport
         });
         await refresh();
         showSuccess(`${kind} node created`);
@@ -216,18 +217,17 @@ export default function App() {
 
   const removeNode = useCallback(
     async (node: Node) => {
-      // Use node label instead of technical ID for friendlier message
-      const nodeName = node.label || node.slug || 'this node';
-      if (!confirm(`Delete "${nodeName}"? This cannot be undone.`)) return;
+      // No confirmation - directly delete
       try {
         await api.deleteNode(node.id);
         setSelectedNodeId(null);
         await refresh();
+        showSuccess("Node deleted");
       } catch (e) {
         showError(e);
       }
     },
-    [refresh, showError]
+    [refresh, showError, showSuccess]
   );
 
   const toggleNodeTool = useCallback(
@@ -325,6 +325,7 @@ export default function App() {
           onEdgesDelete={(deleted) =>
             deleted.forEach((e) => api.deleteEdge(e.id).catch(showError))
           }
+          proOptions={{ hideAttribution: true }}
           fitView
         >
           <Background />

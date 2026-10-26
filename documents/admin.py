@@ -675,6 +675,7 @@ class DocumentAdmin(BaseModelAdmin):
                         "status_display": dict(Document.STATUS_CHOICES).get(
                             document.status, document.status
                         ),
+                        "backend": "django",
                         "document_id": str(document.pk),
                         "title": document.title,
                         "message": f"Processing failed: {exc}",
