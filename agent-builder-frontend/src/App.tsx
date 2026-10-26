@@ -85,6 +85,8 @@ export default function App() {
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [showRunModal, setShowRunModal] = useState<boolean>(false);
+  const [isCreatingNode, setIsCreatingNode] = useState<boolean>(false);
+  const [successMessage, setSuccessMessage] = useState<string>("");
 
   const toolsBySlugId = useMemo(() => {
     const m: Record<number, string> = {};
@@ -95,7 +97,14 @@ export default function App() {
   }, [tools]);
 
   const showError = useCallback((e: any) => {
-    setError(e && e.message ? e.message : String(e));
+    const msg = e && e.message ? e.message : String(e);
+    setError(msg);
+    setTimeout(() => setError(""), 5000);
+  }, []);
+
+  const showSuccess = useCallback((msg: string) => {
+    setSuccessMessage(msg);
+    setTimeout(() => setSuccessMessage(""), 3000);
   }, []);
 
   const loadInto = useCallback(
@@ -107,7 +116,15 @@ export default function App() {
       (payload.tools || []).forEach((t) => {
         byId[t.id] = t.name || t.slug;
       });
-      setNodes((payload.nodes || []).map((n) => toFlowNode(n, byId)));
+      
+      // Deduplicate nodes by ULID id
+      const nodeMap = new Map<string, Node>();
+      (payload.nodes || []).forEach((n) => {
+        nodeMap.set(n.id, n);
+      });
+      const uniqueNodes = Array.from(nodeMap.values());
+      
+      setNodes(uniqueNodes.map((n) => toFlowNode(n, byId)));
       setEdges((payload.edges || []).map(toFlowEdge));
     },
     [setNodes, setEdges]
@@ -145,7 +162,8 @@ export default function App() {
 
   const addNode = useCallback(
     async (kind: Node["kind"]) => {
-      if (!graphId) return;
+      if (!graphId || isCreatingNode) return;
+      setIsCreatingNode(true);
       try {
         const slug = `${kind}-${Date.now().toString(36)}`;
         await api.createNode({
@@ -156,11 +174,14 @@ export default function App() {
           position: { x: 120 + Math.random() * 320, y: 80 + Math.random() * 240 },
         });
         await refresh();
+        showSuccess(`${kind} node created`);
       } catch (e) {
         showError(e);
+      } finally {
+        setIsCreatingNode(false);
       }
     },
-    [graphId, refresh, showError]
+    [graphId, isCreatingNode, refresh, showError, showSuccess]
   );
 
   const onConnect = useCallback(
@@ -211,17 +232,29 @@ export default function App() {
 
   const toggleNodeTool = useCallback(
     async (node: Node, toolId: number, checked: boolean) => {
-      const current = new Set((node.tools || []).map(String));
-      if (checked) current.add(String(toolId));
-      else current.delete(String(toolId));
+      // Validate toolId
+      if (!Number.isFinite(toolId) || toolId <= 0) {
+        showError(`Invalid tool ID: ${toolId}`);
+        return;
+      }
+      
+      const current = new Set((node.tools || []).filter(Number.isFinite));
+      if (checked) current.add(toolId);
+      else current.delete(toolId);
+      
+      // Filter and validate before sending
+      const validTools = Array.from(current).filter(id => Number.isFinite(id) && id > 0);
+      
       try {
-        await api.updateNode(node.id, { tools: Array.from(current).map(Number) });
+        await api.updateNode(node.id, { tools: validTools });
         await refresh();
+        showSuccess("Tools updated");
       } catch (e) {
         showError(e);
+        await refresh(); // Re-sync state on failure
       }
     },
-    [refresh, showError]
+    [refresh, showError, showSuccess]
   );
 
   const renameNode = useCallback(
@@ -250,19 +283,19 @@ export default function App() {
     <div className="ab-shell">
       <div className="ab-canvas">
         <div className="ab-toolbar">
-          <button className="ab-btn" onClick={() => addNode("start")}>
+          <button className="ab-btn" onClick={() => addNode("start")} disabled={isCreatingNode}>
             + Start
           </button>
-          <button className="ab-btn" onClick={() => addNode("step")}>
+          <button className="ab-btn" onClick={() => addNode("step")} disabled={isCreatingNode}>
             + Step
           </button>
-          <button className="ab-btn" onClick={() => addNode("end")}>
+          <button className="ab-btn" onClick={() => addNode("end")} disabled={isCreatingNode}>
             + End
           </button>
-          <button className="ab-btn" onClick={() => addNode("tool")}>
+          <button className="ab-btn" onClick={() => addNode("tool")} disabled={isCreatingNode}>
             + Tool
           </button>
-          <button className="ab-btn" onClick={() => addNode("condition")}>
+          <button className="ab-btn" onClick={() => addNode("condition")} disabled={isCreatingNode}>
             + Condition
           </button>
           <button
@@ -301,12 +334,22 @@ export default function App() {
       </div>
 
       <aside className="ab-sidebar">
-        {error && (
-          <div className="ab-banner ab-banner-error" role="alert">
-            {error}
+        {successMessage && (
+          <div className="ab-banner ab-banner-success" role="status">
+            ✓ {successMessage}
           </div>
         )}
-        {loading && <div className="ab-empty">Loading…</div>}
+        {error && (
+          <div className="ab-banner ab-banner-error" role="alert">
+            ⚠ {error}
+          </div>
+        )}
+        {loading && (
+          <div className="ab-empty" style={{ textAlign: "center", padding: "32px 0" }}>
+            <div className="ab-spinner" role="status" aria-label="Loading graph"></div>
+            <div style={{ marginTop: "12px" }}>Loading graph…</div>
+          </div>
+        )}
 
         {graph && (
           <div className="ab-banner ab-banner-info">
@@ -316,10 +359,16 @@ export default function App() {
             </div>
           </div>
         )}
+        
+        <div className="ab-empty" style={{ fontSize: "11px", marginTop: "4px" }}>
+          💡 Tip: Select a node and press Delete to remove it
+        </div>
 
         <div className="ab-section-title">Selected node</div>
         {!selectedNode && (
-          <div className="ab-empty">Click a node to edit it.</div>
+          <div className="ab-empty">
+            Click a node on the canvas to edit its properties.
+          </div>
         )}
         {selectedNode && (
           <NodeEditor
@@ -330,18 +379,21 @@ export default function App() {
             onToggleTool={(toolId, checked) =>
               toggleNodeTool(selectedNode, toolId, checked)
             }
+            onDelete={() => removeNode(selectedNode)}
           />
         )}
 
-        <div className="ab-section-title">Tools</div>
+        <div className="ab-section-title" title="Global tool enable/disable affects all nodes">All Tools</div>
+        <div className="ab-empty" style={{ marginBottom: "8px", fontSize: "12px" }}>
+          Enable or disable tools globally for all nodes.
+        </div>
         {tools.length === 0 && (
           <div className="ab-empty">
-            No tools yet. Run <code>manage.py seed_agents</code> to create the
-            built-in tools.
+            No tools available. Run <code>python manage.py seed_agents</code> on the backend to create built-in tools.
           </div>
         )}
         {tools.map((t) => (
-          <div className="ab-tool-row" key={t.id}>
+          <div className="ab-tool-row" key={`global-tool-${t.id}`}>
             <input
               type="checkbox"
               checked={Boolean(t.is_enabled)}
@@ -379,9 +431,10 @@ interface NodeEditorProps {
   tools: Tool[];
   onRename: (label: string) => void;
   onToggleTool: (toolId: number, checked: boolean) => void;
+  onDelete: () => void;
 }
 
-function NodeEditor({ node, tools, onRename, onToggleTool }: NodeEditorProps) {
+function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }: NodeEditorProps) {
   const [label, setLabel] = useState(node.label || "");
   const nodeToolIds = new Set((node.tools || []).map(String));
   
@@ -399,15 +452,27 @@ function NodeEditor({ node, tools, onRename, onToggleTool }: NodeEditorProps) {
       <div className="ab-node-kind">
         {node.kind} · {node.slug}
       </div>
+      
+      <button 
+        className="ab-btn" 
+        onClick={onDelete}
+        style={{ width: "100%", marginTop: "8px", color: "#dc2626" }}
+        title="Delete this node (or press Delete key)"
+      >
+        Delete Node
+      </button>
 
       {node.kind === "step" && (
         <>
-          <div className="ab-section-title">Node tools</div>
+          <div className="ab-section-title" title="Assign tools to this specific step node">Node Tools</div>
+          <div className="ab-empty" style={{ marginBottom: "8px", fontSize: "12px" }}>
+            Select which tools this step can use.
+          </div>
           {tools.length === 0 && (
             <div className="ab-empty">No tools available.</div>
           )}
           {tools.map((t) => (
-            <div className="ab-tool-row" key={t.id}>
+            <div className="ab-tool-row" key={`node-tool-${t.id}`}>
               <input
                 type="checkbox"
                 checked={nodeToolIds.has(String(t.id))}

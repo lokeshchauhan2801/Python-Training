@@ -158,6 +158,20 @@ body {
   border: 1px solid #fecaca;
 }
 
+.ab-banner-success {
+  background: #f0fdf4;
+  color: #15803d;
+  border: 1px solid #86efac;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ab-banner-success {
+    background: color-mix(in srgb, #16a34a 20%, transparent);
+    color: #86efac;
+    border-color: #15803d;
+  }
+}
+
 .ab-banner-info {
   background: color-mix(in srgb, var(--ab-accent) 12%, transparent);
   color: var(--ab-text);
@@ -225,3 +239,18 @@ body {
   border-width: 3px;
   box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4);
 }
+
+.ab-spinner {
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--ab-border);
+  border-top-color: var(--ab-accent);
+  border-radius: 50%;
+  animation: ab-spin 0.8s linear infinite;
+}
+
+@keyframes ab-spin {
+  to { transform: rotate(360deg); }
+}
+
