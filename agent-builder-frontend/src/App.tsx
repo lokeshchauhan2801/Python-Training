@@ -238,12 +238,6 @@ export default function App() {
     }
   }, [graphId, showError]);
 
-  const saveGraph = useCallback(async () => {
-    // Placeholder for save functionality - currently all changes auto-save
-    // This can be extended to batch changes before persisting
-    await refresh();
-  }, [refresh]);
-
   return (
     <div className="ab-shell">
       <div className="ab-canvas">
@@ -257,8 +251,11 @@ export default function App() {
           <button className="ab-btn" onClick={() => addNode("end")}>
             + End
           </button>
-          <button className="ab-btn" onClick={saveGraph}>
-            Save
+          <button className="ab-btn" onClick={() => addNode("tool")}>
+            + Tool
+          </button>
+          <button className="ab-btn" onClick={() => addNode("condition")}>
+            + Condition
           </button>
           <button
             className="ab-btn ab-btn-primary"
