@@ -297,16 +297,10 @@ UNFOLD = {
                 "title": "Agentic",
                 "collapsible": True,
                 "items": [
-                    # Old React LangGraph canvas (agents:agent_builder) is hidden
-                    # from the sidebar for now. Its route/view/files remain intact
-                    # (route /agent-builder/ still works) — re-add this dict to
-                    # restore the menu item:
-                    #   {"title": "LangGraph (React)", "icon": "account_tree",
-                    #    "link": reverse_lazy("agents:agent_builder")},
                     {
                         "title": "LangGraph",
-                        "icon": "polyline",
-                        "link": reverse_lazy("agents_v2:agent_builder_v2"),
+                        "icon": "account_tree",
+                        "link": reverse_lazy("agents:agent_builder"),
                     },
                 ],
             },

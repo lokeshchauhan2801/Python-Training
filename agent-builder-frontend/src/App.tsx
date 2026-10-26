@@ -6,21 +6,34 @@ import ReactFlow, {
   addEdge,
   useEdgesState,
   useNodesState,
+  Node as FlowNode,
+  Edge as FlowEdge,
+  Connection,
+  NodeChange,
+  EdgeChange,
 } from "reactflow";
-import { api } from "./api.js";
+import { api, Graph, Node, Edge, Tool } from "./api";
+import RunModal from "./RunModal";
 
-const KIND_CLASS = {
+const KIND_CLASS: Record<string, string> = {
   start: "ab-node ab-node-start",
   step: "ab-node ab-node-step",
   end: "ab-node ab-node-end",
+  tool: "ab-node ab-node-step",
+  condition: "ab-node ab-node-step",
 };
 
+interface NodeData {
+  raw: Node;
+  label: React.ReactNode;
+}
 
-function toFlowNode(node, toolsBySlugId) {
+function toFlowNode(node: Node, toolsBySlugId: Record<number, string>): FlowNode<NodeData> {
   const pos = node.position && typeof node.position === "object" ? node.position : {};
   const toolNames = (node.tools || [])
     .map((id) => toolsBySlugId[id])
     .filter(Boolean);
+  
   return {
     id: String(node.id),
     position: {
@@ -41,12 +54,15 @@ function toFlowNode(node, toolsBySlugId) {
         </div>
       ),
     },
-
     type: "default",
   };
 }
 
-function toFlowEdge(edge) {
+interface EdgeData {
+  raw: Edge;
+}
+
+function toFlowEdge(edge: Edge): FlowEdge<EdgeData> {
   return {
     id: String(edge.id),
     source: String(edge.source),
@@ -56,34 +72,34 @@ function toFlowEdge(edge) {
 }
 
 export default function App() {
-  const [graphId, setGraphId] = useState(null);
-  const [graph, setGraph] = useState(null);
-  const [tools, setTools] = useState([]);
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [selectedNodeId, setSelectedNodeId] = useState(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [graphId, setGraphId] = useState<number | null>(null);
+  const [graph, setGraph] = useState<Graph | null>(null);
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<NodeData>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<EdgeData>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [error, setError] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(true);
+  const [showRunModal, setShowRunModal] = useState<boolean>(false);
 
   const toolsBySlugId = useMemo(() => {
-    const m = {};
+    const m: Record<number, string> = {};
     tools.forEach((t) => {
       m[t.id] = t.name || t.slug;
     });
     return m;
   }, [tools]);
 
-  const showError = useCallback((e) => {
+  const showError = useCallback((e: any) => {
     setError(e && e.message ? e.message : String(e));
   }, []);
 
-
   const loadInto = useCallback(
-    async (id) => {
+    async (id: number) => {
       const payload = await api.loadGraph(id);
       setGraph(payload.graph);
       setTools(payload.tools || []);
-      const byId = {};
+      const byId: Record<number, string> = {};
       (payload.tools || []).forEach((t) => {
         byId[t.id] = t.name || t.slug;
       });
@@ -97,8 +113,8 @@ export default function App() {
     (async () => {
       try {
         setLoading(true);
-        const graphs = await api.listGraphs();
-        const list = Array.isArray(graphs) ? graphs : graphs.results || [];
+        const graphsResp = await api.listGraphs();
+        const list = Array.isArray(graphsResp) ? graphsResp : graphsResp.results || [];
         let first = list[0];
         if (!first) {
           first = await api.createGraph({ name: "Default agent" });
@@ -123,9 +139,8 @@ export default function App() {
     if (graphId) await loadInto(graphId);
   }, [graphId, loadInto]);
 
-
   const addNode = useCallback(
-    async (kind) => {
+    async (kind: Node["kind"]) => {
       if (!graphId) return;
       try {
         const slug = `${kind}-${Date.now().toString(36)}`;
@@ -145,14 +160,13 @@ export default function App() {
   );
 
   const onConnect = useCallback(
-    async (connection) => {
-
+    async (connection: Connection) => {
       setEdges((eds) => addEdge(connection, eds));
       try {
         await api.createEdge({
-          graph: graphId,
-          source: connection.source,
-          target: connection.target,
+          graph: graphId!,
+          source: connection.source!,
+          target: connection.target!,
         });
         await refresh();
       } catch (e) {
@@ -164,9 +178,9 @@ export default function App() {
   );
 
   const persistPosition = useCallback(
-    async (node) => {
+    async (node: FlowNode) => {
       try {
-        await api.updateNode(node.id, { position: node.position });
+        await api.updateNode(parseInt(node.id), { position: node.position });
       } catch (e) {
         showError(e);
       }
@@ -175,7 +189,7 @@ export default function App() {
   );
 
   const removeNode = useCallback(
-    async (id) => {
+    async (id: number) => {
       try {
         await api.deleteNode(id);
         setSelectedNodeId(null);
@@ -188,12 +202,12 @@ export default function App() {
   );
 
   const toggleNodeTool = useCallback(
-    async (node, toolId, checked) => {
+    async (node: Node, toolId: number, checked: boolean) => {
       const current = new Set((node.tools || []).map(String));
       if (checked) current.add(String(toolId));
       else current.delete(String(toolId));
       try {
-        await api.updateNode(node.id, { tools: Array.from(current) });
+        await api.updateNode(node.id, { tools: Array.from(current).map(Number) });
         await refresh();
       } catch (e) {
         showError(e);
@@ -203,7 +217,7 @@ export default function App() {
   );
 
   const renameNode = useCallback(
-    async (node, label) => {
+    async (node: Node, label: string) => {
       try {
         await api.updateNode(node.id, { label });
         await refresh();
@@ -224,6 +238,12 @@ export default function App() {
     }
   }, [graphId, showError]);
 
+  const saveGraph = useCallback(async () => {
+    // Placeholder for save functionality - currently all changes auto-save
+    // This can be extended to batch changes before persisting
+    await refresh();
+  }, [refresh]);
+
   return (
     <div className="ab-shell">
       <div className="ab-canvas">
@@ -237,12 +257,22 @@ export default function App() {
           <button className="ab-btn" onClick={() => addNode("end")}>
             + End
           </button>
+          <button className="ab-btn" onClick={saveGraph}>
+            Save
+          </button>
           <button
             className="ab-btn ab-btn-primary"
             onClick={activate}
-            disabled={!graphId || (graph && graph.is_active)}
+            disabled={!graphId || (graph?.is_active ?? false)}
           >
-            {graph && graph.is_active ? "Active" : "Activate graph"}
+            {graph?.is_active ? "Active" : "Activate"}
+          </button>
+          <button
+            className="ab-btn ab-btn-primary"
+            onClick={() => setShowRunModal(true)}
+            disabled={!graphId || !graph?.is_active}
+          >
+            Run
           </button>
         </div>
         <ReactFlow
@@ -255,7 +285,7 @@ export default function App() {
           onNodeClick={(_e, node) => setSelectedNodeId(node.id)}
           onPaneClick={() => setSelectedNodeId(null)}
           onEdgesDelete={(deleted) =>
-            deleted.forEach((e) => api.deleteEdge(e.id).catch(showError))
+            deleted.forEach((e) => api.deleteEdge(parseInt(e.id)).catch(showError))
           }
           fitView
         >
@@ -327,13 +357,31 @@ export default function App() {
           </div>
         ))}
       </aside>
+
+      {showRunModal && graphId && graph && (
+        <RunModal
+          graphId={graphId}
+          graph={graph}
+          onClose={() => setShowRunModal(false)}
+          onError={showError}
+        />
+      )}
     </div>
   );
 }
 
-function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }) {
+interface NodeEditorProps {
+  node: Node;
+  tools: Tool[];
+  onRename: (label: string) => void;
+  onToggleTool: (toolId: number, checked: boolean) => void;
+  onDelete: () => void;
+}
+
+function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }: NodeEditorProps) {
   const [label, setLabel] = useState(node.label || "");
   const nodeToolIds = new Set((node.tools || []).map(String));
+  
   return (
     <div>
       <label className="ab-field">
