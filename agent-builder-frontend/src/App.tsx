@@ -30,8 +30,14 @@ interface NodeData {
 
 function toFlowNode(node: Node, toolsBySlugId: Record<number, string>): FlowNode<NodeData> {
   const pos = node.position && typeof node.position === "object" ? node.position : {};
+  
+  // Get tool names for display on the node
   const toolNames = (node.tools || [])
-    .map((id) => toolsBySlugId[id])
+    .map((id) => {
+      // Ensure id is a number and lookup by id
+      const numId = typeof id === 'number' ? id : parseInt(String(id), 10);
+      return toolsBySlugId[numId];
+    })
     .filter(Boolean);
   
   // Node content must be JSX wrapped in a div, cannot be a fragment
@@ -112,6 +118,8 @@ export default function App() {
       const payload = await api.loadGraph(id);
       setGraph(payload.graph);
       setTools(payload.tools || []);
+      
+      // Build tool lookup by ID (not slug)
       const byId: Record<number, string> = {};
       (payload.tools || []).forEach((t) => {
         byId[t.id] = t.name || t.slug;
@@ -473,7 +481,7 @@ function NodeEditor({ node, tools, onRename, onToggleTool, onDelete }: NodeEdito
             <div className="ab-empty">No tools available.</div>
           )}
           {tools.map((t) => (
-            <div className="ab-tool-row" key={`node-tool-${t.id}`}>
+            <div className="ab-tool-row" key={`node-${node.id}-tool-${t.id}`}>
               <input
                 type="checkbox"
                 checked={nodeToolIds.has(String(t.id))}
