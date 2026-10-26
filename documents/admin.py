@@ -530,6 +530,7 @@ class DocumentAdmin(BaseModelAdmin):
                 "processing_error",
                 "processing_progress",
                 "processing_stage",
+                "processing_backend",
             )[:200]
         )
         return JsonResponse(
@@ -550,6 +551,7 @@ class DocumentAdmin(BaseModelAdmin):
                             else row["processing_progress"]
                         ),
                         "processing_stage": row["processing_stage"],
+                        "processing_backend": row["processing_backend"],
                     }
                     for row in rows
                 ]

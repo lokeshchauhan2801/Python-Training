@@ -16,6 +16,8 @@
 
   var lastStatus = {};
   var firstPass = true;
+  var pollRetries = 0;
+  var MAX_POLL_RETRIES = 5;
 
   function toastContainer() {
     var existing = document.getElementById("documents-toast-container");
@@ -124,6 +126,22 @@
             ? "#d97706"
             : "#6b7280";
     }
+
+    // Update backend column if included in response
+    if (doc.processing_backend && row) {
+      var backendCell = row.querySelector(".field-processing_backend");
+      if (backendCell) {
+        var BACKEND_LABELS = {
+          temporal: "Temporal",
+          celery: "Celery",
+          "local-background": "Celery (inline)",
+          django: "Django (process now)",
+          kafka: "Kafka",
+        };
+        var label = BACKEND_LABELS[doc.processing_backend] || doc.processing_backend || "processing";
+        backendCell.textContent = label;
+      }
+    }
   }
 
   function poll() {
@@ -138,12 +156,19 @@
         return response.json();
       })
       .then(function (data) {
+        pollRetries = 0;  // Reset on successful poll
         var docs = (data && data.documents) || [];
         docs.forEach(function (doc) {
           updateProgress(doc);
           var prev = lastStatus[doc.id];
           lastStatus[doc.id] = doc.status;
 
+          // Re-enable Action button when document becomes terminal
+          if (TERMINAL[doc.status] && prev && !TERMINAL[prev]) {
+            if (window.enableDocumentScheduleButton) {
+              window.enableDocumentScheduleButton(doc.id);
+            }
+          }
 
           if (firstPass) {
             return;
@@ -155,7 +180,19 @@
         firstPass = false;
       })
       .catch(function () {
-
+        pollRetries++;
+        if (pollRetries >= MAX_POLL_RETRIES) {
+          // Polling failed too many times - re-enable all Action buttons as fallback
+          if (window.enableDocumentScheduleButton) {
+            var toggles = document.querySelectorAll(".schedule-toggle[disabled]");
+            for (var i = 0; i < toggles.length; i++) {
+              var docId = toggles[i].getAttribute("data-doc-id");
+              if (docId) {
+                window.enableDocumentScheduleButton(docId);
+              }
+            }
+          }
+        }
       });
   }
 

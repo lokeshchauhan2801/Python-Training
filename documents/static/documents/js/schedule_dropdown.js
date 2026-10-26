@@ -120,6 +120,36 @@
     cell.textContent = backendLabel(backend);
   }
 
+  function disableScheduleButton(docId) {
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    if (!toggle) {
+      return;
+    }
+    toggle.disabled = true;
+    toggle.style.cursor = "not-allowed";
+    toggle.style.opacity = "0.5";
+    toggle.setAttribute("aria-disabled", "true");
+  }
+
+  function enableScheduleButton(docId) {
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    if (!toggle) {
+      return;
+    }
+    toggle.disabled = false;
+    toggle.style.cursor = "pointer";
+    toggle.style.opacity = "1";
+    toggle.setAttribute("aria-disabled", "false");
+  }
+
+  // Expose for cross-script use (status_poll.js re-enables button on completion)
+  window.enableDocumentScheduleButton = enableScheduleButton;
+  window.disableDocumentScheduleButton = disableScheduleButton;
+
   function showNotice(message, isError) {
     var existing = document.getElementById("documents-dispatch-notice");
     if (existing) {
@@ -155,6 +185,25 @@
   }
 
   function dispatch(docId, backend, menu) {
+    // Store current backend for potential revert on error
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    var currentBackend = "";
+    if (toggle) {
+      var row = toggle.closest("tr");
+      if (row) {
+        var backendCell = row.querySelector(".field-processing_backend");
+        if (backendCell) {
+          currentBackend = backendCell.textContent;
+        }
+      }
+    }
+
+    // Optimistic updates: immediately update UI before API call
+    updateProcessingBackend(docId, backend === "now" ? "django" : backend);
+    disableScheduleButton(docId);
+
     var body = new URLSearchParams();
     body.set("backend", backend);
     fetch(dispatchUrl(docId), {
@@ -188,6 +237,11 @@
         );
       })
       .catch(function (error) {
+        // Revert optimistic updates on error
+        if (currentBackend) {
+          updateProcessingBackend(docId, currentBackend);
+        }
+        enableScheduleButton(docId);
         showNotice(
           "Could not queue document: " + error.message,
           true
@@ -245,4 +299,26 @@
   window.addEventListener("resize", function () {
     closeAllMenus();
   });
+
+  // On page load, disable Action buttons for documents in non-terminal states
+  (function initializeButtonStates() {
+    var rows = document.querySelectorAll("table tbody tr");
+    for (var i = 0; i < rows.length; i++) {
+      var statusBadge = rows[i].querySelector(".field-status_badge span");
+      if (!statusBadge) {
+        continue;
+      }
+      var statusText = statusBadge.textContent.trim();
+      // Disable button if status is "Queued" or "Processing"
+      if (statusText === "Queued" || statusText === "Processing") {
+        var toggle = rows[i].querySelector(".schedule-toggle");
+        if (toggle) {
+          var docId = toggle.getAttribute("data-doc-id");
+          if (docId) {
+            disableScheduleButton(docId);
+          }
+        }
+      }
+    }
+  })();
 })();
