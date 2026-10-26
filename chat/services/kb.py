@@ -58,6 +58,16 @@ def _is_already_embedded(document: Document) -> bool:
     )
 
 
+def _find_existing_kb_document(company, title: str) -> Document | None:
+    """Find an already-processed document in the KB with the same title."""
+    return Document.objects.filter(
+        company=company,
+        source=Document.SOURCE_LIBRARY,
+        status=Document.STATUS_READY,
+        title=title,
+    ).exclude(chunk_count=0).first()
+
+
 def workflow_id_for(document_id) -> str:
     """Temporal workflow id convention for a document (``doc-<id>``)."""
     return f"doc-{document_id}"
@@ -119,6 +129,12 @@ def add_session_attachments_to_kb(
     queued, skipped, failed_ids = [], [], []
     for document in documents:
         if _is_already_embedded(document):
+            skipped.append(document.title)
+            continue
+
+        # Check if another document with same title exists in KB
+        existing = _find_existing_kb_document(company, document.title)
+        if existing:
             skipped.append(document.title)
             continue
 
