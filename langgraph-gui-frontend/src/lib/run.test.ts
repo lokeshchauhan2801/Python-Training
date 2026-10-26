@@ -38,7 +38,9 @@ function makeDeps(overrides: Partial<RunDeps> = {}): { deps: RunDeps; order: str
 		api,
 		newSession: vi.fn(async (): Promise<ChatResponse<NewSessionResponse>> => {
 			order.push('new');
-			return chatOk({ id: 's', session_id: 'S1', title: 't', company_id: 'C1' });
+			// Mirrors chat.views.new_session EXACTLY: {id, title, company_id}.
+			// (No session_id key — reading it caused POST /chat/undefined/send/.)
+			return chatOk({ id: 'S1', title: 't', company_id: 'C1' });
 		}),
 		send: vi.fn(async (): Promise<ChatResponse<SendResponse>> => {
 			order.push('send');
@@ -62,6 +64,10 @@ describe('run: happy path sequence', () => {
 		expect(order).toEqual(['save', 'activate', 'new', 'send']);
 		expect(out.ok).toBe(true);
 		expect(out.text).toBe('hi');
+		// Regression guard: send must be called with the session's `id` from
+		// new_session (not an undefined `session_id`, which 404'd as
+		// /chat/undefined/send/).
+		expect(deps.send).toHaveBeenCalledWith('S1', 'hello');
 	});
 
 	it('appends chart_data JSON and citations when present', async () => {
@@ -124,7 +130,7 @@ describe('run: newSession company_id mismatch', () => {
 	it('aborts when the returned company_id differs from activeCompanyId', async () => {
 		const { deps } = makeDeps({
 			newSession: vi.fn(async () =>
-				chatOk<NewSessionResponse>({ id: 's', session_id: 'S1', title: 't', company_id: 'WRONG' })
+				chatOk<NewSessionResponse>({ id: 'S1', title: 't', company_id: 'WRONG' })
 			)
 		});
 		const out = await run(deps, ctx(), 'q');

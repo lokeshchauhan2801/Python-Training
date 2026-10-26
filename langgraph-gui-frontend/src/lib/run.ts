@@ -96,7 +96,9 @@ export async function run(
 	if (sessionRes.body?.company_id !== ctx.activeCompanyId) {
 		return { ok: false, error: MSG_COMPANY_MISMATCH };
 	}
-	const sessionId = sessionRes.body.session_id;
+	// new_session returns {id, title, company_id} — the session id is `id`
+	// (NOT `session_id`, which does not exist and yielded /chat/undefined/send/).
+	const sessionId = sessionRes.body.id;
 
 	// Step 5: send (form). Render content / chart_data / citations; map errors.
 	const sendRes = await deps.send(sessionId, prompt);

@@ -155,8 +155,10 @@ async function formPost<T = unknown>(
 }
 
 export interface NewSessionResponse {
+	// chat.views.new_session returns {id, title, company_id} — the session
+	// identifier is `id`. There is NO `session_id` key (reading it yielded
+	// undefined and produced POST /chat/undefined/send/ -> 404).
 	id: string;
-	session_id: string;
 	title: string;
 	company_id: string;
 }
