@@ -11,6 +11,7 @@ import ReactFlow, {
   Connection,
   NodeChange,
   EdgeChange,
+  ReactFlowInstance,
 } from "reactflow";
 import { api, Graph, Node, Edge, Tool } from "./api";
 import RunModal from "./RunModal";
@@ -33,7 +34,7 @@ function toFlowNode(node: Node, toolsBySlugId: Record<string, string>): FlowNode
   
   // Get tool names for display on the node - tools are ULID strings
   const toolNames = (node.tools || [])
-    .map((id) => String(id)) // Ensure it's a string
+    .map((id) => String(id))
     .map((id) => toolsBySlugId[id])
     .filter(Boolean);
   
@@ -42,9 +43,9 @@ function toFlowNode(node: Node, toolsBySlugId: Record<string, string>): FlowNode
     <div>
       <div className="ab-node-kind">{node.kind}</div>
       <div className="ab-node-label">{node.label || node.slug}</div>
-      {node.kind === "step" && (
+      {node.kind === "step" && toolNames.length > 0 && (
         <div className="ab-node-tools">
-          {toolNames.length ? toolNames.join(", ") : "no tools"}
+          {toolNames.join(", ")}
         </div>
       )}
     </div>
@@ -53,8 +54,9 @@ function toFlowNode(node: Node, toolsBySlugId: Record<string, string>): FlowNode
   return {
     id: String(node.id),
     position: {
-      x: typeof pos.x === "number" ? pos.x : Math.random() * 320,
-      y: typeof pos.y === "number" ? pos.y : Math.random() * 240,
+      // Use actual position if valid, otherwise use CENTER (not random)
+      x: typeof pos.x === "number" ? pos.x : 400,
+      y: typeof pos.y === "number" ? pos.y : 250,
     },
     data: {
       raw: node,
@@ -90,6 +92,7 @@ export default function App() {
   const [showRunModal, setShowRunModal] = useState<boolean>(false);
   const [isCreatingNode, setIsCreatingNode] = useState<boolean>(false);
   const [successMessage, setSuccessMessage] = useState<string>("");
+  const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null);
 
   const toolsBySlugId = useMemo(() => {
     const m: Record<number, string> = {};
@@ -171,15 +174,39 @@ export default function App() {
       setIsCreatingNode(true);
       try {
         const slug = `${kind}-${Date.now().toString(36)}`;
-        // Position new nodes in the CENTER of viewport
-        await api.createNode({
+
+        // Compute the flow-coordinate point that sits at the center of the
+        // currently visible canvas, so the node lands where the user is looking
+        // regardless of pan/zoom. Falls back to a sensible default pre-init.
+        let position = { x: 400, y: 250 };
+        if (rfInstance) {
+          const pane = document.querySelector(".ab-canvas .react-flow__pane");
+          const rect = pane?.getBoundingClientRect();
+          if (rect) {
+            position = rfInstance.screenToFlowPosition({
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+            });
+          }
+        }
+
+        const created = await api.createNode({
           graph: graphId,
           slug,
           kind,
           label: kind === "step" ? "New step" : kind,
-          position: { x: 400, y: 250 }, // Center of typical viewport
+          position,
         });
         await refresh();
+
+        // Pan/zoom the viewport so the new node is centered and visible.
+        if (rfInstance && created?.position) {
+          rfInstance.setCenter(created.position.x, created.position.y, {
+            zoom: rfInstance.getZoom(),
+            duration: 300,
+          });
+        }
+
         showSuccess(`${kind} node created`);
       } catch (e) {
         showError(e);
@@ -187,7 +214,7 @@ export default function App() {
         setIsCreatingNode(false);
       }
     },
-    [graphId, isCreatingNode, refresh, showError, showSuccess]
+    [graphId, isCreatingNode, refresh, rfInstance, showError, showSuccess]
   );
 
   const onConnect = useCallback(
@@ -330,6 +357,7 @@ export default function App() {
           onNodeDragStop={(_e, node) => persistPosition(node)}
           onNodeClick={(_e, node) => setSelectedNodeId(node.id)}
           onPaneClick={() => setSelectedNodeId(null)}
+          onInit={setRfInstance}
           onEdgesDelete={(deleted) =>
             deleted.forEach((e) => api.deleteEdge(e.id).catch(showError))
           }
@@ -391,33 +419,6 @@ export default function App() {
             onDelete={() => removeNode(selectedNode)}
           />
         )}
-
-        <div className="ab-section-title" title="Global tool enable/disable affects all nodes">All Tools</div>
-        <div className="ab-empty" style={{ marginBottom: "8px", fontSize: "12px" }}>
-          Enable or disable tools globally for all nodes.
-        </div>
-        {tools.length === 0 && (
-          <div className="ab-empty">
-            No tools available. Run <code>python manage.py seed_agents</code> on the backend to create built-in tools.
-          </div>
-        )}
-        {tools.map((t) => (
-          <div className="ab-tool-row" key={`global-tool-${t.id}`}>
-            <input
-              type="checkbox"
-              checked={Boolean(t.is_enabled)}
-              onChange={async (e) => {
-                try {
-                  await api.updateTool(t.id, { is_enabled: e.target.checked });
-                  await refresh();
-                } catch (err) {
-                  showError(err);
-                }
-              }}
-            />
-            <span>{t.name || t.slug}</span>
-          </div>
-        ))}
       </aside>
 
       {showRunModal && graphId && graph && (
