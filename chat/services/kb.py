@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 CHAT_KB_BACKEND = "temporal"
 
+# Pending-state key on ConversationSession.metadata where the numbered
+# add-to-KB selection is remembered between turns.
+PENDING_KB_KEY = "pending_kb_selection"
+
 
 # --------------------------------------------------------------------------- #
 # Intent detection (shared with the view-level net)
@@ -27,13 +31,31 @@ _STATUS_RE = re.compile(
     r"\b(document|doc|file|attachment|task|job|embed|chunk|process)\w*\b"
     r"|\b(document|doc|file|task|job)\w*\b.*\b(status|progress|processing|done|"
     r"ready|finished|complete|pending|queued)\b"
-    r"|\bwhat('?s| is)\b.*\b(processing|in\s+progress|being\s+processed)\b",
+    r"|\bwhat('?s| is)\b.*\b(processing|in\s+progress|being\s+processed)\b"
+    # "show me the status", "show status", "check the status", "get status" —
+    # a bare status request with explicit show/check/get wording (no doc token
+    # required). Bounded to show/check/get so ordinary questions like "what is
+    # the status of the French economy" do NOT match.
+    r"|\b(show|check|get)\b.*\bstatus\b"
+    # "processing status", "embedding status", "indexing status".
+    r"|\b(processing|embedding|indexing)\s+status\b"
+    # "is my file done/ready/finished/processed/embedded?"
+    r"|\bis\s+my\s+\w+\s+(done|ready|finished|complete|completed|processed|"
+    r"embedded|indexed)\b",
     re.IGNORECASE,
 )
 
 
 def is_add_to_kb_request(text: str | None) -> bool:
-    """True when the message asks to add/process the attached file into the KB."""
+    """True when the message asks to add/process the attached file into the KB.
+
+    ``_ADD_TO_KB_RE`` already matches the required phrasings ("add the document
+    to the company documents", "add documents to the knowledge base",
+    "process this file", ...), so it is kept as-is. NOTE: the pending-selection
+    follow-up handler in ``views.send()`` runs BEFORE this check, so an answer
+    like "all" / "second one" while a selection is pending is treated as the
+    selection, not a brand-new add request.
+    """
     if not text:
         return False
     return bool(_ADD_TO_KB_RE.search(text))
@@ -82,6 +104,109 @@ def _find_existing_kb_document(company, title: str) -> Document | None:
     ).exclude(chunk_count=0).first()
 
 
+def addable_documents(*, conversation, company, attachment_ids=None) -> list:
+    """Return the de-duplicated, ordered list of files eligible to add to the KB.
+
+    Start from explicit ``attachment_ids`` (scoped to ``company``) when given,
+    else the session's chat+library attachments. Exclude anything already
+    embedded (``_is_already_embedded``) or already in the KB by title
+    (``_find_existing_kb_document``), and collapse duplicate uploads of the SAME
+    file (identical title + size). The result is sorted by ``(title, id)`` so
+    the numbered list shown to the user and the saved ``files`` order always
+    match.
+    """
+    ids = list(attachment_ids or [])
+    if ids:
+        documents = list(Document.objects.filter(pk__in=ids, company=company))
+    elif conversation is not None:
+        documents = list(
+            conversation.documents.filter(
+                source__in=[Document.SOURCE_CHAT, Document.SOURCE_LIBRARY],
+                company=company,
+            )
+        )
+    else:
+        documents = []
+
+    # Drop files already embedded / already in the KB by title.
+    eligible = []
+    for doc in documents:
+        if _is_already_embedded(doc):
+            continue
+        if _find_existing_kb_document(company, doc.title) is not None:
+            continue
+        eligible.append(doc)
+
+    # Collapse duplicate uploads of the SAME file (identical title + size).
+    seen, unique_documents = set(), []
+    for doc in eligible:
+        key = ((doc.title or "").strip().casefold(), doc.file_size)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_documents.append(doc)
+
+    # Stable order so the numbered question and saved state always agree.
+    unique_documents.sort(key=lambda d: ((d.title or "").casefold(), str(d.id)))
+    return unique_documents
+
+
+# --------------------------------------------------------------------------- #
+# Pending-selection state (stored on ConversationSession.metadata)
+# --------------------------------------------------------------------------- #
+def pending_selection_state(files) -> dict:
+    """Build the pending-selection payload for the numbered ``files`` list."""
+    from django.utils import timezone
+
+    return {
+        "files": [{"id": str(d.id), "title": d.title} for d in files],
+        "created_at": timezone.now().isoformat(),
+    }
+
+
+def _title_of(f) -> str:
+    """Title from either a Document instance or a saved ``{"title"}`` dict."""
+    return f["title"] if isinstance(f, dict) else f.title
+
+
+def build_numbered_question(files) -> str:
+    """A 1..N numbered list of ``files`` plus the "which file(s)?" prompt.
+
+    ``files`` may be Document instances (first ask) or saved ``{"id","title"}``
+    dicts (the re-ask path reads them back from metadata).
+    """
+    numbered = "\n".join(
+        f"{i}. {_title_of(d)}" for i, d in enumerate(files, start=1)
+    )
+    return (
+        f"I found {len(files)} files attached to this chat:\n\n"
+        f"{numbered}\n\n"
+        "Which file(s) would you like to add to the knowledge base? You can say "
+        "'all', a number (e.g. 2), a range like 'first two', or a filename."
+    )
+
+
+def save_pending_selection(*, conversation, files, actor) -> dict:
+    """Persist the numbered pending selection on the session metadata."""
+    state = pending_selection_state(files)
+    conversation.metadata = {**(conversation.metadata or {}), PENDING_KB_KEY: state}
+    conversation.save(
+        actor=actor, update_fields=["metadata", "updated_at", "updated_by"]
+    )
+    return state
+
+
+def clear_pending_selection(*, conversation, actor) -> None:
+    """Remove the pending selection from the session metadata (if any)."""
+    metadata = dict(conversation.metadata or {})
+    if PENDING_KB_KEY in metadata:
+        metadata.pop(PENDING_KB_KEY, None)
+        conversation.metadata = metadata
+        conversation.save(
+            actor=actor, update_fields=["metadata", "updated_at", "updated_by"]
+        )
+
+
 def workflow_id_for(document_id) -> str:
     """Temporal workflow id convention for a document (``doc-<id>``)."""
     return f"doc-{document_id}"
@@ -113,36 +238,26 @@ def add_session_attachments_to_kb(
       * ``skipped``   — titles already embedded (deduped).
       * ``failed_ids``— document ids whose dispatch failed (retryable).
     """
-    from documents.tasks import dispatch_document_processing
-
     ids = list(attachment_ids or [])
-    documents = list(
-        Document.objects.filter(pk__in=ids, company=company)
-    ) if ids else []
 
-    # Fall back to the session's chat attachments if none were passed for the turn.
-    if not documents and conversation is not None:
-        documents = list(
-            conversation.documents.filter(
-                source__in=[Document.SOURCE_CHAT, Document.SOURCE_LIBRARY],
-                company=company,
-            )
-        )
+    # Single source of truth for the addable set (dedup + exclusions + order).
+    documents = addable_documents(
+        conversation=conversation, company=company, attachment_ids=ids
+    )
 
-    # When multiple session files exist and no explicit IDs were passed, ask the user
-    # which file(s) to add instead of silently processing all of them.
+    # When multiple distinct session files exist and no explicit IDs were passed,
+    # ask the user which file(s) to add and REMEMBER that we asked (pending
+    # state) so the next message is interpreted as the selection answer.
     if not ids and len(documents) > 1:
-        file_list = "\n".join(f"- {doc.title}" for doc in documents)
+        save_pending_selection(
+            conversation=conversation, files=documents, actor=actor
+        )
         return {
-            "content": (
-                f"I found {len(documents)} files attached to this chat:\n\n"
-                f"{file_list}\n\n"
-                "Which file(s) would you like to add to the knowledge base? "
-                "You can name specific files or say 'all' to add them all."
-            ),
+            "content": build_numbered_question(documents),
             "queued": [],
             "skipped": [],
             "failed_ids": [],
+            "pending": True,
         }
 
     if not documents:
@@ -155,6 +270,24 @@ def add_session_attachments_to_kb(
             "skipped": [],
             "failed_ids": [],
         }
+
+    queued, skipped, failed_ids = _dispatch_documents(documents, company, actor)
+    return {
+        "content": _compose_kb_reply(queued, skipped, failed_ids),
+        "queued": queued,
+        "skipped": skipped,
+        "failed_ids": failed_ids,
+    }
+
+
+def _dispatch_documents(documents, company, actor):
+    """Reset + dispatch each document through Temporal; skip already-embedded.
+
+    Returns ``(queued, skipped, failed_ids)`` using the same shape the KB reply
+    composer expects. Shared by ``add_session_attachments_to_kb`` and
+    ``dispatch_selected`` so there is exactly one dispatch loop.
+    """
+    from documents.tasks import dispatch_document_processing
 
     queued, skipped, failed_ids = [], [], []
     for document in documents:
@@ -217,12 +350,7 @@ def add_session_attachments_to_kb(
             )
             failed_ids.append(str(document.id))
 
-    return {
-        "content": _compose_kb_reply(queued, skipped, failed_ids),
-        "queued": queued,
-        "skipped": skipped,
-        "failed_ids": failed_ids,
-    }
+    return queued, skipped, failed_ids
 
 
 def _compose_kb_reply(queued, skipped, failed_ids) -> str:
@@ -254,6 +382,273 @@ def _compose_kb_reply(queued, skipped, failed_ids) -> str:
             "try again, or check that the file uploaded correctly."
         )
     return " ".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Selection resolution (deterministic parser) + dispatch of a chosen subset
+# --------------------------------------------------------------------------- #
+_WORD_NUMBERS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+_ORDINAL_WORDS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+}
+_ALL_WORDS = {"all", "both", "everything", "every", "all of them", "each", "each one"}
+_CANCEL_WORDS = {
+    "cancel",
+    "never mind",
+    "nevermind",
+    "stop",
+    "forget it",
+    "no",
+    "nothing",
+    "none",
+}
+
+
+def _int_from_word(token: str) -> int | None:
+    """Map a bare/word/ordinal numeric token to its 1-based integer (or None)."""
+    token = token.strip().lower()
+    if token.isdigit():
+        return int(token)
+    if token in _WORD_NUMBERS:
+        return _WORD_NUMBERS[token]
+    if token in _ORDINAL_WORDS:
+        return _ORDINAL_WORDS[token]
+    # Digit ordinals: "2nd", "3rd", "1st", "4th".
+    m = re.fullmatch(r"(\d+)(st|nd|rd|th)", token)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def ids_for_indices(files, indices) -> list:
+    """Map 1-based ``indices`` into ``files`` to their document ids (in order)."""
+    ids = []
+    for idx in indices:
+        if isinstance(idx, int) and 1 <= idx <= len(files):
+            ids.append(files[idx - 1]["id"])
+    # De-dup while preserving order.
+    seen, unique = set(), []
+    for i in ids:
+        if i in seen:
+            continue
+        seen.add(i)
+        unique.append(i)
+    return unique
+
+
+def resolve_selection(answer: str, files: list) -> dict:
+    """Map a free-text selection ``answer`` to a subset of the numbered ``files``.
+
+    Deterministic — no LLM. Handles, case-insensitively, over the exact numbered
+    ``files`` list (each a ``{"id", "title"}`` dict in displayed order):
+
+    * ``all`` / ``both`` / ``everything`` / ``every file`` -> every file.
+    * ``cancel`` / ``never mind`` / ``stop`` / ``forget it`` -> cancel.
+    * bare/compound numbers: "2", "1 and 3", "1,3", "files 1 & 2".
+    * word-numbers and ordinals (one..ten): "second one", "the 2nd",
+      "number two", "file two".
+    * ``first`` / ``last`` (single) and ``first N`` / ``last N`` /
+      "first two" / "last three" (word or digit N).
+    * a filename or a case-insensitive substring match against titles (and the
+      stem without extension).
+
+    Out-of-range numbers are ignored. When nothing resolves, returns
+    ``action="none"`` with an empty id list. Returns
+    ``{"ids", "action", "matched"}`` where ``action`` is one of
+    ``"all" | "subset" | "cancel" | "none"``.
+    """
+    text = (answer or "").strip().lower()
+    if not text:
+        return {"ids": [], "action": "none", "matched": []}
+
+    def _result(indices, action):
+        ids = ids_for_indices(files, indices)
+        matched = [
+            files[i - 1]["title"] for i in indices if 1 <= i <= len(files)
+        ]
+        return {"ids": ids, "action": action, "matched": matched}
+
+    # Cancel takes precedence over everything else.
+    if text in _CANCEL_WORDS or any(
+        re.search(rf"\b{re.escape(w)}\b", text) for w in ("never mind", "forget it")
+    ) or text in {"cancel", "stop"}:
+        return {"ids": [], "action": "cancel", "matched": []}
+
+    # "all" / "both" / "everything" / "every file" / "each one".
+    if (
+        text in _ALL_WORDS
+        or re.search(r"\b(all|both|everything|every\s+file|each\s+one)\b", text)
+    ):
+        return _result(list(range(1, len(files) + 1)), "all")
+
+    # first N / last N (word or digit N), and bare "first"/"last".
+    m = re.search(r"\b(first|last)\b(?:\s+(\w+))?", text)
+    if m:
+        direction = m.group(1)
+        n_token = m.group(2)
+        n = _int_from_word(n_token) if n_token else 1
+        # "first one"/"last one" -> N=1 (map 'one' which _int_from_word gives 1).
+        if n is None:
+            n = 1
+        n = max(0, min(n, len(files)))
+        if n:
+            if direction == "first":
+                return _result(list(range(1, n + 1)), "subset")
+            return _result(list(range(len(files) - n + 1, len(files) + 1)), "subset")
+
+    # Explicit numbers / ordinals anywhere in the answer:
+    #   "2", "1 and 3", "1,3", "files 1 & 2", "number two", "the 2nd".
+    # NOTE: a bare word "one" is ambiguous — in "second one" / "the first one"
+    # it is a NOUN, not the number 1. We only count "one" as the number when it
+    # does not directly follow another number/ordinal token.
+    tokens = re.findall(r"\d+(?:st|nd|rd|th)?|[a-z]+", text)
+    nums = []
+    prev_was_numeric = False
+    for tok in tokens:
+        val = _int_from_word(tok)
+        is_numeric_token = val is not None
+        if tok == "one" and prev_was_numeric:
+            # "second one" / "the 2nd one" — 'one' is the noun, skip it.
+            prev_was_numeric = False
+            continue
+        if val is not None and 1 <= val <= len(files):
+            nums.append(val)
+        prev_was_numeric = is_numeric_token
+    if nums:
+        # Preserve order, de-dup.
+        seen, ordered = set(), []
+        for n in nums:
+            if n in seen:
+                continue
+            seen.add(n)
+            ordered.append(n)
+        return _result(ordered, "subset")
+
+    # Filename / substring match against titles (and stems).
+    matched_indices = []
+    for i, f in enumerate(files, start=1):
+        title = (f.get("title") or "").lower()
+        stem = title.rsplit(".", 1)[0]
+        if title and (text in title or (stem and text in stem) or title in text):
+            matched_indices.append(i)
+    if matched_indices:
+        return _result(matched_indices, "subset")
+
+    return {"ids": [], "action": "none", "matched": []}
+
+
+def dispatch_selected(*, conversation, company, ids, actor) -> dict:
+    """Dispatch the chosen document ``ids`` (in order) via Temporal + reply.
+
+    Loads the documents scoped to ``company``, preserving the given id order,
+    runs the shared dispatch loop, and returns the same
+    ``{content, queued, skipped, failed_ids}`` shape as
+    ``add_session_attachments_to_kb``.
+    """
+    id_list = [str(i) for i in (ids or [])]
+    by_id = {
+        str(d.id): d
+        for d in Document.objects.filter(pk__in=id_list, company=company)
+    }
+    documents = [by_id[i] for i in id_list if i in by_id]
+
+    if not documents:
+        return {
+            "content": (
+                "I couldn't match that to any of the attached files. Please try "
+                "again with a number, a filename, or 'all'."
+            ),
+            "queued": [],
+            "skipped": [],
+            "failed_ids": [],
+        }
+
+    queued, skipped, failed_ids = _dispatch_documents(documents, company, actor)
+    return {
+        "content": _compose_kb_reply(queued, skipped, failed_ids),
+        "queued": queued,
+        "skipped": skipped,
+        "failed_ids": failed_ids,
+    }
+
+
+def handle_pending_selection(
+    *, conversation, company, message_text, actor
+) -> dict | None:
+    """Interpret ``message_text`` as the answer to a pending KB selection.
+
+    Returns ``None`` when there is no pending selection (caller proceeds with
+    the normal router/LLM). Otherwise returns a result dict:
+
+    * cancel -> clears pending state, ``{"cleared": True, ...}``.
+    * unrecognized/empty -> KEEPS state, ``{"reask": True, ...}`` with a short
+      clarification + the numbered list (re-asks ONCE, never silently loops).
+    * resolved -> dispatches the chosen file(s) via Temporal, CLEARS state, and
+      returns the ``dispatch_selected`` result dict.
+
+    This is the single entry point used by BOTH the ``views.send()`` seam and the
+    ``add_to_knowledge_base`` tool, so the two orchestration paths behave the
+    same.
+    """
+    state = (conversation.metadata or {}).get(PENDING_KB_KEY)
+    if not state:
+        return None
+
+    files = list(state.get("files") or [])
+    resolution = resolve_selection(message_text or "", files)
+    action = resolution["action"]
+
+    if action == "cancel":
+        clear_pending_selection(conversation=conversation, actor=actor)
+        return {
+            "content": "Okay, I won't add anything to the knowledge base.",
+            "queued": [],
+            "skipped": [],
+            "failed_ids": [],
+            "cleared": True,
+        }
+
+    if action == "none" or not resolution["ids"]:
+        # Keep the pending state and re-ask with a short clarification.
+        return {
+            "content": (
+                "Sorry, I didn't catch which file(s) you meant. "
+                + build_numbered_question(files)
+            ),
+            "queued": [],
+            "skipped": [],
+            "failed_ids": [],
+            "reask": True,
+        }
+
+    result = dispatch_selected(
+        conversation=conversation,
+        company=company,
+        ids=resolution["ids"],
+        actor=actor,
+    )
+    clear_pending_selection(conversation=conversation, actor=actor)
+    return result
 
 
 def retry_document_processing(*, document_id, company, actor) -> dict:

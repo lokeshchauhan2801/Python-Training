@@ -15,6 +15,11 @@ _TOOL_SPECS = [
     ("document_search", "Document search", True, "tool_document_search"),
     ("chat_summarise", "Chat summary", True, "tool_chat_summarise"),
     ("web_search", "Web search", True, "tool_web_search"),
+    # Deterministic chat-document tools (no Langfuse prompt needed). Without
+    # these on the step node the router cannot select them, so "add to the
+    # knowledge base" / "status" fall through to general_assistant.
+    ("add_to_knowledge_base", "Add to knowledge base", True, ""),
+    ("document_processing_status", "Document processing status", True, ""),
 ]
 
 _DEFAULT_GRAPH_NAME = "Default agent"
