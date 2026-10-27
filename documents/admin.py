@@ -38,7 +38,7 @@ from infrastructure.processing.temporal_backend import TemporalProcessingBackend
 
 from .forms import DocumentAdminForm
 from .models import Document, DocumentChunk, DocumentStage
-from .services import VECTOR_COLLECTION, purge_document
+from .services import VECTOR_COLLECTION, _mark_document_failed, purge_document
 from .tasks import enqueue_document_processing
 
 _SCHEDULE_CHOICES = (
@@ -117,9 +117,7 @@ class DocumentAdmin(BaseModelAdmin):
         "status_badge",
         "chunk_count",
         "processing_backend",
-        "schedule_column",
-        "info_column",
-        "temporal_link",
+        "actions_column",
         "created_by",
         "created_at",
     )
@@ -312,10 +310,17 @@ class DocumentAdmin(BaseModelAdmin):
         """Clear prior chunks/vectors + processing state before a re-dispatch.
 
         Hard-deletes the document's chunks (incl. soft-deleted) and zeroes the
-        progress/attempts/error so the backend starts from a clean state. The
-        QUEUED transition itself is set by ``dispatch_document_processing``.
+        progress/attempts/error so the backend starts from a clean state. It
+        also re-arms EVERY stage row via ``reset_all_stages`` so this genuine
+        reprocess restarts the whole pipeline — distinct from the Retry/resume
+        path, which preserves completed stages so processing continues from the
+        first non-completed stage. The QUEUED transition itself is set by
+        ``dispatch_document_processing``.
         """
+        from documents.services import reset_all_stages
+
         DocumentChunk.all_objects.filter(document=document).hard_delete()
+        reset_all_stages(document)
         document.chunk_count = 0
         document.processing_attempts = 0
         document.processing_progress = 0
@@ -359,6 +364,44 @@ class DocumentAdmin(BaseModelAdmin):
             str(obj.pk),
         )
 
+    @admin.display(description="Retry")
+    def retry_column(self, obj):
+        """Per-row Retry/Resume button.
+
+        Rendered for every row; ``document_controls.js`` shows it only when the
+        row's status is ``failed`` (the resumable state) and hides it otherwise,
+        re-evaluating live on each status poll. Re-dispatching starts a new run
+        that short-circuits already-completed stages, so it RESUMES from the
+        failed stage rather than restarting.
+        """
+        return format_html(
+            '<button type="button" class="retry-action '
+            'inline-flex items-center gap-1 rounded-default border '
+            'border-primary-600 bg-primary-600 px-3 py-1 text-sm '
+            'font-medium text-white hover:bg-primary-700 cursor-pointer" '
+            'data-doc-id="{}" data-status="{}">Retry</button>',
+            str(obj.pk),
+            obj.status,
+        )
+
+    @admin.display(description="Stop")
+    def stop_column(self, obj):
+        """Per-row Stop/Cancel button.
+
+        Rendered for every row; ``document_controls.js`` shows it only when the
+        row is ``queued`` or ``processing`` and hides it otherwise. A danger
+        (red) variant distinguishes it from the primary controls.
+        """
+        return format_html(
+            '<button type="button" class="stop-action '
+            'inline-flex items-center gap-1 rounded-default border '
+            'border-red-600 bg-red-600 px-3 py-1 text-sm '
+            'font-medium text-white hover:bg-red-700 cursor-pointer" '
+            'data-doc-id="{}" data-status="{}">Stop</button>',
+            str(obj.pk),
+            obj.status,
+        )
+
     @admin.display(description="Workflow")
     def temporal_link(self, obj):
         """Quick link to this document's workflow in the Temporal Web UI.
@@ -379,6 +422,35 @@ class DocumentAdmin(BaseModelAdmin):
             'border-base-200 dark:border-base-700 px-2 py-1 text-xs '
             'hover:bg-base-100 dark:hover:bg-base-800">Open in Temporal</a>',
             url,
+        )
+
+    @admin.display(description="Actions")
+    def actions_column(self, obj):
+        """Consolidated per-row controls in a single, wrapping cell.
+
+        This composes the EXISTING column methods (``schedule_column``,
+        ``info_column``, ``retry_column``, ``stop_column``, ``temporal_link``)
+        and groups their markup into one flex row so the changelist fits a
+        normal screen without the rightmost controls getting cut off. The inner
+        elements, their classes (``schedule-toggle`` / ``schedule-menu``,
+        ``info-action``, ``retry-action``, ``stop-action``, the "Open in
+        Temporal" ``<a>``) and their ``data-doc-id`` attributes are unchanged,
+        so the existing JS (which keys off those classes / data attributes and
+        row-scoped ``.field-status_badge`` lookups) keeps working untouched.
+
+        ``temporal_link`` returns the plain string ``"—"`` for non-temporal
+        docs; that placeholder is dropped here so the cell shows only live
+        controls.
+        """
+        temporal = self.temporal_link(obj)
+        temporal_markup = temporal if temporal != "—" else ""
+        return format_html(
+            '<div class="document-actions-cell">{}{}{}{}{}</div>',
+            self.schedule_column(obj),
+            self.info_column(obj),
+            self.retry_column(obj),
+            self.stop_column(obj),
+            temporal_markup,
         )
 
     def save_model(self, request, obj, form, change):
@@ -426,6 +498,16 @@ class DocumentAdmin(BaseModelAdmin):
                 "<str:pk>/dispatch/",
                 self.admin_site.admin_view(self.dispatch_view),
                 name="documents_document_dispatch",
+            ),
+            path(
+                "<str:pk>/temporal-retry/",
+                self.admin_site.admin_view(self.temporal_retry_view),
+                name="documents_document_temporal_retry",
+            ),
+            path(
+                "<str:pk>/temporal-cancel/",
+                self.admin_site.admin_view(self.temporal_cancel_view),
+                name="documents_document_temporal_cancel",
             ),
             path(
                 "<str:pk>/chunks-json/",
@@ -723,6 +805,100 @@ class DocumentAdmin(BaseModelAdmin):
                 ),
             },
             status=202,
+        )
+
+    def temporal_retry_view(self, request, pk):
+        """Re-dispatch a FAILED document so Temporal RESUMES from the failed stage.
+
+        POST-only, admin-scoped. Re-dispatches via
+        ``enqueue_document_processing(..., backend="temporal")`` — the SAME seam
+        the async dispatch branch uses. It does NOT reset chunks or stage rows,
+        so completed stages short-circuit and processing resumes at the first
+        non-completed stage. (A VALIDATION failure like "too large" recurs on
+        resume unless the file/limit changes; resume helps transient failures
+        such as a network/embedding outage.)
+        """
+        if request.method != "POST":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        document = get_object_or_404(self.get_queryset(request), pk=pk)
+        if document.source != Document.SOURCE_LIBRARY:
+            return JsonResponse(
+                {"detail": "Only library documents can be processed."},
+                status=400,
+            )
+        if document.status != Document.STATUS_FAILED:
+            return JsonResponse(
+                {"detail": "Only a failed document can be retried."},
+                status=400,
+            )
+        enqueue_document_processing(str(document.pk), backend="temporal")
+        return JsonResponse(
+            {
+                "status": Document.STATUS_QUEUED,
+                "status_display": dict(Document.STATUS_CHOICES)[
+                    Document.STATUS_QUEUED
+                ],
+                "backend": "temporal",
+                "document_id": str(document.pk),
+                "title": document.title,
+                "message": (
+                    "Resuming processing via Temporal from the failed stage."
+                ),
+            },
+            status=202,
+        )
+
+    def temporal_cancel_view(self, request, pk):
+        """Stop an in-progress (QUEUED/PROCESSING) document; backend-aware.
+
+        POST-only, admin-scoped. For a temporal-backed document it actually
+        terminates the running workflow (``doc-<id>``) via
+        ``TemporalProcessingBackend().terminate`` before flipping the Document.
+        For non-Temporal backends there is no reliable mid-run hard stop, so we
+        only flip the Document status and say so honestly (we do NOT claim the
+        worker was killed). In all cases the Document is flipped to FAILED with
+        "Processing stopped by user." via ``_mark_document_failed`` — which
+        preserves chunk rows and completed stages, so a later Retry resumes.
+        """
+        if request.method != "POST":
+            return JsonResponse({"detail": "Method not allowed."}, status=405)
+        document = get_object_or_404(self.get_queryset(request), pk=pk)
+        if document.source != Document.SOURCE_LIBRARY:
+            return JsonResponse(
+                {"detail": "Only library documents can be processed."},
+                status=400,
+            )
+        if document.status not in (
+            Document.STATUS_QUEUED,
+            Document.STATUS_PROCESSING,
+        ):
+            return JsonResponse(
+                {"detail": "Only a queued or running document can be stopped."},
+                status=400,
+            )
+
+        if document.processing_backend == "temporal":
+            TemporalProcessingBackend().terminate(f"doc-{document.pk}")
+            message = "Workflow terminated and document marked stopped."
+        else:
+            message = (
+                "Marked stopped; the worker cannot be force-killed for this "
+                "backend."
+            )
+
+        # Preserves chunk rows and completed stages (resume contract).
+        _mark_document_failed(document, "Processing stopped by user.")
+        return JsonResponse(
+            {
+                "status": Document.STATUS_FAILED,
+                "status_display": dict(Document.STATUS_CHOICES)[
+                    Document.STATUS_FAILED
+                ],
+                "document_id": str(document.pk),
+                "title": document.title,
+                "message": message,
+            },
+            status=200,
         )
 
     def chunks_view(self, request, pk):

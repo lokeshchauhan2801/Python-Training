@@ -1,25 +1,4 @@
-"""Celery task + backend-dispatch seam for document processing.
-
-Mirrors the OLD ``docs/tasks.py`` but adapted to NEW's single-argument
-``documents.services.process_document(document)``:
-
-* ``process_document_task`` is the Celery ``shared_task`` every backend converges
-  on (Celery ``.delay``/``apply_async``, the Kafka consumer via
-  ``run_document_processing``, and the Temporal activity all call it). It loads
-  the row, runs the URL download first when the source is a URL, then runs the
-  synchronous ``process_document`` which owns the processing→ready/failed
-  transition and the embed/no-key/cleanup contract. ``company_id``/``user_id``/
-  ``backend`` are accepted for signature parity and ignored by the service.
-* ``dispatch_document_processing`` is the routing seam the admin calls. It flips
-  the row to QUEUED first (so the UI/notification poll observes the transition)
-  then routes: DEBUG celery → inline ThreadPool; real celery → ``apply_async``;
-  kafka/temporal → ``ProcessingDispatcher``.
-
-Every celery/kafka/temporal import that could touch a broker stays lazy so this
-module imports with no infra running.
-"""
 from __future__ import annotations
-
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -107,20 +86,6 @@ def _mark_download_failed(document: Document, message: str) -> None:
 def dispatch_document_processing(
     document_id: str, backend: str | None = None
 ) -> tuple[str, str]:
-    """Dispatch processing for a document via the selected backend.
-
-    ``backend`` selects the strategy (``celery``/``kafka``/``temporal``); when
-    omitted the configured ``DOCUMENT_PROCESSING_BACKEND`` is used. The document
-    is first flipped to QUEUED (stage/progress reset, ``processing_backend``
-    recorded, ``processing_task_id`` set) so the changelist and the completion
-    notification poll observe the transition.
-
-    Routing:
-      * ``celery``/``local-background`` under DEBUG → run inline on a managed
-        background ThreadPool (no Redis/worker needed).
-      * ``celery`` (non-DEBUG) → ``apply_async`` to a real Celery worker.
-      * ``kafka``/``temporal``/other → ``ProcessingDispatcher`` strategy.
-    """
     requested = (
         backend or getattr(settings, "DOCUMENT_PROCESSING_BACKEND", "celery")
     ).lower()
@@ -185,13 +150,7 @@ def dispatch_document_processing(
 def enqueue_document_processing(
     document_id: str, backend: str | None = None
 ) -> tuple[str, str]:
-    """Persist a queued state and dispatch to its broker outside the request.
 
-    Broker connection and publish calls can block while Kafka or Temporal starts
-    or is unavailable. The admin action uses this entry point so it can confirm
-    the queued state immediately; a dispatch failure is recorded on the
-    document and logged for operators.
-    """
     requested = (
         backend or getattr(settings, "DOCUMENT_PROCESSING_BACKEND", "celery")
     ).lower()

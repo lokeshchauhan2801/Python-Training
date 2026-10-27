@@ -283,6 +283,32 @@
       bodyEl.appendChild(labeledRow("Result:", data.result));
     }
     bodyEl.appendChild(buildStagesTable(data.stages));
+
+    // The Info modal is INFORMATION-ONLY: it shows backend/status/workflow
+    // identifiers and the Stages table, but carries no action controls. The
+    // real per-row Retry/Stop controls live in the changelist Actions column
+    // (document_controls.js), state-gated and popup-free.
+
+    // Resume-caveat note for a FAILED document: resuming only helps transient
+    // failures; a validation error (e.g. "too large") recurs until the
+    // file/limit changes.
+    var isFailed =
+      data.status === "failed" ||
+      data.status === "FAILED" ||
+      (data.stages || []).some(function (s) {
+        return s.status === "failed";
+      });
+    if (isFailed) {
+      var note = document.createElement("div");
+      note.textContent =
+        "Resume helps transient failures (network/embedding). A validation " +
+        "failure such as a file that is too large will recur on resume unless " +
+        "the file or limit changes.";
+      note.style.marginTop = "12px";
+      note.style.fontSize = "11px";
+      note.style.color = "#6b7280";
+      bodyEl.appendChild(note);
+    }
   }
 
   function renderError(message) {

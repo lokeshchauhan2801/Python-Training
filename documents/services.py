@@ -1,15 +1,4 @@
-"""Offline document extraction pipeline (Phase 1).
-
-Ported faithfully in behavior from the OLD ``docs/services.py`` extraction
-surface: the same constants, the same word-boundary overlap chunker, the same
-per-format extractors, and the same best-effort OCR fallback for scanned
-PDFs/images. The embedding/vector half of OLD's ``process_document`` is OMITTED
-(that is Phase 2) — here ``process_document`` runs synchronously and only
-produces ``DocumentChunk`` rows.
-"""
-
-from __future__ import annotations
-
+from __future__ import annotations 
 import csv
 import json
 import logging
@@ -46,7 +35,7 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 180
 TABLE_CHUNK_SIZE = 9_000
-MAX_DOCUMENT_CHUNKS = 10_000
+MAX_DOCUMENT_CHUNKS = 100_000
 
 EMBEDDING_BATCH_SIZE = 96
 EMBEDDING_WORKERS = 4
@@ -1032,11 +1021,39 @@ def _ensure_stages(document: Document) -> None:
         DocumentStage.objects.bulk_create(missing)
 
 
-def _reset_stages(document: Document) -> None:
+def _rearm_incomplete_stages(document: Document) -> None:
+    """Re-arm only the NOT-completed stage rows to pending.
+
+    Called by ``stage_mark_processing`` on (re)entry. Rows already marked
+    ``COMPLETED`` are left untouched so a resume dispatch short-circuits the work
+    that already succeeded and picks up at the first non-completed stage. A
+    stage left ``RUNNING`` or ``FAILED`` by a crashed/terminated run is cleared
+    back to ``PENDING`` so it runs again. This is the resume contract Temporal
+    relies on: re-dispatching a FAILED/stopped document continues from where it
+    left off rather than restarting the whole pipeline.
+
+    A true reprocess (admin "reprocess"/"now" which hard-deletes chunks) first
+    calls ``reset_all_stages`` via ``_reset_for_reprocess``, so by the time this
+    runs no stage is COMPLETED and every row is re-armed — a clean restart.
+    """
+    DocumentStage.objects.filter(document=document).exclude(
+        status=DocumentStage.STATUS_COMPLETED
+    ).update(
+        status=DocumentStage.STATUS_PENDING,
+        detail="",
+        started_at=None,
+        finished_at=None,
+        updated_at=timezone.now(),
+    )
+
+
+def reset_all_stages(document: Document) -> None:
     """Re-arm ALL stage rows to pending, clearing started/finished/detail.
 
-    Called by ``stage_mark_processing`` on (re)entry so a reprocess restarts the
-    whole pipeline from a clean slate.
+    Used only before a genuine reprocess (when chunks/vectors are also wiped) so
+    the whole pipeline runs again from a clean slate. The resume path does NOT
+    call this — it relies on ``_rearm_incomplete_stages`` preserving completed
+    stages.
     """
     DocumentStage.objects.filter(document=document).update(
         status=DocumentStage.STATUS_PENDING,
@@ -1121,8 +1138,13 @@ def _stage_is_completed(document: Document, name: str) -> bool:
 def stage_mark_processing(document_id: str) -> dict:
     """Stage 1: re-arm stages, download any URL source, flip to PROCESSING.
 
-    EXEMPT from the completed short-circuit (decision 2): it always re-arms ALL
-    DocumentStage rows via ``_reset_stages`` so a resume/reprocess starts clean.
+    EXEMPT from the completed short-circuit (decision 2): it always re-arms the
+    NOT-completed DocumentStage rows via ``_rearm_incomplete_stages``. Rows that
+    already reached COMPLETED are preserved, so a resume dispatch (Retry after a
+    FAILED/stopped run) continues from the first non-completed stage instead of
+    restarting. A genuine reprocess clears every stage first via
+    ``reset_all_stages`` (from the admin ``_reset_for_reprocess``), so there is
+    nothing COMPLETED left to preserve and the whole pipeline re-runs.
     ``_record_attempt`` is NOT called here — the activity wrapper owns it.
 
     Dispatch-ordering note (decision 2): the admin runs ``_reset_for_reprocess``
@@ -1132,7 +1154,7 @@ def stage_mark_processing(document_id: str) -> dict:
     """
     document = Document.objects.get(pk=document_id)
     _ensure_stages(document)
-    _reset_stages(document)
+    _rearm_incomplete_stages(document)
 
 
     if document.source_url and not document.file:
@@ -1167,6 +1189,7 @@ def stage_mark_processing(document_id: str) -> dict:
             "stage_mark_processing failed for document %s", document_id
         )
         _stage_fail(document, STAGE_MARK_PROCESSING, str(exc))
+        _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
     _stage_complete(document, STAGE_MARK_PROCESSING, progress=5)
     return {"ok": True}
@@ -1200,6 +1223,7 @@ def stage_extract_text(document_id: str) -> dict:
             DocumentChunk.objects.bulk_create(chunk_rows)
     except (DocumentValidationError, DocumentIndexError) as exc:
         _stage_fail(document, STAGE_EXTRACT_TEXT, str(exc))
+        _mark_document_failed(document, str(exc))
         raise
     except Exception as exc:
         logger.exception(
@@ -1209,6 +1233,7 @@ def stage_extract_text(document_id: str) -> dict:
             "Document extraction failed. Check that the file is valid and retry."
         )
         _stage_fail(document, STAGE_EXTRACT_TEXT, message)
+        _mark_document_failed(document, message)
         raise DocumentIndexError(message) from exc
     _stage_complete(
         document,
@@ -1241,12 +1266,14 @@ def stage_chunk_text(document_id: str) -> dict:
             )
     except DocumentIndexError as exc:
         _stage_fail(document, STAGE_CHUNK_TEXT, str(exc))
+        _mark_document_failed(document, str(exc))
         raise
     except Exception as exc:
         logger.exception(
             "stage_chunk_text failed for document %s", document_id
         )
         _stage_fail(document, STAGE_CHUNK_TEXT, str(exc))
+        _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
     _stage_complete(
         document,
@@ -1292,6 +1319,7 @@ def stage_delete_existing_chunks(document_id: str) -> dict:
             "stage_delete_existing_chunks failed for document %s", document_id
         )
         _stage_fail(document, STAGE_DELETE_EXISTING_CHUNKS, str(exc))
+        _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
     _stage_complete(document, STAGE_DELETE_EXISTING_CHUNKS, progress=50)
     return {"ok": True}
@@ -1382,6 +1410,7 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                     document_id,
                 )
         _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, str(exc))
+        _mark_document_failed(document, str(exc))
         raise
     except Exception as exc:
         logger.exception(
@@ -1399,6 +1428,7 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                 )
         message = "Embedding/indexing failed. Retry once the LLM provider is reachable."
         _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, message)
+        _mark_document_failed(document, message)
         raise DocumentIndexError(message) from exc
     _stage_complete(
         document,
@@ -1463,6 +1493,7 @@ def stage_mark_completed(document_id: str) -> dict:
             "stage_mark_completed failed for document %s", document_id
         )
         _stage_fail(document, STAGE_MARK_COMPLETED, str(exc))
+        _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
     _stage_complete(document, STAGE_MARK_COMPLETED, progress=100)
     return {"chunk_count": document.chunk_count}
@@ -1487,6 +1518,7 @@ def stage_notify_completed(document_id: str) -> dict:
             "stage_notify_completed failed for document %s", document_id
         )
         _stage_fail(document, STAGE_NOTIFY_COMPLETED, str(exc))
+        _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
     _stage_complete(document, STAGE_NOTIFY_COMPLETED, progress=100)
     return {

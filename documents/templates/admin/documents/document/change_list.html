@@ -44,6 +44,43 @@ built from server data.
     background: #16a34a;
   }
   .dark .document-progress-track { background: #374151; }
+
+  /* Consolidated Actions cell: the Schedule dropdown, Info, Retry, Stop and
+     the "Open in Temporal" link live together in one column now (down from
+     five). Let them flow and wrap so the whole row fits a normal laptop width
+     (~1024-1440px) with no horizontal scroll. */
+  .document-actions-cell {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 200px;
+  }
+  /* Keep each control compact so a full set fits one or two tight rows. */
+  .document-actions-cell .schedule-toggle,
+  .document-actions-cell .info-action,
+  .document-actions-cell .retry-action,
+  .document-actions-cell .stop-action {
+    padding-top: 0.125rem;
+    padding-bottom: 0.125rem;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .document-actions-cell > a {
+    white-space: nowrap;
+  }
+  /* The schedule-cell is inline-block; inside the flex row it should not grow. */
+  .document-actions-cell .schedule-cell {
+    flex: 0 0 auto;
+  }
+  /* Make sure the changelist table never forces the content area to overflow;
+     cells wrap their content instead of pushing columns off-screen. */
+  #result_list td,
+  #result_list th {
+    white-space: normal;
+  }
 </style>
 
 {% comment %}
@@ -67,4 +104,19 @@ placeholder pk the JS swaps per row — so no URL is built from server text.
 <div id="documents-temporal-info-root"
      data-info-url-template="{% url 'admin:documents_document_temporal_info' '__PK__' %}"></div>
 <script src="{% static 'documents/js/temporal_info.js' %}"></script>
+
+{% comment %}
+Per-row "Retry" (resume a failed doc) and "Stop" (cancel an in-progress doc)
+controls. The retry-action / stop-action buttons are rendered on every row by
+DocumentAdmin; document_controls.js shows/hides them by the row's status and
+wires the AJAX POST. Both endpoint URLs are reverse()d templates carrying a
+placeholder pk the JS swaps per row — so no URL is built from server text. CSRF
+comes from the admin cookie. These row-level buttons are the real Retry/Stop
+controls; the Info modal (temporal_info.js) is information-only and carries no
+action buttons.
+{% endcomment %}
+<div id="documents-controls-root"
+     data-retry-url-template="{% url 'admin:documents_document_temporal_retry' '__PK__' %}"
+     data-cancel-url-template="{% url 'admin:documents_document_temporal_cancel' '__PK__' %}"></div>
+<script src="{% static 'documents/js/document_controls.js' %}"></script>
 {% endblock %}

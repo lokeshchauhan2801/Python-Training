@@ -118,6 +118,9 @@
     var statusCell = row && row.querySelector(".field-status_badge span");
     if (statusCell) {
       statusCell.textContent = doc.status_display || doc.status || "";
+      if (doc.status) {
+        statusCell.setAttribute("data-status", doc.status);
+      }
       statusCell.style.color = doc.status === "ready"
         ? "#16a34a"
         : doc.status === "failed"
@@ -125,6 +128,11 @@
           : doc.status === "processing" || doc.status === "queued"
             ? "#d97706"
             : "#6b7280";
+    }
+
+    // Flip the Retry/Stop controls live as the row changes state.
+    if (window.refreshDocumentControls) {
+      window.refreshDocumentControls(doc.id);
     }
 
     // Update backend column if included in response

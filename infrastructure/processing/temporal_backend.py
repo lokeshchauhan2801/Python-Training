@@ -69,3 +69,41 @@ class TemporalProcessingBackend(ProcessingBackend):
             "closed": desc.close_time.isoformat() if desc.close_time else None,
             "result": None,
         }
+
+    def terminate(self, job_id: str) -> dict:
+        """Hard-stop a running workflow by id.
+
+        ``terminate`` is used instead of ``cancel`` on purpose:
+        ``terminate`` is an immediate, server-side hard stop of a running
+        workflow, whereas ``cancel`` only *requests* cooperative cancellation
+        that the workflow code must observe between activities.
+        ``DocumentProcessingWorkflow.run`` has no cancellation-aware points
+        between its activities, so a ``cancel`` would not reliably halt it —
+        ``terminate`` guarantees the run stops now.
+
+        Tolerant like ``get_status``: a missing/already-closed workflow or an
+        unreachable Temporal server never raises out of here; it returns a
+        degraded result dict instead so the caller can still flip the document.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(self._terminate_async(job_id))
+        except Exception:
+            return {"terminated": False, "degraded": True}
+
+    async def _terminate_async(self, job_id: str) -> dict:
+        import temporalio.client as tc
+        from django.conf import settings
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        handle = client.get_workflow_handle(job_id)
+        try:
+            await handle.terminate(reason="Stopped by user")
+        except Exception:
+            # Not found / already closed — nothing left to stop; stay tolerant
+            # so the caller still marks the document stopped.
+            return {"terminated": False, "already_closed": True}
+        return {"terminated": True}
