@@ -66,6 +66,13 @@ class Conversation(BaseModel, SoftDeleteModel):
     context = models.JSONField(default=dict, blank=True)
     media = models.JSONField(default=list, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    chart_data = models.JSONField(null=True, blank=True)
+    documents = models.ManyToManyField(
+        "documents.Document",
+        related_name="conversation_turns",
+        blank=True,
+    )
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
@@ -98,114 +105,3 @@ class Conversation(BaseModel, SoftDeleteModel):
 
         self._validate_company_matches_session()
         super().save(*args, **kwargs)
-
-
-class Message(BaseModel, SoftDeleteModel):
-    ROLE_USER = "user"
-    ROLE_ASSISTANT = "assistant"
-    ROLE_SYSTEM = "system"
-    ROLE_CHOICES = [
-        (ROLE_USER, "User"),
-        (ROLE_ASSISTANT, "Assistant"),
-        (ROLE_SYSTEM, "System"),
-    ]
-
-    id = ULIDField()
-    company = models.ForeignKey(
-        "company.Company",
-        on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_set",
-        db_index=True,
-    )
-    conversation = models.ForeignKey(
-        ConversationSession,
-        on_delete=models.CASCADE,
-        related_name="messages",
-    )
-    parent = models.ForeignKey(
-        "self",
-        on_delete=models.SET_NULL,
-        related_name="children",
-        null=True,
-        blank=True,
-    )
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_USER)
-    content = models.TextField()
-    citations = models.JSONField(default=list, blank=True)
-    chart_data = models.JSONField(null=True, blank=True)
-
-
-    metadata = models.JSONField(default=dict, blank=True)
-    documents = models.ManyToManyField(
-        "documents.Document",
-        related_name="chat_messages",
-        blank=True,
-    )
-    model_name = models.CharField(max_length=100, default="gpt-4o-mini")
-
-
-    context_signature = models.CharField(max_length=64, null=True, blank=True)
-
-    objects = SoftDeleteManager()
-    all_objects = AllObjectsManager()
-
-    class Meta:
-        db_table = "chat_message"
-        ordering = ["created_at"]
-        indexes = [
-            models.Index(fields=["conversation", "created_at"]),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.role}: {self.content[:40]}"
-
-    def _validate_company_matches_conversation(self):
-        """A message must belong to the same company as its conversation."""
-        if self.company_id != self.conversation.company_id:
-            raise ValidationError(
-                {"company": "Message.company must match conversation.company."}
-            )
-
-    def clean(self):
-        super().clean()
-        self._validate_company_matches_conversation()
-
-    def save(self, *args, **kwargs):
-
-
-        self._validate_company_matches_conversation()
-        super().save(*args, **kwargs)
-
-
-class MessageVersion(BaseModel, SoftDeleteModel):
-    """A historical content revision of a ``Message`` (edit/regenerate trail)."""
-
-    id = ULIDField()
-    company = models.ForeignKey(
-        "company.Company",
-        on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_set",
-        db_index=True,
-    )
-    message = models.ForeignKey(
-        Message,
-        on_delete=models.CASCADE,
-        related_name="versions",
-    )
-    content = models.TextField()
-    version = models.PositiveIntegerField()
-
-    objects = SoftDeleteManager()
-    all_objects = AllObjectsManager()
-
-    class Meta:
-        db_table = "chat_message_version"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["message", "version"],
-                name="chat_message_version_uniq",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.message_id} v{self.version}"

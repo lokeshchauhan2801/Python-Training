@@ -108,6 +108,8 @@ class ConversationSerializer(
             "context",
             "media",
             "metadata",
+            "citations",
+            "chart_data",
             "created_at",
             "updated_at",
             "created_by",

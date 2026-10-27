@@ -4,7 +4,7 @@ from __future__ import annotations
 This file holds ONLY the graph implementation: the router prompt, the
 ``LangGraphChatService`` that compiles a company's agent graph into a
 ``langgraph`` ``StateGraph``, routes each message to one tool, and persists the
-message pair.
+resulting conversation turn.
 
 The tools themselves (and the registry) live in ``chat/services/llm_tools.py``.
 They are imported here and the registry symbols are re-exported so existing
@@ -118,15 +118,14 @@ class LangGraphChatService:
         attachment_ids=None,
         model_name=None,
     ):
-        """Route one message through the graph and persist the Message pair.
+        """Route one message through the graph and persist one turn.
 
-        Returns the assistant ``Message`` (same as ``ChatService``). Raises only
-        the exception types ``chat.views.send`` already catches
+        Returns the created ``Conversation`` turn (same as ``ChatService``).
+        Raises only the exception types ``chat.views.send`` already catches
         (``LLMConfigurationError``, ``LLMBackendError``, ``ChatProviderError``,
         ``ChatRetrievalError``) so the view's HTTP status mapping is unchanged.
         """
         from basics.llm import LLMBackendError, LLMConfigurationError
-        from chat.models import Message
         from chat.retitle import retitle_if_default
         from chat.services import ChatProviderError, ChatRetrievalError
 
@@ -183,35 +182,24 @@ class LangGraphChatService:
 
         with transaction.atomic():
             convo = conversation
-            user_message = self._chat.create_message(
+            turn = self._chat.create_turn(
                 convo,
-                Message.ROLE_USER,
-                message_text,
-                model_name="user",
-                actor=user,
-            )
-            self._chat._link_attachments(user_message, convo, attachment_ids)
-            assistant_message = self._chat.create_message(
-                convo,
-                Message.ROLE_ASSISTANT,
-                content,
+                user=user,
+                question=message_text,
+                response=content,
                 model_name=assistant_model_name,
                 citations=tool_result.citations or [],
                 chart_data=tool_result.chart_data,
+                metadata={
+                    "tool_used": tool_result.tool_used or "",
+                    "node_slug": result["node_slug"],
+                    "route_reason": result["route_reason"],
+                    "source": "langgraph",
+                    "trace_id": result["trace_id"],
+                },
+                attachment_ids=attachment_ids,
                 actor=user,
             )
-            assistant_message.metadata = {
-                "tool_used": tool_result.tool_used or "",
-                "node_slug": result["node_slug"],
-                "route_reason": result["route_reason"],
-                "source": "langgraph",
-                "trace_id": result["trace_id"],
-            }
-            assistant_message.save(
-                actor=user,
-                update_fields=["metadata", "updated_at", "updated_by"],
-            )
-
 
             retitle_if_default(
                 convo,
@@ -219,7 +207,7 @@ class LangGraphChatService:
                 fallback_text=message_text,
                 actor=user,
             )
-        return assistant_message
+        return turn
 
 
     def _run_graph(
@@ -578,16 +566,10 @@ class LangGraphChatService:
 
     def _history_text(self, conversation):
         """Build the condensed conversation context, mirroring the RAG path."""
-        from chat.models import Message
-
         if conversation is None:
             return ""
-        messages = list(
-            conversation.messages.exclude(role=Message.ROLE_SYSTEM).order_by(
-                "created_at"
-            )
-        )
-        return self._chat._build_conversation_context(messages)
+        turns = list(conversation.turns.order_by("created_at"))
+        return self._chat._build_conversation_context(turns)
 
     @staticmethod
     def _tool_description(tool_row, slug):

@@ -257,11 +257,6 @@ UNFOLD = {
                         "icon": "forum",
                         "link": reverse_lazy("admin:chat_conversationsession_changelist"),
                     },
-                    {
-                        "title": "Messages",
-                        "icon": "mail",
-                        "link": reverse_lazy("admin:chat_message_changelist"),
-                    },
                 ],
             },
             {

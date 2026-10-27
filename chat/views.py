@@ -83,26 +83,61 @@ def _resolve_session(request, session_id):
     return get_object_or_404(scoped_sessions(request), pk=session_id)
 
 
-def _message_payload(message):
-    """Serialize a Message for the client (ordered, display-ready)."""
-    # Attachments linked to this message (shown as chips on the bubble) so they
-    # survive a reload — the chip was previously only rendered from transient
-    # client state at send time and vanished after refresh.
+def _turn_payload(turn):
+    """Serialize a Conversation turn into a ``{user, assistant}`` message pair.
+
+    Chat history lives in two tables now: a single ``Conversation`` turn holds
+    both the user's question and the assistant's response. The frontend still
+    renders per-message bubbles (keyed on ``role``), so each turn is expanded
+    into two message-shaped dicts preserving the old wire shape. Attachments
+    render on the user bubble; citations/chart/metadata on the assistant bubble.
+    The synthetic ``<ulid>:u``/``<ulid>:a`` ids are display-only (the client
+    never posts a message id back).
+    """
     attachments = [
         {"id": str(doc.id), "title": doc.title}
-        for doc in message.documents.all()
+        for doc in turn.documents.all()
     ]
-    return {
-        "id": str(message.id),
-        "role": message.role,
-        "content": message.content,
-        "citations": message.citations or [],
-        "chart_data": message.chart_data,
-        "metadata": message.metadata or {},
-        "model_name": message.model_name,
+    created_at = turn.created_at.isoformat()
+    user = {
+        "id": f"{turn.id}:u",
+        "role": "user",
+        "content": turn.question,
+        "citations": [],
+        "chart_data": None,
+        "metadata": {},
+        "model_name": "user",
         "attachments": attachments,
-        "created_at": message.created_at.isoformat(),
+        "created_at": created_at,
     }
+    assistant = {
+        "id": f"{turn.id}:a",
+        "role": "assistant",
+        "content": turn.response,
+        "citations": turn.citations or [],
+        "chart_data": turn.chart_data,
+        "metadata": turn.metadata or {},
+        "model_name": turn.model_name,
+        "attachments": [],
+        "created_at": created_at,
+    }
+    return {"user": user, "assistant": assistant}
+
+
+def _turns_to_messages(turns):
+    """Flatten ``Conversation`` turns into a per-message list for the client.
+
+    Each turn yields a user dict then an assistant dict (skipping the assistant
+    dict when the turn has no response, which only happens for an unanswered
+    turn). Order follows ``created_at``.
+    """
+    messages = []
+    for turn in turns:
+        pair = _turn_payload(turn)
+        messages.append(pair["user"])
+        if turn.response:
+            messages.append(pair["assistant"])
+    return messages
 
 
 _PROVIDER_DISPLAY_NAMES = {"openai": "OpenAI", "deepseek": "DeepSeek"}
@@ -244,10 +279,7 @@ def sessions_json(request):
 @require_http_methods(["GET"])
 def messages_json(request, session_id):
     session = _resolve_session(request, session_id)
-    messages = [
-        _message_payload(message)
-        for message in session.messages.order_by("created_at")
-    ]
+    messages = _turns_to_messages(session.turns.order_by("created_at"))
     return JsonResponse(
         {
             "id": str(session.id),
@@ -330,13 +362,14 @@ def _attachment_titles(session, attachment_ids):
     return ", ".join(f"“{t}”" for t in titles[:-1]) + f" and “{titles[-1]}”"
 
 
-def _assistant_turn_response(request, session, user_message, assistant_message):
-    """Serialize a stored (user, assistant) pair in the shape ``send`` returns."""
+def _turn_response(request, session, turn):
+    """Serialize a stored turn as the ``{user, assistant, session}`` ``send`` shape."""
     session.refresh_from_db(fields=["title"])
+    pair = _turn_payload(turn)
     return JsonResponse(
         {
-            "user": _message_payload(user_message) if user_message else None,
-            "assistant": _message_payload(assistant_message),
+            "user": pair["user"],
+            "assistant": pair["assistant"],
             "session": {"id": str(session.id), "title": session.title},
         },
         status=201,
@@ -346,19 +379,21 @@ def _assistant_turn_response(request, session, user_message, assistant_message):
 def _reply_empty_attachment(request, session, attachment_ids):
     """Option A: store the attachment turn and ask what to do (no LLM call)."""
     service = _chat_service()
-    # Empty user content — the attachment chip renders from message.documents,
-    # matching the ChatGPT look (file card, no fabricated text).
-    user_message = service.create_message(
-        session, "user", "", model_name="user", actor=request.user
-    )
-    service._link_attachments(user_message, session, attachment_ids)
+    # Empty user question — the attachment chip renders from the turn's
+    # documents, matching the ChatGPT look (file card, no fabricated text).
     content = _EMPTY_ATTACHMENT_REPLY.format(
         names=_attachment_titles(session, attachment_ids)
     )
-    assistant_message = service.create_message(
-        session, "assistant", content, model_name="assistant", actor=request.user
+    turn = service.create_turn(
+        session,
+        user=session.user,
+        question="",
+        response=content,
+        model_name="assistant",
+        attachment_ids=attachment_ids,
+        actor=request.user,
     )
-    return _assistant_turn_response(request, session, user_message, assistant_message)
+    return _turn_response(request, session, turn)
 
 
 def _add_attachments_to_knowledge_base(request, session, question, attachment_ids):
@@ -380,18 +415,27 @@ def _add_attachments_to_knowledge_base(request, session, question, attachment_id
         actor=request.user,
     )
 
-    user_message = service.create_message(
-        session, "user", question, model_name="user", actor=request.user
-    )
-    service._link_attachments(user_message, session, attachment_ids)
-
-    assistant_message = service.create_message(
+    turn = service.create_turn(
         session,
-        "assistant",
-        result["content"],
+        user=session.user,
+        question=question,
+        response=result["content"],
         model_name="knowledge_base",
+        metadata=_kb_reply_metadata(result),
+        attachment_ids=attachment_ids,
         actor=request.user,
     )
+
+    return _turn_response(request, session, turn)
+
+
+def _kb_reply_metadata(result):
+    """Map a kb.py dispatch result to the assistant message metadata keys.
+
+    One place that maps ``result`` -> ``{retry_document_ids, temporal_links,
+    live_status_document_ids}`` so both ``_add_attachments_to_knowledge_base``
+    and the pending-selection seam set identical metadata.
+    """
     extra_meta = {}
     if result.get("failed_ids"):
         extra_meta["retry_document_ids"] = result["failed_ids"]
@@ -407,16 +451,25 @@ def _add_attachments_to_knowledge_base(request, session, question, attachment_id
     queued_ids = [q["id"] for q in result.get("queued", [])]
     if queued_ids:
         extra_meta["live_status_document_ids"] = queued_ids
-    if extra_meta:
-        assistant_message.metadata = {
-            **(assistant_message.metadata or {}),
-            **extra_meta,
-        }
-        assistant_message.save(
-            actor=request.user, update_fields=["metadata", "updated_at", "updated_by"]
-        )
+    return extra_meta
 
-    return _assistant_turn_response(request, session, user_message, assistant_message)
+
+def _answer_pending_kb_selection(request, session, question, attachment_ids, result):
+    """Persist the user answer + deterministic assistant reply for a pending KB
+    selection (dispatch/cancel/re-ask), mirroring the add-to-KB reply shape."""
+    service = _chat_service()
+    # A re-ask or a cancel dispatched nothing, so there is no metadata to set.
+    turn = service.create_turn(
+        session,
+        user=session.user,
+        question=question,
+        response=result["content"],
+        model_name="knowledge_base",
+        metadata=_kb_reply_metadata(result),
+        attachment_ids=attachment_ids,
+        actor=request.user,
+    )
+    return _turn_response(request, session, turn)
 
 
 def _answer_document_status(request, session, question, attachment_ids):
@@ -427,29 +480,24 @@ def _answer_document_status(request, session, question, attachment_ids):
     referenced documents reach a terminal state.
     """
     service = _chat_service()
-    user_message = service.create_message(
-        session, "user", question, model_name="user", actor=request.user
-    )
-    if attachment_ids:
-        service._link_attachments(user_message, session, attachment_ids)
     content = _kb.document_status_report(
         company=session.company, message_text=question
-    )
-    assistant_message = service.create_message(
-        session, "assistant", content, model_name="assistant", actor=request.user
     )
     track_ids = _kb.status_document_ids(
         company=session.company, message_text=question
     )
-    if track_ids:
-        assistant_message.metadata = {
-            **(assistant_message.metadata or {}),
-            "live_status_document_ids": track_ids,
-        }
-        assistant_message.save(
-            actor=request.user, update_fields=["metadata", "updated_at", "updated_by"]
-        )
-    return _assistant_turn_response(request, session, user_message, assistant_message)
+    metadata = {"live_status_document_ids": track_ids} if track_ids else {}
+    turn = service.create_turn(
+        session,
+        user=session.user,
+        question=question,
+        response=content,
+        model_name="assistant",
+        metadata=metadata,
+        attachment_ids=attachment_ids,
+        actor=request.user,
+    )
+    return _turn_response(request, session, turn)
 
 
 @login_required
@@ -482,13 +530,31 @@ def send(request, session_id):
     if not question and attachment_ids:
         return _reply_empty_attachment(request, session, attachment_ids)
 
+    # Stateful KB-selection follow-up: if we previously asked "which file(s)?"
+    # and saved pending state, interpret THIS message as the selection answer
+    # BEFORE the add-to-KB / router path, so "all" / "second one" / a filename
+    # resolve the pending choice instead of re-triggering a brand-new add. Runs
+    # for BOTH orchestration paths because send() is shared. Deterministic (no
+    # LLM) — the view seam only uses the deterministic parser in kb.py.
+    pending = _kb.handle_pending_selection(
+        conversation=session,
+        company=session.company,
+        message_text=question,
+        actor=request.user,
+    )
+    if pending is not None:
+        return _answer_pending_kb_selection(
+            request, session, question, attachment_ids, pending
+        )
+
     # Intent net (works for BOTH the LangGraph router path and the plain
     # ChatService path, i.e. companies with no agent graph):
     #   * "add/process this file to the knowledge base" -> Temporal processing.
     #   * "what's processing / status of <id>"          -> status report.
-    # Only treat an add-to-KB message as such when there is actually a file on
-    # the turn or session to add.
-    if attachment_ids and _is_add_to_kb_request(question):
+    # Honour an add-to-KB request even when no file is re-attached on this turn:
+    # the file is commonly uploaded on an earlier empty-text turn, so defer to
+    # the session fallback in ``kb.add_session_attachments_to_kb`` to resolve it.
+    if _is_add_to_kb_request(question):
         return _add_attachments_to_knowledge_base(
             request, session, question, attachment_ids
         )
@@ -509,7 +575,7 @@ def send(request, session_id):
     chat_user = session.user
 
     try:
-        assistant_message = _orchestrator_for(
+        turn = _orchestrator_for(
             session.company, llm_client=llm_client
         ).process_message(
             user=chat_user,
@@ -532,17 +598,13 @@ def send(request, session_id):
 
         return JsonResponse({"error": "This chat is not available."}, status=400)
 
-    user_message = (
-        session.messages.filter(role="user").order_by("-created_at").first()
-    )
-
-
     session.refresh_from_db(fields=["title"])
 
+    pair = _turn_payload(turn)
     return JsonResponse(
         {
-            "user": _message_payload(user_message) if user_message else None,
-            "assistant": _message_payload(assistant_message),
+            "user": pair["user"],
+            "assistant": pair["assistant"],
             "session": {"id": str(session.id), "title": session.title},
         },
         status=201,
@@ -552,13 +614,13 @@ def send(request, session_id):
 @login_required
 @require_http_methods(["POST"])
 def delete_session(request, session_id):
-    """Delete one session (and its messages) within the request's scope.
+    """Delete one session (and its turns) within the request's scope.
 
-    PERMANENT by default: the session and its messages/turns are removed with a
-    real SQL DELETE (``hard_delete``). Soft delete (``is_deleted=True``, kept for
-    audit) happens ONLY when the client explicitly opts in by sending
-    ``soft=1`` (POST body or querystring). Scoped like every other chat endpoint
-    (out-of-scope => 404).
+    PERMANENT by default: the session and its turns are removed with a real SQL
+    DELETE (``hard_delete``). Soft delete (``is_deleted=True``, kept for audit)
+    happens ONLY when the client explicitly opts in by sending ``soft=1`` (POST
+    body or querystring). Scoped like every other chat endpoint (out-of-scope
+    => 404).
     """
     session = _resolve_session(request, session_id)
 
@@ -570,15 +632,14 @@ def delete_session(request, session_id):
     )
 
     if soft:
-        session.messages.all().delete(actor=request.user)
+        session.turns.all().delete(actor=request.user)
         session.delete(actor=request.user)
     else:
-        # Permanent removal. Hard-delete children first (messages and turns),
-        # then the session row itself. Use all_objects so already soft-deleted
-        # rows are purged too.
-        from .models import Conversation, Message
+        # Permanent removal. Hard-delete the session's turns first, then the
+        # session row itself. Use all_objects so already soft-deleted rows are
+        # purged too.
+        from .models import Conversation
 
-        Message.all_objects.filter(conversation=session).hard_delete()
         Conversation.all_objects.filter(session=session).hard_delete()
         session.hard_delete()
 
@@ -652,7 +713,7 @@ def attach(request, session_id):
     """Store an uploaded file as a chat Document (not chunked) on the session.
 
     The document is stamped with the signed-in user and the session's company
-    (the invariant Message attachments require), so one user can never attach
+    (the invariant chat attachments require), so one user can never attach
     into another company's session.
     """
     session = _resolve_session(request, session_id)

@@ -88,12 +88,11 @@ def available_slugs() -> set[str]:
 # --------------------------------------------------------------------------- #
 def _history_messages(conversation, message_text):
     """Build provider-neutral chat messages from prior turns + this message."""
-    from chat.models import Message
-
-    history = (
-        conversation.messages.exclude(role=Message.ROLE_SYSTEM).order_by("created_at")
-    )
-    messages = [{"role": m.role, "content": m.content} for m in history]
+    messages = []
+    for turn in conversation.turns.order_by("created_at"):
+        messages.append({"role": "user", "content": turn.question})
+        if turn.response:
+            messages.append({"role": "assistant", "content": turn.response})
     messages.append({"role": "user", "content": message_text})
     return messages
 
@@ -344,16 +343,11 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
 @register("chat_summarise")
 def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     """``chat_summarise`` tool — summarise the conversation's prior history."""
-    from chat.models import Message
     from chat.services.chat_service import ChatService, _SUMMARY_SYSTEM_PROMPT
 
     service = ChatService()
-    history = list(
-        ctx.conversation.messages.exclude(role=Message.ROLE_SYSTEM).order_by(
-            "created_at"
-        )
-    )
-    conversation_context = service._build_conversation_context(history)
+    turns = list(ctx.conversation.turns.order_by("created_at"))
+    conversation_context = service._build_conversation_context(turns)
 
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
     sys = (
@@ -421,15 +415,83 @@ def _add_to_knowledge_base(ctx: "ToolContext") -> "ToolResult":
     reply names the Temporal workflow id so the user can track it under
     Documents.
     """
-    from chat.services.kb import add_session_attachments_to_kb
+    from chat.services import kb
 
-    result = add_session_attachments_to_kb(
+    # If a selection is already pending (the router mis-routed a follow-up like
+    # "second one" back to this tool), interpret this message as the answer.
+    metadata = getattr(ctx.conversation, "metadata", None) or {}
+    if metadata.get(kb.PENDING_KB_KEY):
+        result = kb.handle_pending_selection(
+            conversation=ctx.conversation,
+            company=ctx.company,
+            message_text=ctx.message_text,
+            actor=ctx.user,
+        )
+        # When the deterministic parser abstained (re-ask) but an LLM is
+        # available, let it map the free text to 1-based indices and dispatch.
+        if result is not None and result.get("reask") and ctx.llm is not None:
+            llm_result = _llm_resolve_pending(ctx, kb)
+            if llm_result is not None:
+                result = llm_result
+        if result is not None:
+            return ToolResult(
+                content=result["content"], tool_used="add_to_knowledge_base"
+            )
+
+    result = kb.add_session_attachments_to_kb(
         conversation=ctx.conversation,
         company=ctx.company,
         attachment_ids=ctx.attachment_ids,
         actor=ctx.user,
     )
     return ToolResult(content=result["content"], tool_used="add_to_knowledge_base")
+
+
+def _llm_resolve_pending(ctx: "ToolContext", kb):
+    """LLM assist: map the free-text answer to 1-based indices, then dispatch.
+
+    Only consulted when the deterministic ``resolve_selection`` abstained and an
+    LLM is present on the context. Returns a dispatch result dict (and clears
+    pending state), or ``None`` to fall back to the deterministic re-ask.
+    """
+    from pydantic import BaseModel
+
+    class _IndexChoice(BaseModel):
+        indices: list[int]
+
+    state = (getattr(ctx.conversation, "metadata", None) or {}).get(kb.PENDING_KB_KEY)
+    if not state:
+        return None
+    files = list(state.get("files") or [])
+    numbered = "\n".join(
+        f"{i}. {f.get('title')}" for i, f in enumerate(files, start=1)
+    )
+    prompt = (
+        "The user was shown this numbered list of files and asked which to add "
+        "to the knowledge base:\n"
+        f"{numbered}\n\n"
+        f'The user replied: "{ctx.message_text}"\n\n'
+        "Return the 1-based index numbers of the file(s) they chose. If they "
+        "asked for all files, return every index. Only use indices that appear "
+        "in the list above."
+    )
+    try:
+        choice = ctx.llm.generate_structured(prompt, _IndexChoice)
+    except Exception:  # noqa: BLE001 - LLM assist must never break the reply
+        logger.exception("LLM index-resolution failed for pending KB selection")
+        return None
+
+    ids = kb.ids_for_indices(files, list(choice.indices or []))
+    if not ids:
+        return None
+    result = kb.dispatch_selected(
+        conversation=ctx.conversation,
+        company=ctx.company,
+        ids=ids,
+        actor=ctx.user,
+    )
+    kb.clear_pending_selection(conversation=ctx.conversation, actor=ctx.user)
+    return result
 
 
 @register("document_processing_status")

@@ -24,7 +24,7 @@ from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
 from .admin import ConversationSessionAdmin
-from .models import Conversation, ConversationSession, Message, MessageVersion
+from .models import Conversation, ConversationSession
 from .services import ChatCompletion, ChartData, ChartPoint, ChatService
 
 User = get_user_model()
@@ -472,8 +472,8 @@ class AdminChatUITests(TestCase):
         )
 
 
-class MessageModelTests(TestCase):
-    """Message/MessageVersion invariants (ULID PK, company match, uniqueness)."""
+class ConversationTurnModelTests(TestCase):
+    """Conversation turn invariants (ULID PK, company match, moved fields)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -485,52 +485,48 @@ class MessageModelTests(TestCase):
             company=cls.company_a, user=cls.user, title="S"
         )
 
-    def test_message_save_rejects_company_mismatch(self):
-        message = Message(
-            conversation=self.session,
+    def test_turn_save_rejects_company_mismatch(self):
+        turn = Conversation(
+            session=self.session,
+            user=self.user,
             company=self.company_b,
-            role=Message.ROLE_USER,
-            content="hi",
+            question="hi",
         )
         with self.assertRaises(ValidationError):
-            message.save()
+            turn.save()
 
-    def test_message_save_accepts_matching_company(self):
-        message = Message(
-            conversation=self.session,
+    def test_turn_save_accepts_matching_company(self):
+        turn = Conversation(
+            session=self.session,
+            user=self.user,
             company=self.company_a,
-            role=Message.ROLE_USER,
-            content="hi",
+            question="hi",
+            response="there",
         )
-        message.save()
-        self.assertIsNotNone(message.pk)
+        turn.save()
+        self.assertIsNotNone(turn.pk)
 
-    def test_message_id_is_26_char_ulid(self):
-        message = Message.objects.create(
-            conversation=self.session,
+    def test_turn_id_is_26_char_ulid(self):
+        turn = Conversation.objects.create(
+            session=self.session,
             company=self.company_a,
-            role=Message.ROLE_ASSISTANT,
-            content="answer",
+            user=self.user,
+            question="q",
+            response="answer",
         )
-        self.assertEqual(len(str(message.id)), 26)
+        self.assertEqual(len(str(turn.id)), 26)
 
-    def test_message_version_unique_message_version(self):
-        from django.db import IntegrityError, transaction
-
-        message = Message.objects.create(
-            conversation=self.session,
+    def test_turn_citations_and_chart_data_defaults(self):
+        turn = Conversation.objects.create(
+            session=self.session,
             company=self.company_a,
-            role=Message.ROLE_ASSISTANT,
-            content="answer",
+            user=self.user,
+            question="q",
+            response="a",
         )
-        MessageVersion.objects.create(
-            company=self.company_a, message=message, content="v1", version=1
-        )
-        with self.assertRaises(IntegrityError):
-            with transaction.atomic():
-                MessageVersion.objects.create(
-                    company=self.company_a, message=message, content="dup", version=1
-                )
+        self.assertEqual(turn.citations, [])
+        self.assertIsNone(turn.chart_data)
+        self.assertEqual(list(turn.documents.all()), [])
 
 
 @override_settings(CHROMA_PATH=tempfile.mkdtemp(prefix="chat-chroma-"))
@@ -559,23 +555,21 @@ class ProcessMessageTests(TestCase):
             return_value=[],
         )
 
-    def test_persists_one_user_and_one_assistant_message(self):
+    def test_persists_one_turn_with_question_and_response(self):
         with self._no_chunks():
-            assistant = self._service(response="hello back").process_message(
+            turn = self._service(response="hello back").process_message(
                 user=self.user,
                 message_text="hi there",
                 conversation=self.session,
                 company=self.company,
             )
-        self.assertEqual(assistant.role, Message.ROLE_ASSISTANT)
-        self.assertEqual(assistant.content, "hello back")
-        roles = list(
-            self.session.messages.order_by("created_at").values_list(
-                "role", flat=True
-            )
-        )
-        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
-        self.assertEqual(assistant.company_id, self.company.id)
+        self.assertEqual(turn.question, "hi there")
+        self.assertEqual(turn.response, "hello back")
+        turns = list(self.session.turns.order_by("created_at"))
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].question, "hi there")
+        self.assertEqual(turns[0].response, "hello back")
+        self.assertEqual(turn.company_id, self.company.id)
 
     def test_empty_vector_store_yields_answer_not_retrieval_error(self):
         """ADDITION A: with NO library docs / a never-created ('missing')
@@ -587,22 +581,18 @@ class ProcessMessageTests(TestCase):
         empty CHROMA_PATH of this test class; the fake LLM's embed_query avoids
         any network while get_collection('pdf_chunks') is genuinely missing.
         """
-        assistant = self._service(response="general answer").process_message(
+        turn = self._service(response="general answer").process_message(
             user=self.user,
             message_text="what is the capital of France?",
             conversation=self.session,
             company=self.company,
         )
-        self.assertEqual(assistant.role, Message.ROLE_ASSISTANT)
-        self.assertEqual(assistant.content, "general answer")
+        self.assertEqual(turn.response, "general answer")
 
-        self.assertEqual(assistant.citations, [])
-        roles = list(
-            self.session.messages.order_by("created_at").values_list(
-                "role", flat=True
-            )
-        )
-        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
+        self.assertEqual(turn.citations, [])
+        turns = list(self.session.turns.order_by("created_at"))
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].question, "what is the capital of France?")
 
     def test_first_message_titles_session_bug2(self):
         """The first send titles the session from the message if no LLM title."""
@@ -661,21 +651,23 @@ class ProcessMessageTests(TestCase):
             "chat.services.document_services.find_relevant_chunks",
             return_value=[chunk],
         ):
-            assistant = self._service(response="It grew [%s]." % chunk.pk).process_message(
+            turn = self._service(response="It grew [%s]." % chunk.pk).process_message(
                 user=self.user,
                 message_text="How did revenue change?",
                 conversation=self.session,
                 company=self.company,
             )
-        self.assertEqual(len(assistant.citations), 1)
-        citation = assistant.citations[0]
+        self.assertEqual(len(turn.citations), 1)
+        citation = turn.citations[0]
         self.assertEqual(citation["reference_id"], str(chunk.pk))
         self.assertEqual(citation["document_id"], str(document.id))
         self.assertEqual(citation["page"], 3)
         self.assertIn("Revenue grew", citation["excerpt"])
 
-    def test_repeated_question_is_cache_hit_without_llm_call(self):
-        fake = _FakeStructuredLLM(response="cached answer")
+    def test_repeated_question_persists_two_turns_and_calls_llm_each_time(self):
+        """Two-table history has one row per turn and no replay cache: a
+        repeated question calls the LLM again and persists a second turn."""
+        fake = _FakeStructuredLLM(response="an answer")
         service = ChatService(llm_client=fake)
         with self._no_chunks():
             service.process_message(
@@ -686,39 +678,6 @@ class ProcessMessageTests(TestCase):
             )
             self.assertEqual(fake.structured_calls, 1)
 
-            service.process_message(
-                user=self.user,
-                message_text="same question",
-                conversation=self.session,
-                company=self.company,
-            )
-
-        self.assertEqual(fake.structured_calls, 1)
-        answers = self.session.messages.filter(role=Message.ROLE_ASSISTANT)
-        self.assertEqual(answers.count(), 2)
-        self.assertEqual({a.content for a in answers}, {"cached answer"})
-
-    def test_cache_miss_after_signature_change(self):
-        fake = _FakeStructuredLLM(response="first answer")
-        service = ChatService(llm_client=fake)
-        with self._no_chunks():
-            service.process_message(
-                user=self.user,
-                message_text="same question",
-                conversation=self.session,
-                company=self.company,
-            )
-            self.assertEqual(fake.structured_calls, 1)
-
-            Document.objects.create(
-                company=self.company,
-                uploaded_by=self.user,
-                source=Document.SOURCE_LIBRARY,
-                status=Document.STATUS_READY,
-                title="new.pdf",
-                file_type="pdf",
-                chunk_count=2,
-            )
             service.process_message(
                 user=self.user,
                 message_text="same question",
@@ -727,6 +686,10 @@ class ProcessMessageTests(TestCase):
             )
 
         self.assertEqual(fake.structured_calls, 2)
+        turns = self.session.turns.order_by("created_at")
+        self.assertEqual(turns.count(), 2)
+        self.assertEqual({t.response for t in turns}, {"an answer"})
+        self.assertEqual({t.question for t in turns}, {"same question"})
 
     def test_prompt_no_file_vs_file_branch(self):
 
@@ -1030,7 +993,7 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(resp.status_code, 405)
 
 
-    def test_send_persists_user_and_assistant_messages(self):
+    def test_send_persists_one_turn(self):
         self.client.force_login(self.alice)
         fake = ChatService(llm_client=_FakeStructuredLLM(response="hi back"))
         with mock.patch("chat.views._chat_service", return_value=fake), mock.patch(
@@ -1045,8 +1008,10 @@ class ChatUIViewTests(TestCase):
         data = resp.json()
         self.assertEqual(data["user"]["content"], "hello")
         self.assertEqual(data["assistant"]["content"], "hi back")
-        rows = Message.objects.filter(conversation=self.alice_session)
-        self.assertEqual(rows.count(), 2)
+        rows = Conversation.objects.filter(session=self.alice_session)
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(rows.first().question, "hello")
+        self.assertEqual(rows.first().response, "hi back")
 
     def test_send_first_message_sets_meaningful_title_bug2(self):
         session = ConversationSession.objects.create(
@@ -1084,7 +1049,7 @@ class ChatUIViewTests(TestCase):
             )
         self.assertEqual(resp.status_code, 404)
         self.assertFalse(
-            Message.objects.filter(conversation=self.bob_session).exists()
+            Conversation.objects.filter(session=self.bob_session).exists()
         )
 
     def test_messages_json_out_of_scope_is_404(self):
@@ -1119,15 +1084,17 @@ class ChatUIViewTests(TestCase):
         session = ConversationSession.objects.create(
             company=self.alice_co, user=self.alice, title="To delete"
         )
-        Message.objects.create(
-            conversation=session,
+        Conversation.objects.create(
+            session=session,
             company=self.alice_co,
-            role=Message.ROLE_USER,
-            content="hi",
+            user=self.alice,
+            question="hi",
+            response="there",
         )
         self.client.force_login(self.alice)
         resp = self.client.post(
-            reverse("chat:delete_session", args=[session.pk])
+            reverse("chat:delete_session", args=[session.pk]),
+            {"soft": "1"},
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], "application/json")
@@ -1143,10 +1110,10 @@ class ChatUIViewTests(TestCase):
 
 
         self.assertFalse(
-            Message.objects.filter(conversation=session).exists()
+            Conversation.objects.filter(session=session).exists()
         )
         self.assertTrue(
-            Message.all_objects.filter(conversation=session, is_deleted=True).exists()
+            Conversation.all_objects.filter(session=session, is_deleted=True).exists()
         )
 
 
@@ -1402,10 +1369,10 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(data["assistant"]["content"], "general answer")
         self.assertEqual(data["assistant"]["citations"], [])
 
-        roles = list(
-            session.messages.order_by("created_at").values_list("role", flat=True)
-        )
-        self.assertEqual(roles, [Message.ROLE_USER, Message.ROLE_ASSISTANT])
+        turns = list(session.turns.order_by("created_at"))
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].question, "What is the capital of France?")
+        self.assertEqual(turns[0].response, "general answer")
 
     @classmethod
     def tearDownClass(cls):
@@ -1531,12 +1498,10 @@ class ProviderSelectionSendTests(TestCase):
         self.assertEqual(built.model, "deepseek-chat")
 
 
-        assistant = (
-            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
-            .order_by("-created_at")
-            .first()
+        turn = (
+            self.session.turns.order_by("-created_at").first()
         )
-        self.assertEqual(assistant.model_name, "deepseek-chat")
+        self.assertEqual(turn.model_name, "deepseek-chat")
 
     def test_send_with_openai_model_routes_to_openai(self):
         patch_client, patch_chunks = self._post(None)
@@ -1549,12 +1514,10 @@ class ProviderSelectionSendTests(TestCase):
         built = _RecordingLLMClient.instances[0]
         self.assertEqual(built.provider, "openai")
         self.assertEqual(built.model, "gpt-4o")
-        assistant = (
-            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
-            .order_by("-created_at")
-            .first()
+        turn = (
+            self.session.turns.order_by("-created_at").first()
         )
-        self.assertEqual(assistant.model_name, "gpt-4o")
+        self.assertEqual(turn.model_name, "gpt-4o")
 
     def test_explicit_provider_field_disambiguates(self):
 
@@ -1594,17 +1557,15 @@ class ProviderSelectionSendTests(TestCase):
 
         self.assertEqual(_RecordingLLMClient.instances, [])
 
-        assistant = (
-            self.session.messages.filter(role=Message.ROLE_ASSISTANT)
-            .order_by("-created_at")
-            .first()
+        turn = (
+            self.session.turns.order_by("-created_at").first()
         )
-        self.assertEqual(assistant.content, "default answer")
+        self.assertEqual(turn.response, "default answer")
 
 
         from chat.services.chat_service import _DEFAULT_MODEL_NAME
 
-        self.assertEqual(assistant.model_name, _DEFAULT_MODEL_NAME)
+        self.assertEqual(turn.model_name, _DEFAULT_MODEL_NAME)
 
 
 class KBServiceTests(TestCase):
@@ -1676,10 +1637,18 @@ class KBServiceTests(TestCase):
 
         self.assertEqual(len(result["queued"]), 0)
         self.assertIn("I found 2 files", result["content"])
-        self.assertIn("file1.pdf", result["content"])
-        self.assertIn("file2.pdf", result["content"])
+        # Numbered list (not bulleted) + the stateful pending-selection save.
+        self.assertIn("1. file1.pdf", result["content"])
+        self.assertIn("2. file2.pdf", result["content"])
         self.assertIn("Which file(s) would you like to add", result["content"])
+        self.assertTrue(result.get("pending"))
         mock_dispatch.assert_not_called()
+        self.session.refresh_from_db()
+        pending = self.session.metadata.get("pending_kb_selection")
+        self.assertIsNotNone(pending)
+        self.assertEqual(
+            [f["title"] for f in pending["files"]], ["file1.pdf", "file2.pdf"]
+        )
 
     def test_explicit_attachment_ids_processes(self):
         """When explicit attachment_ids are provided, process them all."""

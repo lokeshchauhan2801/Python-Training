@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import logging
 import math
@@ -18,7 +17,7 @@ from basics.llm import LLMClient
 from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
-from chat.models import Conversation, ConversationSession, Message
+from chat.models import Conversation, ConversationSession
 from chat.retitle import retitle_if_default
 
 logger = logging.getLogger(__name__)
@@ -132,54 +131,43 @@ class ChatService:
         return summary
 
 
-    def create_message(
+    def create_turn(
         self,
-        conversation,
-        role,
-        content,
+        session,
+        *,
+        user,
+        question,
+        response,
         model_name=None,
         citations=None,
         chart_data=None,
-        context_signature=None,
+        metadata=None,
+        attachment_ids=None,
         actor=None,
     ):
-        """Persist a ``Message`` on ``conversation`` with the company stamped.
+        """Persist ONE ``Conversation`` turn on ``session`` and return it.
 
-        The message always inherits ``conversation.company`` (the company-match
-        invariant is enforced in ``Message.save()``). The save is actor-aware so
-        the audit columns are stamped from the acting user.
+        A turn collapses a user question and the assistant response into a
+        single row (the two-table history model). The turn always inherits
+        ``session.company`` (the company-match invariant is enforced in
+        ``Conversation.save()``). The save is actor-aware so the audit columns
+        are stamped from the acting user. Attachments (when given) are linked to
+        the turn via its ``documents`` M2M and also stamped onto the session.
         """
-        message = Message(
-            company=conversation.company,
-            conversation=conversation,
-            role=role,
-            content=content,
+        turn = Conversation(
+            company=session.company,
+            session=session,
+            user=user,
             model_name=model_name or _DEFAULT_MODEL_NAME,
+            question=question,
+            response=response,
             citations=citations or [],
             chart_data=chart_data,
-            context_signature=context_signature,
+            metadata=metadata or {},
         )
-        message.save(actor=actor)
-        return message
-
-    def _context_signature(self, user, company):
-        documents = Document.objects.filter(
-            source=Document.SOURCE_LIBRARY,
-            status=Document.STATUS_READY,
-            chunk_count__gt=0,
-        )
-        if company is not None:
-            documents = documents.filter(company=company)
-
-        rows = documents.order_by("pk").values_list("pk", "updated_at", "chunk_count")
-        payload = "|".join(
-            f"{pk}:{updated_at.isoformat() if updated_at else ''}:{chunk_count}"
-            for pk, updated_at, chunk_count in rows
-        )
-        from documents.services import _relevance_max_distance
-
-        payload = f"rt={_relevance_max_distance()}|{payload}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        turn.save(actor=actor or user)
+        self._link_attachments(turn, session, attachment_ids)
+        return turn
 
     def _find_relevant_chunks(self, user, question, conversation=None, company=None):
         if company is None:
@@ -333,19 +321,28 @@ class ChatService:
     _DIGEST_TURNS = 60
     _DIGEST_SNIPPET = 160
 
-    def _build_conversation_context(self, messages):
-        """Format whole-chat context from Postgres message history.
+    @staticmethod
+    def _turn_lines(turn):
+        """Emit the ``User:``/``Assistant:`` lines for one ``Conversation`` turn."""
+        lines = [f"User: {turn.question}"]
+        if turn.response:
+            lines.append(f"Assistant: {turn.response}")
+        return lines
+
+    def _build_conversation_context(self, turns):
+        """Format whole-chat context from the session's ``Conversation`` turns.
 
         Recent turns are included verbatim; older turns are condensed into a
         short digest so the model keeps a reference to the entire conversation
-        without blowing the token budget on very long chats.
+        without blowing the token budget on very long chats. Each turn is a
+        (question, response) pair rendered as ``User:``/``Assistant:`` lines.
         """
 
-        if not messages:
+        if not turns:
             return ""
 
-        recent = messages[-self._RECENT_TURNS :]
-        older = messages[: -self._RECENT_TURNS] if len(messages) > self._RECENT_TURNS else []
+        recent = turns[-self._RECENT_TURNS :]
+        older = turns[: -self._RECENT_TURNS] if len(turns) > self._RECENT_TURNS else []
 
         parts = []
         if older:
@@ -353,9 +350,12 @@ class ChatService:
 
             digest_source = older[-self._DIGEST_TURNS :]
             digest_lines = []
-            for message in digest_source:
-                snippet = " ".join(message.content.split())[: self._DIGEST_SNIPPET]
-                digest_lines.append(f"{message.role.title()}: {snippet}")
+            for turn in digest_source:
+                q = " ".join(turn.question.split())[: self._DIGEST_SNIPPET]
+                digest_lines.append(f"User: {q}")
+                if turn.response:
+                    r = " ".join(turn.response.split())[: self._DIGEST_SNIPPET]
+                    digest_lines.append(f"Assistant: {r}")
             omitted = len(older) - len(digest_source)
             prefix = (
                 f"(earlier conversation digest; {omitted} oldest turns omitted)\n"
@@ -364,11 +364,10 @@ class ChatService:
             )
             parts.append(prefix + "\n".join(digest_lines))
 
-        parts.append(
-            "\n".join(
-                f"{message.role.title()}: {message.content}" for message in recent
-            )
-        )
+        recent_lines = []
+        for turn in recent:
+            recent_lines.extend(self._turn_lines(turn))
+        parts.append("\n".join(recent_lines))
         return "\n\n".join(parts)
 
 
@@ -517,7 +516,7 @@ class ChatService:
         requests about it are answered from the file directly. Attachments are
         linked to a session via ``documents.Document.session`` (and surfaced
         through ``ConversationSession.documents``); we also fold in any CSVs
-        linked through the session's messages' ``documents`` M2M so a file
+        linked through the session's turns' ``documents`` M2M so a file
         referenced on an individual turn is still reachable.
 
         ``attachment_ids`` (when given) restricts to THIS turn's attachments —
@@ -538,13 +537,13 @@ class ChatService:
             status=Document.STATUS_READY,
             file_type="csv",
         )
-        message_docs = Document.objects.filter(
-            chat_messages__conversation=conversation,
+        turn_docs = Document.objects.filter(
+            conversation_turns__session=conversation,
             source=Document.SOURCE_CHAT,
             status=Document.STATUS_READY,
             file_type="csv",
         )
-        return (session_docs | message_docs).distinct()
+        return (session_docs | turn_docs).distinct()
 
 
     _MAX_ATTACHMENT_CHARS = 8000
@@ -561,16 +560,16 @@ class ChatService:
 
         Documents are reachable the same two ways as ``_chat_csv_documents``:
         the session (``ConversationSession.documents`` via ``Document.session``)
-        and the session's messages (``Message.documents`` M2M). Each document's
-        text is read via ``documents.services.extract_document_text`` (which
-        OCRs images via tesseract), capped per document, and docs with no usable
-        text are skipped. The number of docs folded in is bounded.
+        and the session's turns (``Conversation.documents`` M2M). Each
+        document's text is read via ``documents.services.extract_document_text``
+        (which OCRs images via tesseract), capped per document, and docs with no
+        usable text are skipped. The number of docs folded in is bounded.
 
         ``attachment_ids`` (when given) restricts to THIS turn's attachments and
-        takes precedence over the "latest user message" heuristic. The LangGraph
-        path passes it because the current user message is not linked yet when
-        the tool runs — without it, document_search grounds on an EARLIER file
-        (the bug where an attached CSV returned the previous letter's answer).
+        takes precedence over the "latest turn" heuristic. The LangGraph path
+        passes it because the current turn is not persisted yet when the tool
+        runs — without it, document_search grounds on an EARLIER file (the bug
+        where an attached CSV returned the previous letter's answer).
         """
         if conversation is None:
             return []
@@ -602,27 +601,21 @@ class ChatService:
                     )
             return sections
 
-        # Prefer the attachments on the LATEST user message (the current turn):
-        # a file belongs to the message it was sent with, so only that turn's
-        # attachments ground the answer — not every file ever added to the
-        # session. Fall back to session-linked docs only when the latest user
-        # message has none.
-        from chat.models import Message
-
-        latest_user = (
-            conversation.messages.filter(role=Message.ROLE_USER)
-            .order_by("-created_at")
-            .first()
-        )
-        if latest_user is not None:
-            msg_docs = latest_user.documents.filter(
+        # Prefer the attachments on the LATEST turn (the current conversation
+        # turn): a file belongs to the turn it was sent with, so only that
+        # turn's attachments ground the answer — not every file ever added to
+        # the session. Fall back to session-linked docs only when the latest
+        # turn has none.
+        latest_turn = conversation.turns.order_by("-created_at").first()
+        if latest_turn is not None:
+            turn_docs = latest_turn.documents.filter(
                 source=Document.SOURCE_CHAT,
                 status=Document.STATUS_READY,
             ).exclude(file_type="csv")
-            if msg_docs.exists():
+            if turn_docs.exists():
                 sections = []
                 seen = set()
-                for document in msg_docs[: self._MAX_ATTACHMENT_DOCS]:
+                for document in turn_docs[: self._MAX_ATTACHMENT_DOCS]:
                     if document.pk in seen:
                         continue
                     seen.add(document.pk)
@@ -644,17 +637,17 @@ class ChatService:
             source=Document.SOURCE_CHAT,
             status=Document.STATUS_READY,
         ).exclude(file_type="csv")
-        message_docs = Document.objects.filter(
-            chat_messages__conversation=conversation,
+        turn_docs = Document.objects.filter(
+            conversation_turns__session=conversation,
             source=Document.SOURCE_CHAT,
             status=Document.STATUS_READY,
         ).exclude(file_type="csv")
         # Dedupe by primary key: a document reachable via BOTH the session and a
-        # message would otherwise appear twice (the earlier OR-union could leak
+        # turn would otherwise appear twice (the earlier OR-union could leak
         # duplicates across the join), padding the prompt with the same file.
         seen_pks = set()
         documents = []
-        for document in list(session_docs) + list(message_docs):
+        for document in list(session_docs) + list(turn_docs):
             if document.pk in seen_pks:
                 continue
             seen_pks.add(document.pk)
@@ -990,49 +983,11 @@ class ChatService:
             return None
         return index, labels, is_numeric
 
-    def _cached_answer(
-        self,
-        conversation,
-        question,
-        current_signature,
-        exclude_user_message=None,
-    ):
-        if conversation is None:
-            return None
-        normalized = question.strip()
-        if not normalized:
-            return None
-
-        user_turns = conversation.messages.filter(
-            role=Message.ROLE_USER,
-            content__iexact=normalized,
-        )
-        if exclude_user_message is not None:
-            user_turns = user_turns.exclude(pk=exclude_user_message.pk)
-        for user_turn in user_turns.order_by("created_at"):
-            assistant = (
-                conversation.messages.filter(
-                    role=Message.ROLE_ASSISTANT,
-                    created_at__gt=user_turn.created_at,
-                )
-                .order_by("created_at")
-                .first()
-            )
-            if assistant is None:
-                continue
-            if (
-                assistant.context_signature is not None
-                and assistant.context_signature == current_signature
-            ):
-                return assistant
-        return None
-
     def process_message(
         self,
         user,
         message_text,
         conversation=None,
-        user_message=None,
         company=None,
         attachment_ids=None,
         model_name=None,
@@ -1048,53 +1003,10 @@ class ChatService:
 
         assistant_model_name = model_name or _DEFAULT_MODEL_NAME
 
-
-        current_signature = self._context_signature(user, company)
-
-
-        cached = self._cached_answer(
-            conversation,
-            message_text,
-            current_signature,
-            exclude_user_message=user_message,
+        all_turns = (
+            list(conversation.turns.order_by("created_at")) if conversation else []
         )
-        if cached is not None:
-            with transaction.atomic():
-                if not user_message:
-                    user_message = self.create_message(
-                        conversation,
-                        Message.ROLE_USER,
-                        message_text,
-                        model_name="user",
-                        actor=user,
-                    )
-                self._link_attachments(user_message, conversation, attachment_ids)
-                assistant_message = self.create_message(
-                    conversation,
-                    Message.ROLE_ASSISTANT,
-                    cached.content,
-                    model_name=cached.model_name,
-                    citations=cached.citations,
-                    chart_data=cached.chart_data,
-                    context_signature=cached.context_signature,
-                    actor=user,
-                )
-                conversation.save(
-                    actor=user, update_fields=["updated_at", "updated_by"]
-                )
-            return assistant_message
-
-        history_query = (
-            conversation.messages.exclude(role=Message.ROLE_SYSTEM)
-            if conversation
-            else Message.objects.none()
-        )
-        if user_message:
-            history_query = history_query.exclude(pk=user_message.pk)
-
-
-        all_messages = list(history_query.order_by("created_at"))
-        history = self._build_conversation_context(all_messages)
+        history = self._build_conversation_context(all_turns)
         try:
             chunks = self._find_relevant_chunks(
                 user,
@@ -1183,24 +1095,11 @@ class ChatService:
 
         with transaction.atomic():
             convo = conversation or self._create_session(user, message_text, company)
-            if user_message:
-                if user_message.conversation_id != convo.pk:
-                    raise ValueError(
-                        "User message does not belong to this conversation."
-                    )
-            else:
-                user_message = self.create_message(
-                    convo,
-                    Message.ROLE_USER,
-                    message_text,
-                    model_name="user",
-                    actor=user,
-                )
-            self._link_attachments(user_message, convo, attachment_ids)
-            assistant_message = self.create_message(
+            turn = self.create_turn(
                 convo,
-                Message.ROLE_ASSISTANT,
-                completion.response.strip(),
+                user=user,
+                question=message_text,
+                response=completion.response.strip(),
                 model_name=assistant_model_name,
                 citations=citations,
                 chart_data=(
@@ -1208,10 +1107,9 @@ class ChatService:
                     if completion.chart
                     else None
                 ),
-                context_signature=current_signature,
+                attachment_ids=attachment_ids,
                 actor=user,
             )
-
 
             retitle_if_default(
                 convo,
@@ -1219,7 +1117,7 @@ class ChatService:
                 fallback_text=message_text,
                 actor=user,
             )
-        return assistant_message
+        return turn
 
     def _create_session(self, user, message_text, company):
         """Create a new ConversationSession to hold a fresh message thread."""
@@ -1231,19 +1129,26 @@ class ChatService:
         session.save(actor=user)
         return session
 
-    def _link_attachments(self, user_message, conversation, attachment_ids):
+    def _link_attachments(self, turn, session, attachment_ids):
+        """Link uploaded attachments to a turn and stamp them onto the session.
+
+        ``turn`` is a ``Conversation`` row whose ``documents`` M2M holds the
+        per-turn attachments; the documents are ALSO stamped with
+        ``Document.session`` so they stay reachable from the session even when
+        no turn references them directly.
+        """
         if not attachment_ids:
             return
         documents = list(
             Document.objects.filter(
                 pk__in=attachment_ids,
-                company=conversation.company,
+                company=session.company,
             )
         )
         if not documents:
             return
-        user_message.documents.add(*documents)
+        turn.documents.add(*documents)
         for document in documents:
-            if document.session_id != conversation.pk:
-                document.session = conversation
+            if document.session_id != session.pk:
+                document.session = session
                 document.save(update_fields=["session", "updated_at"])
