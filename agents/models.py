@@ -1,12 +1,3 @@
-"""Models for the admin-configurable LangGraph agent builder.
-
-Tool / AgentGraph / AgentNode / AgentEdge. Like every model: ULID PK,
-BaseModel + SoftDeleteModel, explicit db_table. One deviation: company is
-NULLABLE (to allow a future global/template graph); the runtime always scopes
-by a concrete company. Single-table rules are partial unique constraints;
-cross-table invariants live in clean() and are re-checked in save().
-"""
-
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
@@ -18,42 +9,26 @@ from basics.models import BaseModel, SoftDeleteModel
 from basics.ulid import ULIDField
 
 
-class AgentGraph(BaseModel, SoftDeleteModel):
-    """One configurable graph per company — the unit the chat path looks up."""
-
-    id = ULIDField()
-    company = models.ForeignKey(
-        "company.Company",
-        on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_set",
-        null=True,
-        blank=True,
-        db_index=True,
-    )
-    name = models.CharField(max_length=200, default="Default agent")
-    is_active = models.BooleanField(default=False, db_index=True)
-    description = models.TextField(blank=True)
-
-    objects = SoftDeleteManager()
-    all_objects = AllObjectsManager()
-
-    class Meta:
-        db_table = "agents_agent_graph"
-        ordering = ["-created_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["company"],
-                condition=Q(is_active=True, is_deleted=False),
-                name="agents_one_active_graph_per_company",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return self.name
-
-
 class Tool(BaseModel, SoftDeleteModel):
-    """A tool the registry can resolve, admin-togglable per company."""
+    """A tool the registry can resolve (or a Langfuse-prompt-only tool),
+    admin-togglable per company."""
+
+    TYPE_GENERAL_ASSISTANT = "general_assistant"
+    TYPE_DOCUMENT_SEARCH = "document_search"
+    TYPE_CHAT_SUMMARISE = "chat_summarise"
+    TYPE_WEB_SEARCH = "web_search"
+    TYPE_ADD_TO_KB = "add_to_knowledge_base"
+    TYPE_DOC_STATUS = "document_processing_status"
+    TYPE_LANGFUSE = "langfuse"
+    TYPE_CHOICES = [
+        (TYPE_GENERAL_ASSISTANT, "General assistant"),
+        (TYPE_DOCUMENT_SEARCH, "Document search"),
+        (TYPE_CHAT_SUMMARISE, "Chat summarise"),
+        (TYPE_WEB_SEARCH, "Web search"),
+        (TYPE_ADD_TO_KB, "Add to knowledge base"),
+        (TYPE_DOC_STATUS, "Document processing status"),
+        (TYPE_LANGFUSE, "Langfuse prompt"),
+    ]
 
     id = ULIDField()
     company = models.ForeignKey(
@@ -66,12 +41,9 @@ class Tool(BaseModel, SoftDeleteModel):
     )
     slug = models.SlugField(max_length=64)
     name = models.CharField(max_length=120)
+    type = models.CharField(max_length=32, choices=TYPE_CHOICES)
     description = models.TextField(blank=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
-    config = models.JSONField(default=dict, blank=True)
-
-
-    prompt_name = models.CharField(max_length=200, blank=True, default="")
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
@@ -90,18 +62,28 @@ class Tool(BaseModel, SoftDeleteModel):
     def __str__(self) -> str:
         return f"{self.name} ({self.slug})"
 
+    @property
+    def prompt_name(self) -> str:
+        """Compat shim for llm_tools handlers (which read ``tool.prompt_name``).
+
+        For a Langfuse-type tool the ``slug`` IS the Langfuse prompt pointer, so
+        return it. For every other type return "" so ``_system_prompt`` falls
+        back to the handler's built-in ``default_name`` (e.g.
+        ``tool_general_assistant``). This keeps ``llm_tools.py`` untouched after
+        the ``prompt_name`` column is dropped.
+        """
+        return self.slug if self.type == self.TYPE_LANGFUSE else ""
+
     def clean(self):
         super().clean()
-
-
+        # Lazy import avoids a module-scope chat<-agents cycle and keeps the
+        # registry the source of truth for handler-backed tools.
         from chat.services.langgraph_service import available_slugs
 
-
-        prompt_only = (
-            isinstance(self.config, dict)
-            and self.config.get("kind") == "prompt_only"
-        )
-        if self.slug not in available_slugs() and not prompt_only:
+        # type == "langfuse" is prompt-only: no registered handler is needed
+        # (the slug is a Langfuse prompt pointer). Every other type's slug MUST
+        # resolve in the registry.
+        if self.type != self.TYPE_LANGFUSE and self.slug not in available_slugs():
             raise ValidationError(
                 {"slug": f"Unknown tool slug '{self.slug}' (no handler registered)."}
             )
@@ -111,18 +93,14 @@ class Tool(BaseModel, SoftDeleteModel):
         super().save(*args, **kwargs)
 
 
-class AgentNode(BaseModel, SoftDeleteModel):
-    """A node in a graph. v1 ships START/STEP/END; the model supports many
-    STEP nodes for the canvas later."""
+class Agent(BaseModel, SoftDeleteModel):
+    """One step node in a company's chat flow.
 
-    KIND_START = "start"
-    KIND_STEP = "step"
-    KIND_END = "end"
-    KIND_CHOICES = [
-        (KIND_START, "Start"),
-        (KIND_STEP, "Step"),
-        (KIND_END, "End"),
-    ]
+    The flow is a linear chain: the entry Agent has connected_from_start=True;
+    each Agent points at the next via next_node; the final Agent has
+    connected_to_end=True. The active flow for a company is the chain whose
+    entry Agent has is_active=True.
+    """
 
     id = ULIDField()
     company = models.ForeignKey(
@@ -132,132 +110,37 @@ class AgentNode(BaseModel, SoftDeleteModel):
         null=True,
         blank=True,
         db_index=True,
-    )
-    graph = models.ForeignKey(
-        AgentGraph,
-        on_delete=models.CASCADE,
-        related_name="nodes",
     )
     slug = models.CharField(max_length=64)
-    kind = models.CharField(max_length=20, choices=KIND_CHOICES, db_index=True)
-    label = models.CharField(max_length=120, blank=True)
-    tools = models.ManyToManyField(Tool, blank=True, related_name="nodes")
-    prompt_name = models.CharField(max_length=120, blank=True)
-    position = models.JSONField(default=dict, blank=True)
-    config = models.JSONField(default=dict, blank=True)
-
-    objects = SoftDeleteManager()
-    all_objects = AllObjectsManager()
-
-    class Meta:
-        db_table = "agents_agent_node"
-        ordering = ["-created_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["graph", "slug"],
-                condition=Q(is_deleted=False),
-                name="agents_node_slug_per_graph",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.slug} [{self.kind}]"
-
-    def _validate_company_matches_graph(self):
-        if self.company_id != self.graph.company_id:
-            raise ValidationError(
-                {"company": "AgentNode.company must match graph.company."}
-            )
-
-    def clean(self):
-        super().clean()
-        self._validate_company_matches_graph()
-
-
-        if self.kind in (self.KIND_START, self.KIND_END):
-            siblings = AgentNode.objects.filter(
-                graph=self.graph, kind=self.kind
-            ).exclude(pk=self.pk)
-            if siblings.exists():
-                raise ValidationError(
-                    {"kind": f"A graph may have only one '{self.kind}' node."}
-                )
-
-    def save(self, *args, **kwargs):
-        self._validate_company_matches_graph()
-        super().save(*args, **kwargs)
-
-
-class AgentEdge(BaseModel, SoftDeleteModel):
-    """A directed edge for the canvas / deterministic traversal."""
-
-    id = ULIDField()
-    company = models.ForeignKey(
-        "company.Company",
-        on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_set",
+    name = models.CharField(max_length=120, blank=True)
+    tools = models.ManyToManyField(Tool, blank=True, related_name="agents")
+    connected_from_start = models.BooleanField(default=False, db_index=True)
+    connected_to_end = models.BooleanField(default=False, db_index=True)
+    next_node = models.ForeignKey(
+        "self",
         null=True,
         blank=True,
-        db_index=True,
+        on_delete=models.SET_NULL,
+        related_name="prev_nodes",
     )
-    graph = models.ForeignKey(
-        AgentGraph,
-        on_delete=models.CASCADE,
-        related_name="edges",
-    )
-    source = models.ForeignKey(
-        AgentNode,
-        on_delete=models.CASCADE,
-        related_name="out_edges",
-    )
-    target = models.ForeignKey(
-        AgentNode,
-        on_delete=models.CASCADE,
-        related_name="in_edges",
-    )
-    condition = models.CharField(max_length=120, blank=True)
+    position_x = models.FloatField(default=0)
+    position_y = models.FloatField(default=0)
+    order = models.IntegerField(default=0, db_index=True)
+    is_active = models.BooleanField(default=False, db_index=True)
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
 
     class Meta:
-        db_table = "agents_agent_edge"
-        ordering = ["-created_at"]
+        db_table = "agents_agent"
+        ordering = ["order", "-created_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["source", "target"],
+                fields=["company", "slug"],
                 condition=Q(is_deleted=False),
-                name="agents_edge_uniq",
+                name="agents_agent_slug_per_company",
             ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.source_id} -> {self.target_id}"
-
-    def _validate_edge(self):
-
-        if self.source_id == self.target_id:
-            raise ValidationError(
-                {"target": "An edge cannot connect a node to itself."}
-            )
-
-        if self.source.graph_id != self.target.graph_id:
-            raise ValidationError(
-                {"target": "An edge must connect nodes of the same graph."}
-            )
-
-        if (
-            self.company_id != self.source.graph.company_id
-            or self.company_id != self.target.graph.company_id
-        ):
-            raise ValidationError(
-                {"company": "AgentEdge.company must match the graph's company."}
-            )
-
-    def clean(self):
-        super().clean()
-        self._validate_edge()
-
-    def save(self, *args, **kwargs):
-        self._validate_edge()
-        super().save(*args, **kwargs)
+        return self.name or self.slug

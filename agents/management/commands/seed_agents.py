@@ -1,5 +1,6 @@
-"""seed_agents — idempotently create the built-in tools + a default (inactive)
-START -> chat_agent -> END graph per company. Run manually, not at migrate.
+"""seed_agents — idempotently create the built-in tools + a default active
+single-agent flow (START -> chat_agent -> END) per company. Run manually, not at
+migrate.
 """
 
 from __future__ import annotations
@@ -7,29 +8,31 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from agents.models import AgentEdge, AgentGraph, AgentNode, Tool
+from agents.models import Agent, Tool
 from company.models import Company
 
+# (slug, name, type) — slug == type for every built-in (handler-backed) tool:
+# `type` names what the tool does and `slug` selects the handler; they coincide.
 _TOOL_SPECS = [
-    ("general_assistant", "General assistant", True, "tool_general_assistant"),
-    ("document_search", "Document search", True, "tool_document_search"),
-    ("chat_summarise", "Chat summary", True, "tool_chat_summarise"),
-    ("web_search", "Web search", True, "tool_web_search"),
-    # Deterministic chat-document tools (no Langfuse prompt needed). Without
-    # these on the step node the router cannot select them, so "add to the
-    # knowledge base" / "status" fall through to general_assistant.
-    ("add_to_knowledge_base", "Add to knowledge base", True, ""),
-    ("document_processing_status", "Document processing status", True, ""),
+    ("general_assistant", "General assistant", "general_assistant"),
+    ("document_search", "Document search", "document_search"),
+    ("chat_summarise", "Chat summary", "chat_summarise"),
+    ("web_search", "Web search", "web_search"),
+    ("add_to_knowledge_base", "Add to knowledge base", "add_to_knowledge_base"),
+    (
+        "document_processing_status",
+        "Document processing status",
+        "document_processing_status",
+    ),
 ]
 
-_DEFAULT_GRAPH_NAME = "Default agent"
-_STEP_SLUG = "chat_agent"
+_AGENT_SLUG = "chat_agent"
 
 
 class Command(BaseCommand):
     help = (
-        "Idempotently seed the four built-in tools and a default inactive "
-        "START -> chat_agent -> END graph per company."
+        "Idempotently seed the built-in tools and a default active single-agent "
+        "flow (chat_agent) per company."
     )
 
     def add_arguments(self, parser):
@@ -65,58 +68,44 @@ class Command(BaseCommand):
 
     def _seed_company(self, company):
         tools = {}
-        for slug, name, is_enabled, prompt_name in _TOOL_SPECS:
-
-
+        for slug, name, type_ in _TOOL_SPECS:
             tool, created = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
                 defaults={
                     "name": name,
-                    "is_enabled": is_enabled,
-                    "prompt_name": prompt_name,
+                    "type": type_,
+                    "is_enabled": True,
                 },
             )
             tools[slug] = tool
             if created:
                 self.stdout.write(f"  + Tool {slug} for {company}")
 
-        graph, created = AgentGraph.objects.get_or_create(
+        agent, created = Agent.objects.get_or_create(
             company=company,
-            name=_DEFAULT_GRAPH_NAME,
-            defaults={"is_active": False},
-        )
-        if created:
-            self.stdout.write(f"  + Graph '{_DEFAULT_GRAPH_NAME}' for {company}")
-
-        start, _ = AgentNode.objects.get_or_create(
-            graph=graph,
-            slug="start",
-            defaults={"company": company, "kind": AgentNode.KIND_START},
-        )
-        step, _ = AgentNode.objects.get_or_create(
-            graph=graph,
-            slug=_STEP_SLUG,
+            slug=_AGENT_SLUG,
             defaults={
-                "company": company,
-                "kind": AgentNode.KIND_STEP,
-                "label": "Chat agent",
+                "name": "Chat agent",
+                "connected_from_start": True,
+                "connected_to_end": True,
+                "is_active": True,
+                "order": 0,
+                "position_x": 0,
+                "position_y": 0,
             },
         )
-        end, _ = AgentNode.objects.get_or_create(
-            graph=graph,
-            slug="end",
-            defaults={"company": company, "kind": AgentNode.KIND_END},
-        )
+        if created:
+            self.stdout.write(f"  + Agent '{_AGENT_SLUG}' for {company}")
 
+        agent.tools.add(*tools.values())
 
-        step.tools.add(*tools.values())
-
-        for src, tgt in ((start, step), (step, end)):
-            AgentEdge.objects.get_or_create(
-                source=src,
-                target=tgt,
-                defaults={"company": company, "graph": graph},
-            )
+        # Keep exactly one active flow per company on re-seed.
+        if not agent.is_active:
+            agent.is_active = True
+            agent.save(update_fields=["is_active"])
+        Agent.objects.filter(company=company, is_active=True).exclude(
+            pk=agent.pk
+        ).update(is_active=False)
 
         self.stdout.write(self.style.SUCCESS(f"Seeded agents for {company}."))

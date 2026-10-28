@@ -1,129 +1,113 @@
 """Agents API viewsets backing the canvas (owner/company-scoped, 404 out-of-scope)."""
 
 from django.db import transaction
-from django.utils.text import slugify
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from basics.api.views import ScopedModelViewSet
 
-from ..models import AgentEdge, AgentGraph, AgentNode, Tool
-from .serializers import (
-    AgentEdgeSerializer,
-    AgentGraphSerializer,
-    AgentNodeSerializer,
-    ToolSerializer,
-)
+from ..models import Agent, Tool
+from .serializers import AgentSerializer, ToolSerializer
 
 
-class AgentGraphViewSet(ScopedModelViewSet):
-    queryset = AgentGraph.objects.all()
-    serializer_class = AgentGraphSerializer
+def _walk_chain(entry):
+    """Forward-walk the ``next_node`` chain from ``entry``.
 
-    @action(detail=True, methods=["get"])
-    def load(self, request, pk=None):
-
-        """Return the aggregated canvas payload for this graph."""
-        graph = self.get_object()
-        nodes = graph.nodes.order_by("created_at")
-        edges = graph.edges.select_related("source", "target").order_by(
-            "source__slug", "target__slug"
-        )
-        tools_qs = Tool.objects.filter(company=graph.company).order_by("slug")
-        context = self.get_serializer_context()
-        payload = {
-            "graph": AgentGraphSerializer(graph, context=context).data,
-            "nodes": AgentNodeSerializer(nodes, many=True, context=context).data,
-            "edges": AgentEdgeSerializer(edges, many=True, context=context).data,
-            "tools": ToolSerializer(tools_qs, many=True, context=context).data,
-        }
-        return Response(payload, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["post"])
-    def activate(self, request, pk=None):
-        """Make this graph the single active graph for its company.
-
-        Clear-then-set order inside a transaction avoids transiently having two
-        active graphs (which the partial unique constraint would reject).
-        """
-        graph = self.get_object()
-
-        # A graph only routes in chat when it has a START node AND at least one
-        # STEP node (see chat.views._orchestrator_for). Activating a graph that
-        # lacks either would silently fall back to the plain RAG path, which
-        # looks like "activation did nothing". Reject it with a clear message so
-        # the canvas surfaces the real reason instead of appearing to succeed.
-        has_start = AgentNode.objects.filter(
-            graph=graph, kind=AgentNode.KIND_START
-        ).exists()
-        has_step = AgentNode.objects.filter(
-            graph=graph, kind=AgentNode.KIND_STEP
-        ).exists()
-        if not (has_start and has_step):
-            missing = []
-            if not has_start:
-                missing.append("a START node")
-            if not has_step:
-                missing.append("at least one STEP node")
-            return Response(
-                {
-                    "detail": (
-                        "This graph is not runnable yet: add "
-                        + " and ".join(missing)
-                        + " before activating."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        with transaction.atomic():
-            AgentGraph.objects.filter(
-                company=graph.company, is_active=True
-            ).exclude(pk=graph.pk).update(is_active=False)
-            graph.is_active = True
-            graph.save(actor=request.user, update_fields=["is_active", "updated_at", "updated_by"])
-        return Response(
-            self.get_serializer(graph).data, status=status.HTTP_200_OK
-        )
-
-
-class AgentNodeViewSet(ScopedModelViewSet):
-    queryset = AgentNode.objects.all()
-    serializer_class = AgentNodeSerializer
-
-
-class AgentEdgeViewSet(ScopedModelViewSet):
-    queryset = AgentEdge.objects.all()
-    serializer_class = AgentEdgeSerializer
+    Mirrors ``LangGraphChatService._walk_chain``: follows ``next_node_id`` via
+    the default manager (so soft-deleted hops terminate the walk), guards cycles
+    with a ``seen`` set and a hop cap. Returns the ordered list of Agent rows.
+    """
+    chain = []
+    seen = set()
+    current = entry
+    hops = 0
+    company_id = getattr(entry, "company_id", None)
+    cap = (
+        Agent.objects.filter(company_id=company_id).count() * 2 + 1
+        if company_id is not None
+        else Agent.objects.count() * 2 + 1
+    )
+    while current is not None and current.pk not in seen and hops <= cap:
+        chain.append(current)
+        seen.add(current.pk)
+        hops += 1
+        if current.connected_to_end:
+            break
+        next_id = current.next_node_id
+        current = Agent.objects.filter(pk=next_id).first() if next_id else None
+    return chain
 
 
 class ToolViewSet(ScopedModelViewSet):
     queryset = Tool.objects.all()
     serializer_class = ToolSerializer
 
-    @action(detail=False, methods=["post"])
-    def sync_langfuse(self, request):
-        """Upsert prompt-only Tools from client-posted Langfuse prompt names.
 
-        langfuse 4.18.0 has NO prompt-listing API, so the posted-names path is
-        the only viable one: the canvas sends the prompt names it knows about.
-        With no names this is a graceful no-op returning the company's current
-        tools. Each name becomes an idempotent prompt-only Tool (existing rows
-        are left untouched).
+class AgentViewSet(ScopedModelViewSet):
+    queryset = Agent.objects.all()
+    serializer_class = AgentSerializer
+
+    def _resolve_entry_for(self, target):
+        """Resolve the flow entry (forward-only) whose chain contains ``target``.
+
+        If the target is itself an entry (``connected_from_start``), it is the
+        entry. Otherwise iterate the company's candidate entries ordered by
+        ``order, created_at`` and return the first whose forward chain contains
+        the target's pk. Returns ``None`` when no entry reaches the target.
         """
-        context = self.get_serializer_context()
-        serializer = ToolSerializer(context=context)
+        if target.connected_from_start:
+            return target
+        candidates = Agent.objects.filter(
+            company=target.company, connected_from_start=True
+        ).order_by("order", "created_at")
+        for candidate in candidates:
+            chain = _walk_chain(candidate)
+            if any(a.pk == target.pk for a in chain):
+                return candidate
+        return None
 
-        # Resolve the company the same way create does: an explicit company id
-        # from the request (body or ?company= querystring) is validated against
-        # ownership; only when none is supplied do we fall back to the user's
-        # single owned company. Without this, a multi-company user hit
-        # "ambiguous; specify a company" because sync_langfuse passed None even
-        # though the canvas sends the active company.
-        supplied_id = (
-            request.data.get("company")
-            or request.query_params.get("company")
+    @action(detail=True, methods=["post"])
+    def activate(self, request, pk=None):
+        """Make the target's flow the single active flow for its company.
+
+        Resolves the flow entry forward-only, then clears any other active agent
+        for the company and marks the entry active inside one transaction.
+        """
+        target = self.get_object()
+        entry = self._resolve_entry_for(target)
+        if entry is None:
+            return Response(
+                {
+                    "detail": (
+                        "This agent is not part of a flow with a start node; "
+                        "cannot activate."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            Agent.objects.filter(company=entry.company).exclude(
+                pk=entry.pk
+            ).update(is_active=False)
+            entry.is_active = True
+            entry.save(
+                actor=request.user,
+                update_fields=["is_active", "updated_at", "updated_by"],
+            )
+        return Response(
+            self.get_serializer(entry).data, status=status.HTTP_200_OK
+        )
+
+    @action(detail=False, methods=["get"])
+    def load(self, request):
+        """Return the canvas payload for the company's active (or first) flow."""
+        context = self.get_serializer_context()
+        serializer = AgentSerializer(context=context)
+
+        supplied_id = request.query_params.get("company") or request.data.get(
+            "company"
         )
         supplied = None
         if supplied_id:
@@ -132,31 +116,41 @@ class ToolViewSet(ScopedModelViewSet):
             supplied = Company.objects.filter(pk=supplied_id).first()
         company = serializer._resolve_company(supplied)
 
-        names = request.data.get("prompt_names") or []
-        if isinstance(names, str):
-            names = [names]
-
-        with transaction.atomic():
-            for raw in names:
-                name = (raw or "").strip()
-                if not name:
-                    continue
-                slug = slugify(name)[:64]
-                if not slug:
-                    continue
-                Tool.objects.get_or_create(
-                    company=company,
-                    slug=slug,
-                    defaults={
-                        "name": name,
-                        "prompt_name": name,
-                        "is_enabled": True,
-                        "config": {"source": "langfuse", "kind": "prompt_only"},
-                        "created_by": request.user,
-                        "updated_by": request.user,
-                    },
-                )
-
         tools_qs = Tool.objects.filter(company=company).order_by("slug")
-        data = ToolSerializer(tools_qs, many=True, context=context).data
-        return Response(data, status=status.HTTP_200_OK)
+        tools_data = ToolSerializer(tools_qs, many=True, context=context).data
+
+        entry = (
+            Agent.objects.filter(
+                company=company, connected_from_start=True, is_active=True
+            )
+            .order_by("order", "created_at")
+            .first()
+        )
+        if entry is None:
+            entry = (
+                Agent.objects.filter(company=company, connected_from_start=True)
+                .order_by("order", "created_at")
+                .first()
+            )
+
+        if entry is None:
+            return Response(
+                {
+                    "entry_id": None,
+                    "is_active": False,
+                    "agents": [],
+                    "tools": tools_data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        chain = _walk_chain(entry)
+        return Response(
+            {
+                "entry_id": str(entry.pk),
+                "is_active": bool(entry.is_active),
+                "agents": AgentSerializer(chain, many=True, context=context).data,
+                "tools": tools_data,
+            },
+            status=status.HTTP_200_OK,
+        )

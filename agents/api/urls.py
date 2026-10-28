@@ -2,17 +2,10 @@
 
 from rest_framework.routers import SimpleRouter
 
-from .views import (
-    AgentEdgeViewSet,
-    AgentGraphViewSet,
-    AgentNodeViewSet,
-    ToolViewSet,
-)
+from .views import AgentViewSet, ToolViewSet
 
 router = SimpleRouter(trailing_slash=True)
-router.register("graph", AgentGraphViewSet, basename="agent-graph")
-router.register("node", AgentNodeViewSet, basename="agent-node")
-router.register("edge", AgentEdgeViewSet, basename="agent-edge")
 router.register("tool", ToolViewSet, basename="tool")
+router.register("agent", AgentViewSet, basename="agent")
 
 urlpatterns = router.urls

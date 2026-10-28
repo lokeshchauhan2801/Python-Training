@@ -37,22 +37,14 @@ def _orchestrator_for(company, llm_client=None):
         return _chat_service()
 
     try:
-        from agents.models import AgentGraph, AgentNode
+        from agents.models import Agent
 
-        graph = (
-            AgentGraph.objects.filter(company=company, is_active=True)
-            .order_by("-created_at")
-            .first()
-        )
-        if graph is None:
-            return _rag_service()
-        has_start = AgentNode.objects.filter(
-            graph=graph, kind=AgentNode.KIND_START
+        has_flow = Agent.objects.filter(
+            company=company,
+            connected_from_start=True,
+            is_active=True,
         ).exists()
-        has_step = AgentNode.objects.filter(
-            graph=graph, kind=AgentNode.KIND_STEP
-        ).exists()
-        if not (has_start and has_step):
+        if not has_flow:
             return _rag_service()
 
         from chat.services.langgraph_service import LangGraphChatService
@@ -63,7 +55,7 @@ def _orchestrator_for(company, llm_client=None):
             langfuse=get_langfuse_client(),
         )
     except Exception:
-        logger.debug("agents graph lookup failed; using ChatService", exc_info=True)
+        logger.debug("agents flow lookup failed; using ChatService", exc_info=True)
         return _rag_service()
 
 

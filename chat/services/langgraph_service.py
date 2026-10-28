@@ -142,7 +142,7 @@ class LangGraphChatService:
 
         history_text = self._history_text(conversation)
 
-        step_node, enabled_tools = self._resolve_step_and_tools(company)
+        entry_agent, enabled_tools = self._resolve_step_and_tools(company)
 
 
         try:
@@ -154,7 +154,7 @@ class LangGraphChatService:
                 attachment_ids=attachment_ids,
                 model_name=model_name,
                 history_text=history_text,
-                step_node=step_node,
+                entry_agent=entry_agent,
                 enabled_tools=enabled_tools,
                 llm=llm,
             )
@@ -220,13 +220,11 @@ class LangGraphChatService:
         attachment_ids,
         model_name,
         history_text,
-        step_node,
+        entry_agent,
         enabled_tools,
         llm,
     ):
-        from agents.models import AgentEdge, AgentNode
-
-        node_slug = step_node.slug
+        node_slug = entry_agent.slug
 
 
         outcome = {
@@ -251,7 +249,7 @@ class LangGraphChatService:
                 langfuse=self._langfuse,
             )
 
-        tool_rows = {t.slug: t for t in step_node.tools.all()}
+        tool_rows = {t.slug: t for t in entry_agent.tools.all()}
 
         def _execute(slug):
             """Run the handler for ``slug`` (or the direct handler) -> ToolResult."""
@@ -262,9 +260,7 @@ class LangGraphChatService:
 
 
                 prompt_only = (
-                    tool_row is not None
-                    and isinstance(tool_row.config, dict)
-                    and tool_row.config.get("kind") == "prompt_only"
+                    tool_row is not None and tool_row.type == "langfuse"
                 )
                 handler = get_handler(
                     "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
@@ -301,7 +297,7 @@ class LangGraphChatService:
                     message_text=message_text,
                     history_text=history_text,
                     enabled_tools=enabled_tools,
-                    step_node=step_node,
+                    entry_agent=entry_agent,
                     tool_rows=tool_rows,
                     llm=llm,
                     has_attachment=has_attachment,
@@ -319,20 +315,11 @@ class LangGraphChatService:
             }
 
 
-        graph = step_node.graph
-        nodes = list(
-            AgentNode.objects.filter(graph=graph).order_by("slug")
-        )
-        edges = list(
-            AgentEdge.objects.filter(graph=graph)
-            .select_related("source", "target")
-            .order_by("source__slug", "target__slug")
-        )
+        chain = self._walk_chain(entry_agent)
 
         app = self._build_graph(
-            nodes=nodes,
-            edges=edges,
-            step_slug=node_slug,
+            chain=chain,
+            entry_slug=node_slug,
             router_body=_router_body,
         )
 
@@ -356,46 +343,66 @@ class LangGraphChatService:
             outcome["route_reason"] = "no router node executed; answered directly"
         return outcome
 
-    def _build_graph(self, *, nodes, edges, step_slug, router_body):
-        """Compile a generic ``StateGraph`` from node/edge rows.
+    def _walk_chain(self, entry):
+        """Forward-walk the Agent ``next_node`` chain from ``entry``.
 
-        ``langgraph`` is imported HERE (lazily) so importing this module stays
-        SDK-free. Edges are followed in deterministic ``(source_slug,
-        target_slug)`` order; the per-node router routes to the first not-yet-
-        visited target, else END. The ``visited`` set + ``MAX_HOPS`` hop cap
-        guarantee termination even if the admin wired a cycle.
+        Follows ``next_node_id`` via the DEFAULT manager (``Agent.objects``, NOT
+        the FK descriptor) so a soft-deleted next hop is hidden and terminates
+        the walk at its predecessor. A ``seen`` set + hop cap guarantee
+        termination even if an admin wired a cycle (A->B->A). Returns the ordered
+        list of Agent rows ``[entry, n1, n2, ..., last]``.
+        """
+        from agents.models import Agent
+
+        chain = []
+        seen = set()
+        current = entry
+        hops = 0
+        company_id = getattr(entry, "company_id", None)
+        cap = (
+            Agent.objects.filter(company_id=company_id).count() * 2 + 1
+            if company_id is not None
+            else Agent.objects.count() * 2 + 1
+        )
+        while current is not None and current.pk not in seen and hops <= cap:
+            chain.append(current)
+            seen.add(current.pk)
+            hops += 1
+            if current.connected_to_end:
+                break
+            next_id = current.next_node_id
+            current = (
+                Agent.objects.filter(pk=next_id).first() if next_id else None
+            )
+        return chain
+
+    def _build_graph(self, *, chain, entry_slug, router_body):
+        """Compile a ``StateGraph`` from the linear Agent chain.
+
+        Each Agent row is a node; edges are START -> entry, agent -> next in the
+        chain, and the final agent -> END (forced for a ``connected_to_end``
+        agent). ``langgraph`` is imported HERE (lazily) so importing this module
+        stays SDK-free. Only the entry runs the router; every other node is a
+        pass-through. The chooser's visited check + ``max_hops`` cap guarantee
+        termination even under an accidental cycle.
         """
         from langgraph.graph import END, START, StateGraph
 
-
-        kind_by_slug = {n.slug: n.kind for n in nodes}
-        start_slug = next((n.slug for n in nodes if n.kind == "start"), None)
-
-        def _resolve(slug):
-
-
-            kind = kind_by_slug.get(slug)
-            if kind == "start":
-                return START
-            if kind == "end":
-                return END
-            return slug
-
-        step_slugs = [n.slug for n in nodes if kind_by_slug.get(n.slug) == "step"]
-        node_count = max(len(step_slugs), 1)
+        slugs = [a.slug for a in chain]
+        node_count = max(len(slugs), 1)
         max_hops = 2 * node_count + 1
 
-
-        adjacency: dict[object, list[object]] = {}
-        for edge in edges:
-            src = _resolve(edge.source.slug)
-            tgt = _resolve(edge.target.slug)
-            adjacency.setdefault(src, []).append(tgt)
+        # Linear adjacency from the chain order (deterministic). A
+        # connected_to_end agent forces END regardless of its position.
+        next_of = {}
+        for i, agent in enumerate(chain):
+            nxt = slugs[i + 1] if i + 1 < len(slugs) else END
+            next_of[agent.slug] = END if agent.connected_to_end else nxt
 
         builder = StateGraph(GraphState)
 
         def _make_node(slug):
-            is_router = slug == step_slug
+            is_router = slug == entry_slug
 
             def _node(state):
                 state = dict(state)
@@ -409,37 +416,37 @@ class LangGraphChatService:
 
             return _node
 
-
-        for slug in step_slugs:
+        for slug in slugs:
             builder.add_node(slug, _make_node(slug))
 
-
-        start_targets = adjacency.get(START, [])
-        entry = next((t for t in start_targets if t in step_slugs), None)
-        if entry is None:
-            entry = step_slugs[0] if step_slugs else END
+        # START -> entry (never route INTO start; entry is a real step).
+        entry = entry_slug if entry_slug in slugs else (slugs[0] if slugs else END)
         builder.add_edge(START, entry)
 
         def _make_choice(slug):
-            targets = adjacency.get(slug, [])
+            target = next_of.get(slug, END)
 
             def _choose(state):
+                # Checks in THIS exact precedence:
+                #   1. hop cap exceeded       -> END
+                #   2. target is END          -> END   (never route OUT of end)
+                #   3. target already visited -> END   (drop a cyclic edge)
+                #   4. otherwise              -> target (advance one hop)
                 if state.get("hops", 0) > max_hops:
                     return END
-                visited = state.get("visited") or []
-                for tgt in targets:
-
-                    if tgt == END or tgt not in visited:
-                        return tgt
-                return END
+                if target == END:
+                    return END
+                if target in (state.get("visited") or []):
+                    return END
+                return target
 
             return _choose
 
-
-        for slug in step_slugs:
-            targets = adjacency.get(slug, [])
-            mapping = {t: t for t in targets if t in step_slugs}
-            mapping[END] = END
+        for slug in slugs:
+            target = next_of.get(slug, END)
+            mapping = {END: END}
+            if target in slugs:
+                mapping[target] = target
             builder.add_conditional_edges(slug, _make_choice(slug), mapping)
 
         return builder.compile()
@@ -451,7 +458,7 @@ class LangGraphChatService:
         message_text,
         history_text,
         enabled_tools,
-        step_node,
+        entry_agent,
         tool_rows,
         llm,
         has_attachment=False,
@@ -477,7 +484,7 @@ class LangGraphChatService:
             if has_attachment
             else "Attachment note: no file is attached on this message."
         )
-        prompt_name = step_node.prompt_name or "agent_router"
+        prompt_name = "agent_router"
         template = self._langfuse.get_prompt(
             prompt_name, fallback=_FALLBACK_ROUTER_PROMPT
         )
@@ -530,39 +537,32 @@ class LangGraphChatService:
 
 
     def _resolve_step_and_tools(self, company):
-        """Return ``(step_node, enabled_tools)`` for the company's active graph.
+        """Return ``(entry_agent, enabled_tools)`` for the company's active flow.
 
-        ``_orchestrator_for`` only routes here when a runnable graph exists, but
-        this re-resolves defensively. ``enabled_tools`` is the intersection of
-        the STEP node's attached tools, globally ``is_enabled`` tools, and
-        registry-resolvable slugs. May be empty (router forces ``__direct__``).
+        ``_orchestrator_for`` only routes here when an active entry Agent exists,
+        but this re-resolves defensively. ``enabled_tools`` is the intersection
+        of the entry agent's attached ``is_enabled`` tools with slugs that are
+        registry-resolvable OR ``type == "langfuse"`` (prompt-only). May be empty
+        (the router then forces ``__direct__``).
         """
-        from agents.models import AgentGraph, AgentNode
+        from agents.models import Agent
 
-        graph = (
-            AgentGraph.objects.filter(company=company, is_active=True)
-            .order_by("-created_at")
-            .first()
-        )
-        step_node = (
-            AgentNode.objects.filter(graph=graph, kind=AgentNode.KIND_STEP)
-            .order_by("created_at")
+        entry = (
+            Agent.objects.filter(
+                company=company, connected_from_start=True, is_active=True
+            )
+            .order_by("order", "created_at")
             .first()
         )
         slugs = available_slugs()
         enabled = []
         seen = set()
-        for tool in step_node.tools.filter(is_enabled=True):
-
-
-            prompt_only = (
-                isinstance(tool.config, dict)
-                and tool.config.get("kind") == "prompt_only"
-            )
-            if (tool.slug in slugs or prompt_only) and tool.slug not in seen:
+        for tool in entry.tools.filter(is_enabled=True):
+            is_prompt_only = tool.type == "langfuse"
+            if (tool.slug in slugs or is_prompt_only) and tool.slug not in seen:
                 enabled.append(tool.slug)
                 seen.add(tool.slug)
-        return step_node, enabled
+        return entry, enabled
 
     def _history_text(self, conversation):
         """Build the condensed conversation context, mirroring the RAG path."""

@@ -4,26 +4,7 @@ from django.contrib import admin
 
 from basics.admin import BaseModelAdmin
 
-from .models import AgentEdge, AgentGraph, AgentNode, Tool
-
-
-@admin.register(AgentGraph)
-class AgentGraphAdmin(BaseModelAdmin):
-    list_display = (
-        "id_short",
-        "name",
-        "is_active",
-        "company",
-        "created_by",
-        "created_at",
-    )
-    list_filter = ("is_active", "company", "is_deleted", "created_at")
-    search_fields = ("name", "description")
-    date_hierarchy = "created_at"
-
-    @admin.display(description="ID")
-    def id_short(self, obj):
-        return str(obj.pk)[:8]
+from .models import Agent, Tool
 
 
 @admin.register(Tool)
@@ -32,12 +13,13 @@ class ToolAdmin(BaseModelAdmin):
         "id_short",
         "name",
         "slug",
+        "type",
         "is_enabled",
         "company",
         "created_by",
         "created_at",
     )
-    list_filter = ("is_enabled", "slug", "company", "is_deleted", "created_at")
+    list_filter = ("type", "is_enabled", "company", "is_deleted", "created_at")
     search_fields = ("name", "slug", "description")
     date_hierarchy = "created_at"
 
@@ -46,39 +28,29 @@ class ToolAdmin(BaseModelAdmin):
         return str(obj.pk)[:8]
 
 
-@admin.register(AgentNode)
-class AgentNodeAdmin(BaseModelAdmin):
+@admin.register(Agent)
+class AgentAdmin(BaseModelAdmin):
     list_display = (
         "id_short",
         "slug",
-        "kind",
-        "graph",
+        "name",
+        "connected_from_start",
+        "connected_to_end",
+        "is_active",
+        "order",
         "company",
-        "created_by",
         "created_at",
     )
-    list_filter = ("kind", "graph", "company", "is_deleted", "created_at")
-    search_fields = ("slug", "label", "prompt_name")
-    date_hierarchy = "created_at"
-
-    @admin.display(description="ID")
-    def id_short(self, obj):
-        return str(obj.pk)[:8]
-
-
-@admin.register(AgentEdge)
-class AgentEdgeAdmin(BaseModelAdmin):
-    list_display = (
-        "id_short",
-        "graph",
-        "source",
-        "target",
+    list_filter = (
+        "connected_from_start",
+        "connected_to_end",
+        "is_active",
         "company",
-        "created_by",
+        "is_deleted",
         "created_at",
     )
-    list_filter = ("graph", "company", "is_deleted", "created_at")
-    search_fields = ("condition",)
+    search_fields = ("slug", "name")
+    filter_horizontal = ("tools",)
     date_hierarchy = "created_at"
 
     @admin.display(description="ID")

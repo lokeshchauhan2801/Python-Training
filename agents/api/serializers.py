@@ -5,7 +5,7 @@ from rest_framework import serializers
 from basics.api.serializers import AuditReadOnlySerializerMixin
 from chat.api.serializers import RequiredCompanyResolutionMixin
 
-from ..models import AgentEdge, AgentGraph, AgentNode, Tool
+from ..models import Agent, Tool
 
 
 class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
@@ -22,7 +22,6 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
         if "company" in self.fields:
             self.fields["company"].required = False
 
-
         from rest_framework.validators import UniqueTogetherValidator
 
         self.validators = [
@@ -37,8 +36,6 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         if self.instance is None and "company" not in attrs:
-
-
             attrs["company"] = self._default_company(attrs)
         return attrs
 
@@ -46,8 +43,6 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
         """Company to use when the client omits one on create.
 
         Default: the user's active/single owned company (``_resolve_company``).
-        Subclasses whose company is determined by a parent row override this
-        (see AgentNodeSerializer / AgentEdgeSerializer -> the graph's company).
         """
         return self._resolve_company(None)
 
@@ -62,34 +57,6 @@ class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
         return attrs.get("company")
 
 
-class AgentGraphSerializer(
-    _CompanyScopedSerializerMixin,
-    AuditReadOnlySerializerMixin,
-    serializers.ModelSerializer,
-):
-    class Meta:
-        model = AgentGraph
-        fields = [
-            "id",
-            "name",
-            "is_active",
-            "description",
-            "company",
-            "created_at",
-            "updated_at",
-            "created_by",
-            "updated_by",
-            "is_deleted",
-            "deleted_at",
-        ]
-
-    def validate_name(self, value):
-
-        if self.instance is None and not (value or "").strip():
-            raise serializers.ValidationError("This field may not be blank.")
-        return value
-
-
 class ToolSerializer(
     _CompanyScopedSerializerMixin,
     AuditReadOnlySerializerMixin,
@@ -101,10 +68,9 @@ class ToolSerializer(
             "id",
             "slug",
             "name",
+            "type",
             "description",
             "is_enabled",
-            "config",
-            "prompt_name",
             "company",
             "created_at",
             "updated_at",
@@ -114,52 +80,44 @@ class ToolSerializer(
             "deleted_at",
         ]
 
-    def validate_config(self, value):
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("config must be an object.")
-        return value
-
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
-
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        config = attrs.get("config")
-        if config is None and self.instance is not None:
-            config = self.instance.config
-        prompt_only = (
-            isinstance(config, dict) and config.get("kind") == "prompt_only"
-        )
-
+        tool_type = attrs.get("type") or (self.instance and self.instance.type)
 
         from chat.services.langgraph_service import available_slugs
 
-        if slug and slug not in available_slugs() and not prompt_only:
+        if (
+            tool_type != Tool.TYPE_LANGFUSE
+            and slug
+            and slug not in available_slugs()
+        ):
             raise serializers.ValidationError(
                 {"slug": f"Unknown tool slug '{slug}' (no handler registered)."}
             )
         return attrs
 
 
-class AgentNodeSerializer(
+class AgentSerializer(
     _CompanyScopedSerializerMixin,
     AuditReadOnlySerializerMixin,
     serializers.ModelSerializer,
 ):
     class Meta:
-        model = AgentNode
+        model = Agent
         fields = [
             "id",
-            "graph",
             "slug",
-            "kind",
-            "label",
+            "name",
             "tools",
-            "prompt_name",
-            "position",
-            "config",
+            "connected_from_start",
+            "connected_to_end",
+            "next_node",
+            "position_x",
+            "position_y",
+            "order",
+            "is_active",
             "company",
             "created_at",
             "updated_at",
@@ -168,21 +126,7 @@ class AgentNodeSerializer(
             "is_deleted",
             "deleted_at",
         ]
-
-    def validate_position(self, value):
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("position must be an object.")
-        return value
-
-    def _in_scope_graphs(self):
-        request = self.context["request"]
-        user = request.user
-        qs = AgentGraph.objects.all()
-        if not user.is_superuser:
-            qs = qs.filter(company__owner=user)
-        return qs
+        read_only_fields = ["is_active"]
 
     def _in_scope_tools(self):
         request = self.context["request"]
@@ -192,10 +136,13 @@ class AgentNodeSerializer(
             qs = qs.filter(company__owner=user)
         return qs
 
-    def validate_graph(self, value):
-        if not self._in_scope_graphs().filter(pk=value.pk).exists():
-            raise serializers.ValidationError("not found or not owned")
-        return value
+    def _in_scope_agents(self):
+        request = self.context["request"]
+        user = request.user
+        qs = Agent.objects.all()
+        if not user.is_superuser:
+            qs = qs.filter(company__owner=user)
+        return qs
 
     def validate_tools(self, value):
         in_scope = set(
@@ -210,29 +157,29 @@ class AgentNodeSerializer(
                 )
         return value
 
-    def _default_company(self, attrs):
-
-
-        graph = attrs.get("graph")
-        if graph is not None:
-            return graph.company
-        return super()._default_company(attrs)
+    def validate_next_node(self, value):
+        if value is None:
+            return value
+        if self.instance is not None and value.pk == self.instance.pk:
+            raise serializers.ValidationError(
+                "an agent cannot point its next_node at itself"
+            )
+        if not self._in_scope_agents().filter(pk=value.pk).exists():
+            raise serializers.ValidationError("not found or not owned")
+        return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        graph = attrs.get("graph") or (self.instance and self.instance.graph)
-
-
-        if self.instance is None and graph is not None:
-            attrs["company"] = graph.company
         company = self._scoped_company(attrs)
 
-
-        if graph is not None and company is not None and graph.company_id != getattr(
-            company, "pk", None
+        next_node = attrs.get("next_node")
+        if (
+            next_node is not None
+            and company is not None
+            and next_node.company_id != getattr(company, "pk", None)
         ):
             raise serializers.ValidationError(
-                {"company": "node company must match graph company"}
+                {"next_node": "next_node must belong to the agent's company"}
             )
 
         tools = attrs.get("tools")
@@ -240,109 +187,16 @@ class AgentNodeSerializer(
             for tool in tools:
                 if tool.company_id != getattr(company, "pk", None):
                     raise serializers.ValidationError(
-                        {"tools": "every tool must belong to the node's company"}
+                        {"tools": "every tool must belong to the agent's company"}
                     )
 
-
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        if graph is not None and slug:
-            clash = AgentNode.objects.filter(graph=graph, slug=slug)
+        if company is not None and slug:
+            clash = Agent.objects.filter(company=company, slug=slug)
             if self.instance is not None:
                 clash = clash.exclude(pk=self.instance.pk)
             if clash.exists():
                 raise serializers.ValidationError(
-                    {"slug": "a node with this slug already exists in the graph"}
+                    {"slug": "an agent with this slug already exists for the company"}
                 )
-        return attrs
-
-
-class AgentEdgeSerializer(
-    _CompanyScopedSerializerMixin,
-    AuditReadOnlySerializerMixin,
-    serializers.ModelSerializer,
-):
-    class Meta:
-        model = AgentEdge
-        fields = [
-            "id",
-            "graph",
-            "source",
-            "target",
-            "condition",
-            "company",
-            "created_at",
-            "updated_at",
-            "created_by",
-            "updated_by",
-            "is_deleted",
-            "deleted_at",
-        ]
-
-    def _in_scope_graphs(self):
-        request = self.context["request"]
-        user = request.user
-        qs = AgentGraph.objects.all()
-        if not user.is_superuser:
-            qs = qs.filter(company__owner=user)
-        return qs
-
-    def _in_scope_nodes(self):
-        request = self.context["request"]
-        user = request.user
-        qs = AgentNode.objects.all()
-        if not user.is_superuser:
-            qs = qs.filter(company__owner=user)
-        return qs
-
-    def validate_graph(self, value):
-        if not self._in_scope_graphs().filter(pk=value.pk).exists():
-            raise serializers.ValidationError("not found or not owned")
-        return value
-
-    def validate_source(self, value):
-        if not self._in_scope_nodes().filter(pk=value.pk).exists():
-            raise serializers.ValidationError("not found or not owned")
-        return value
-
-    def validate_target(self, value):
-        if not self._in_scope_nodes().filter(pk=value.pk).exists():
-            raise serializers.ValidationError("not found or not owned")
-        return value
-
-    def _default_company(self, attrs):
-
-
-        graph = attrs.get("graph")
-        if graph is not None:
-            return graph.company
-        return super()._default_company(attrs)
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        source = attrs.get("source") or (self.instance and self.instance.source)
-        target = attrs.get("target") or (self.instance and self.instance.target)
-        graph = attrs.get("graph") or (self.instance and self.instance.graph)
-
-
-        if self.instance is None and graph is not None:
-            attrs["company"] = graph.company
-
-        if source is not None and target is not None and source.pk == target.pk:
-            raise serializers.ValidationError(
-                {"target": "an edge cannot connect a node to itself"}
-            )
-
-        if (
-            source is not None
-            and target is not None
-            and source.graph_id != target.graph_id
-        ):
-            raise serializers.ValidationError(
-                {"target": "an edge must connect nodes of the same graph"}
-            )
-
-        if graph is not None and source is not None and source.graph_id != graph.pk:
-            raise serializers.ValidationError(
-                {"graph": "edge graph must match the source/target graph"}
-            )
         return attrs
