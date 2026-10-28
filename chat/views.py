@@ -74,9 +74,8 @@ def _valid_ulid(value):
 def _resolve_session(request, session_id):
     """Resolve a session within the request's scope or raise 404.
 
-    The ``session_id`` argument is the session's primary key (``id``). (The
-    ULID ``id`` is the single session identifier; the old separate
-    ``session_id`` field was removed.)
+    The ``session_id`` argument is the session's primary key, which is the
+    ULID ``session_id`` field (the single session identifier).
     """
     if not _valid_ulid(session_id):
         raise Http404("Invalid session id.")
@@ -114,8 +113,8 @@ def _turn_payload(turn):
         "id": f"{turn.id}:a",
         "role": "assistant",
         "content": turn.response,
-        "citations": turn.citations or [],
-        "chart_data": turn.chart_data,
+        "citations": turn.context.get("citations", []),
+        "chart_data": turn.context.get("chart"),
         "metadata": turn.metadata or {},
         "model_name": turn.model_name,
         "attachments": [],
@@ -231,7 +230,7 @@ def chat_session(request, session_id):
 
     active = active_or_none(request)
     in_active_company = active is not None and session.company_id == active.id
-    preselect = str(session.id) if in_active_company else ""
+    preselect = str(session.session_id) if in_active_company else ""
 
     context = {
         **admin.site.each_context(request),
@@ -265,7 +264,7 @@ def sessions_json(request):
 
     payload = [
         {
-            "id": str(session.id),
+            "id": str(session.session_id),
             "title": session.title,
             "company_id": str(session.company_id),
             "created_at": session.created_at.isoformat(),
@@ -282,7 +281,7 @@ def messages_json(request, session_id):
     messages = _turns_to_messages(session.turns.order_by("created_at"))
     return JsonResponse(
         {
-            "id": str(session.id),
+            "id": str(session.session_id),
             "title": session.title,
             "company_id": str(session.company_id),
             "messages": messages,
@@ -320,7 +319,7 @@ def new_session(request):
 
     return JsonResponse(
         {
-            "id": str(session.id),
+            "id": str(session.session_id),
             "title": session.title,
             "company_id": str(session.company_id),
         },
@@ -370,7 +369,7 @@ def _turn_response(request, session, turn):
         {
             "user": pair["user"],
             "assistant": pair["assistant"],
-            "session": {"id": str(session.id), "title": session.title},
+            "session": {"id": str(session.session_id), "title": session.title},
         },
         status=201,
     )
@@ -605,7 +604,7 @@ def send(request, session_id):
         {
             "user": pair["user"],
             "assistant": pair["assistant"],
-            "session": {"id": str(session.id), "title": session.title},
+            "session": {"id": str(session.session_id), "title": session.title},
         },
         status=201,
     )
@@ -644,7 +643,7 @@ def delete_session(request, session_id):
         session.hard_delete()
 
     return JsonResponse(
-        {"id": str(session.id), "deleted": True, "soft": soft}
+        {"id": str(session.session_id), "deleted": True, "soft": soft}
     )
 
 

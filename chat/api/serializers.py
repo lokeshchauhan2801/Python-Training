@@ -49,17 +49,19 @@ class ConversationSessionSerializer(
     AuditReadOnlySerializerMixin,
     serializers.ModelSerializer,
 ):
+    # The session PK is now the ULID field ``session_id``. We keep the external
+    # API key ``id`` (sourced from ``session_id``) so existing API/frontend
+    # consumers that read ``session.id`` keep working unchanged.
+    id = serializers.CharField(source="session_id", read_only=True)
+
     class Meta:
         model = ConversationSession
         fields = [
             "id",
             "title",
-            "content",
             "user",
             "company",
-            "model_name",
             "context",
-            "media",
             "metadata",
             "summary",
             "created_at",
@@ -95,6 +97,12 @@ class ConversationSessionSerializer(
 class ConversationSerializer(
     AuditReadOnlySerializerMixin, serializers.ModelSerializer
 ):
+    # ``chart_data`` and ``citations`` no longer have their own columns; they
+    # live in ``context`` under the reserved keys ``"chart"``/``"citations"``.
+    # We keep the same external API keys so the frontend contract is unchanged.
+    chart_data = serializers.SerializerMethodField()
+    citations = serializers.SerializerMethodField()
+
     class Meta:
         model = Conversation
         fields = [
@@ -106,7 +114,6 @@ class ConversationSerializer(
             "question",
             "response",
             "context",
-            "media",
             "metadata",
             "citations",
             "chart_data",
@@ -117,6 +124,12 @@ class ConversationSerializer(
             "is_deleted",
             "deleted_at",
         ]
+
+    def get_chart_data(self, obj):
+        return obj.context.get("chart")
+
+    def get_citations(self, obj):
+        return obj.context.get("citations", [])
 
 
 class AskSerializer(serializers.Serializer):
