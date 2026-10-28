@@ -8,7 +8,7 @@ from basics.ulid import ULIDField
 
 
 class ConversationSession(BaseModel, SoftDeleteModel):
-    id = ULIDField()
+    session_id = ULIDField()
     company = models.ForeignKey(
         "company.Company",
         on_delete=models.CASCADE,
@@ -16,15 +16,12 @@ class ConversationSession(BaseModel, SoftDeleteModel):
         db_index=True,
     )
     title = models.CharField(max_length=200, default="New session")
-    content = models.TextField(blank=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="chat_sessions",
     )
-    model_name = models.CharField(max_length=100, blank=True)
     context = models.JSONField(default=dict, blank=True)
-    media = models.JSONField(default=list, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
     summary = models.TextField(blank=True)
 
@@ -39,7 +36,7 @@ class ConversationSession(BaseModel, SoftDeleteModel):
         ]
 
     def __str__(self) -> str:
-        return self.title or str(self.id)
+        return self.title or str(self.session_id)
 
 
 class Conversation(BaseModel, SoftDeleteModel):
@@ -63,11 +60,11 @@ class Conversation(BaseModel, SoftDeleteModel):
     model_name = models.CharField(max_length=100, blank=True)
     question = models.TextField()
     response = models.TextField(blank=True)
+    # ``context`` also carries render-state under reserved keys: ``context["chart"]``
+    # (validated ChartData dict) and ``context["citations"]`` (citations list),
+    # relocated here from the former ``chart_data``/``citations`` columns.
     context = models.JSONField(default=dict, blank=True)
-    media = models.JSONField(default=list, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
-    citations = models.JSONField(default=list, blank=True)
-    chart_data = models.JSONField(null=True, blank=True)
     documents = models.ManyToManyField(
         "documents.Document",
         related_name="conversation_turns",
@@ -86,8 +83,10 @@ class Conversation(BaseModel, SoftDeleteModel):
 
     def __str__(self) -> str:
         return f"{self.session_id}: {self.question[:50]}"
-    # NOTE: here ``session_id`` is the FK id of Conversation.session (auto
-    # attribute), NOT the removed ConversationSession.session_id field.
+    # NOTE: here ``self.session_id`` is the FK column of Conversation.session
+    # (Django's auto ``<field>_id`` attribute). It now references
+    # ConversationSession.session_id (the renamed ULID PK); the value is the
+    # same ULID, so this keeps working unchanged.
 
     def _validate_company_matches_session(self):
         """A turn must belong to the same company as its session."""
