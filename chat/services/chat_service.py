@@ -123,10 +123,9 @@ class ChatService:
         summary = self._llm.complete(messages)
 
         session.summary = summary
-        session.model_name = self._llm.model
         session.save(
             actor=actor,
-            update_fields=["summary", "model_name", "updated_at", "updated_by"],
+            update_fields=["summary", "updated_at", "updated_by"],
         )
         return summary
 
@@ -141,6 +140,7 @@ class ChatService:
         model_name=None,
         citations=None,
         chart_data=None,
+        context=None,
         metadata=None,
         attachment_ids=None,
         actor=None,
@@ -153,7 +153,25 @@ class ChatService:
         ``Conversation.save()``). The save is actor-aware so the audit columns
         are stamped from the acting user. Attachments (when given) are linked to
         the turn via its ``documents`` M2M and also stamped onto the session.
+
+        Chart/citations render-state no longer has its own columns: ``citations``
+        and ``chart_data`` are folded into the turn's ``context`` under the
+        reserved keys ``"citations"`` and ``"chart"`` (merged into any
+        caller-supplied ``context``, never clobbering it). ``chart_data`` is
+        expected to be an ALREADY-validated ChartData dict (callers validate
+        upstream via the Pydantic ``ChartData`` model); this method only stores
+        it.
         """
+        turn_context = dict(context or {})
+        # ``citations`` is always present (defaults to []) so the read path /
+        # serializer can rely on ``context.get("citations", [])``.
+        turn_context["citations"] = citations or []
+        # NOTE: ``context["chart"]`` is RENDER-STATE for the frontend, NOT prompt
+        # text. The key is written only when a chart exists and must never be
+        # serialized into an LLM prompt (prompt building reads only
+        # question/response text, never a turn's raw context dict).
+        if chart_data is not None:
+            turn_context["chart"] = chart_data
         turn = Conversation(
             company=session.company,
             session=session,
@@ -161,8 +179,7 @@ class ChatService:
             model_name=model_name or _DEFAULT_MODEL_NAME,
             question=question,
             response=response,
-            citations=citations or [],
-            chart_data=chart_data,
+            context=turn_context,
             metadata=metadata or {},
         )
         turn.save(actor=actor or user)
