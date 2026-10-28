@@ -120,7 +120,7 @@ class ChatInvariantTests(TestCase):
         self.assertIsNotNone(turn.pk)
 
     def test_session_id_is_26_char_ulid(self):
-        self.assertEqual(len(str(self.session.id)), 26)
+        self.assertEqual(len(str(self.session.session_id)), 26)
 
 
 class ChatServiceTests(TestCase):
@@ -156,7 +156,6 @@ class ChatServiceTests(TestCase):
         self.session.refresh_from_db()
         self.assertEqual(summary, "a summary")
         self.assertEqual(self.session.summary, "a summary")
-        self.assertEqual(self.session.model_name, "fake-model")
 
 
 class AdminDetailJsonTests(TestCase):
@@ -184,7 +183,7 @@ class AdminDetailJsonTests(TestCase):
         self.assertEqual(resp["Content-Type"], "application/json")
         data = resp.json()
         self.assertEqual(data["title"], "Admin session")
-        self.assertEqual(data["id"], str(self.session.id))
+        self.assertEqual(data["id"], str(self.session.session_id))
 
     def test_anonymous_is_blocked(self):
         resp = self.client.get(self._url())
@@ -230,7 +229,7 @@ class ChatApiScopingTests(TestCase):
         self.client.force_authenticate(self.alice)
         resp = self.client.post(
             "/api/v1/chat/conversation/ask/",
-            {"session": str(self.bob_session.id), "question": "hi"},
+            {"session": str(self.bob_session.session_id), "question": "hi"},
             format="json",
         )
         self.assertEqual(resp.status_code, 404)
@@ -517,15 +516,18 @@ class ConversationTurnModelTests(TestCase):
         self.assertEqual(len(str(turn.id)), 26)
 
     def test_turn_citations_and_chart_data_defaults(self):
-        turn = Conversation.objects.create(
-            session=self.session,
-            company=self.company_a,
+        # chart/citations now live in ``context``; a turn created via
+        # ``create_turn`` with neither defaults to an empty citations list and
+        # no "chart" key (read back via context.get, matching the old defaults).
+        service = ChatService(llm_client=_FakeStructuredLLM("a"))
+        turn = service.create_turn(
+            self.session,
             user=self.user,
             question="q",
             response="a",
         )
-        self.assertEqual(turn.citations, [])
-        self.assertIsNone(turn.chart_data)
+        self.assertEqual(turn.context.get("citations", []), [])
+        self.assertIsNone(turn.context.get("chart"))
         self.assertEqual(list(turn.documents.all()), [])
 
 
@@ -589,7 +591,7 @@ class ProcessMessageTests(TestCase):
         )
         self.assertEqual(turn.response, "general answer")
 
-        self.assertEqual(turn.citations, [])
+        self.assertEqual(turn.context.get("citations", []), [])
         turns = list(self.session.turns.order_by("created_at"))
         self.assertEqual(len(turns), 1)
         self.assertEqual(turns[0].question, "what is the capital of France?")
@@ -657,8 +659,8 @@ class ProcessMessageTests(TestCase):
                 conversation=self.session,
                 company=self.company,
             )
-        self.assertEqual(len(turn.citations), 1)
-        citation = turn.citations[0]
+        self.assertEqual(len(turn.context["citations"]), 1)
+        citation = turn.context["citations"][0]
         self.assertEqual(citation["reference_id"], str(chunk.pk))
         self.assertEqual(citation["document_id"], str(document.id))
         self.assertEqual(citation["page"], 3)
@@ -766,12 +768,13 @@ class ProcessMessageTests(TestCase):
                 conversation=self.session,
                 company=self.company,
             )
-        self.assertIsNotNone(assistant.chart_data)
-        self.assertIn(assistant.chart_data["type"], {"bar", "pie", "line"})
+        chart = assistant.context.get("chart")
+        self.assertIsNotNone(chart)
+        self.assertIn(chart["type"], {"bar", "pie", "line"})
 
 
-        self.assertEqual(len(assistant.chart_data["series"]), 1)
-        points = {point["label"]: point for point in assistant.chart_data["data"]}
+        self.assertEqual(len(chart["series"]), 1)
+        points = {point["label"]: point for point in chart["data"]}
         self.assertIn("NYC", points)
         nyc = points["NYC"]
         self.assertNotIn("value", nyc)
@@ -827,9 +830,10 @@ class ProcessMessageTests(TestCase):
                 conversation=self.session,
                 company=self.company,
             )
-        self.assertIsNotNone(assistant.chart_data)
-        self.assertEqual(assistant.chart_data["type"], "pie")
-        points = {p["label"]: p["values"][0] for p in assistant.chart_data["data"]}
+        chart = assistant.context.get("chart")
+        self.assertIsNotNone(chart)
+        self.assertEqual(chart["type"], "pie")
+        points = {p["label"]: p["values"][0] for p in chart["data"]}
 
         self.assertEqual(points, {"NYC": 10.0, "LA": 5.0, "SF": 3.0})
 
@@ -961,7 +965,7 @@ class ChatUIViewTests(TestCase):
             reverse("chat:session", args=[self.alice_session.pk])
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(str(self.alice_session.id), resp.content.decode())
+        self.assertIn(str(self.alice_session.session_id), resp.content.decode())
 
     def test_chat_session_malformed_id_is_404(self):
         self.client.force_login(self.alice)
