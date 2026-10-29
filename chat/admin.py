@@ -1,6 +1,8 @@
 import json
+from functools import partial
 
 from django.contrib import admin
+from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
@@ -12,7 +14,7 @@ from basics.llm import LLMBackendError, LLMConfigurationError
 from .models import Conversation, ConversationSession
 from .scope import allowed_companies as _allowed_companies_for
 from .scope import scoped_sessions as _scoped_sessions_for
-from .services import ChatService
+from .services import ChatService, session_files
 
 
 class SessionTurnInline(admin.TabularInline):
@@ -60,9 +62,10 @@ class ConversationSessionAdmin(BaseModelAdmin):
     inlines = [SessionTurnInline]
 
     # The ULID ``session_id`` is the single session identifier (shown
-    # read-only). ``metadata`` is kept (read-only) because it carries state such
-    # as the pending KB file selection; ``context`` is not user-edited for a
-    # session. The whole chat shows in the SessionTurnInline at the bottom.
+    # read-only). ``metadata`` is kept read-only for legacy data; it no longer
+    # carries a pending file selection. ``context`` (the session's file lists)
+    # is not user-edited and only ``chat.services.session_files`` writes it.
+    # The whole chat shows in the SessionTurnInline at the bottom.
     fieldsets = (
         (None, {"fields": ("session_id", "title", "user", "company")}),
         ("Content", {"fields": ("summary", "metadata")}),
@@ -97,6 +100,34 @@ class ConversationSessionAdmin(BaseModelAdmin):
                 if name not in readonly:
                     readonly.append(name)
         return readonly
+
+    def save_model(self, request, obj, form, change):
+        """On change, save only the edited columns.
+
+        A full save would write back the ``context`` loaded with the form and
+        drop file entries a chat request added meanwhile.
+        """
+        if not change:
+            return super().save_model(request, obj, form, change)
+        self._enforce_company(request, obj)
+        obj.updated_by = request.user
+        obj.save(update_fields=[*form.changed_data, "updated_by", "updated_at"])
+
+    def delete_model(self, request, obj):
+        """Hard delete, then remove the session's never-processed files."""
+        with transaction.atomic():
+            keys = session_files.unsettled_keys(obj)
+            super().delete_model(request, obj)
+            transaction.on_commit(partial(session_files.purge_unsettled, keys))
+
+    def delete_queryset(self, request, queryset):
+        """Bulk hard delete, then remove the never-processed files."""
+        with transaction.atomic():
+            keys = []
+            for session in queryset:
+                keys.extend(session_files.unsettled_keys(session))
+            super().delete_queryset(request, queryset)
+            transaction.on_commit(partial(session_files.purge_unsettled, keys))
 
 
     @admin.display(description="Turns")

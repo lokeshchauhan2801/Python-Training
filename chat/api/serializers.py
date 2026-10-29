@@ -15,6 +15,7 @@ from basics.api.serializers import AuditReadOnlySerializerMixin
 from company.models import Company
 
 from ..models import Conversation, ConversationSession
+from ..services import session_files
 
 
 class RequiredCompanyResolutionMixin:
@@ -71,6 +72,9 @@ class ConversationSessionSerializer(
             "is_deleted",
             "deleted_at",
         ]
+        # ``context`` holds the session's file lists; only
+        # ``chat.services.session_files`` writes it, under a row lock.
+        read_only_fields = ["context"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -92,6 +96,30 @@ class ConversationSessionSerializer(
         if self.instance is None and "company" not in attrs:
             attrs["company"] = self._resolve_company(None)
         return attrs
+
+    def update(self, instance, validated_data):
+        # Save only the changed columns so a stale instance never writes back
+        # an old ``context`` over file entries added meanwhile.
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save(update_fields=[*validated_data, "updated_at"])
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        context = data.get("context")
+        if isinstance(context, dict):
+            context = dict(context)
+            for key in (session_files.UNPROCESSED_KEY, session_files.PROCESSED_KEY):
+                if key in context:
+                    entries = context[key] if isinstance(context[key], list) else []
+                    context[key] = [
+                        session_files.public_entry(entry)
+                        for entry in entries
+                        if isinstance(entry, dict)
+                    ]
+            data["context"] = context
+        return data
 
 
 class ConversationSerializer(

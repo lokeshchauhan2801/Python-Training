@@ -314,7 +314,9 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     # into the prompt. Without this the document_search tool answered "no
     # content" for an attached file even though its text was available.
     attachment_sections = service._chat_attachment_texts(
-        ctx.conversation, attachment_ids=attachment_ids or None
+        ctx.conversation,
+        attachment_ids=attachment_ids or None,
+        question=ctx.message_text,
     )
     prompt, citations = service._build_prompt(
         ctx.history_text,

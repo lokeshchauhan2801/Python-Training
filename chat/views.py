@@ -1,8 +1,10 @@
 import json
 import logging
+from functools import partial
 
 from django.contrib import admin
 from django.contrib.auth.decorators import login_required
+from django.db import transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods
@@ -13,10 +15,9 @@ from basics.llm import (
     LLMConfigurationError,
     resolve_provider_model,
 )
-from documents.models import Document
-
 from .scope import active_or_none, allowed_companies, scoped_sessions
 from .services import ChatProviderError, ChatRetrievalError, ChatService
+from .services import session_files
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,22 @@ def _turn_payload(turn):
     render on the user bubble; citations/chart/metadata on the assistant bubble.
     The synthetic ``<ulid>:u``/``<ulid>:a`` ids are display-only (the client
     never posts a message id back).
+
+    Chips come from ``turn.context["attachments"]``; turns written before
+    that key existed fall back to the ``documents`` M2M.
     """
-    attachments = [
-        {"id": str(doc.id), "title": doc.title}
-        for doc in turn.documents.all()
-    ]
+    chips = (turn.context or {}).get("attachments")
+    if isinstance(chips, list):
+        attachments = [
+            {"id": str(chip.get("id", "")), "title": str(chip.get("title", ""))}
+            for chip in chips
+            if isinstance(chip, dict)
+        ]
+    else:
+        attachments = [
+            {"id": str(doc.id), "title": doc.title}
+            for doc in turn.documents.all()
+        ]
     created_at = turn.created_at.isoformat()
     user = {
         "id": f"{turn.id}:u",
@@ -270,6 +282,7 @@ def sessions_json(request):
 @require_http_methods(["GET"])
 def messages_json(request, session_id):
     session = _resolve_session(request, session_id)
+    session_files.reconcile(session)
     messages = _turns_to_messages(session.turns.order_by("created_at"))
     return JsonResponse(
         {
@@ -344,8 +357,10 @@ def _is_status_request(text):
 
 def _attachment_titles(session, attachment_ids):
     """Human-readable names for the turn's attachments (for the ask-reply)."""
-    docs = Document.objects.filter(pk__in=attachment_ids, company=session.company)
-    titles = [d.title for d in docs]
+    titles = [
+        chip["title"]
+        for chip in session_files.attachment_chips(session, attachment_ids)
+    ]
     if not titles:
         return "a file"
     if len(titles) == 1:
@@ -507,7 +522,15 @@ def send(request, session_id):
 
     model_name = (request.POST.get("model_name") or "").strip() or None
     provider = (request.POST.get("provider") or "").strip() or None
-    attachment_ids = request.POST.getlist("attachment_ids")
+    attachment_ids = list(dict.fromkeys(request.POST.getlist("attachment_ids")))
+    # Attachment ids are session entry ids; anything not in this session's
+    # file lists is rejected before anything runs.
+    try:
+        session_files.files_by_ids(session, attachment_ids)
+    except session_files.TooManyIds:
+        return JsonResponse({"error": "Too many files in one request."}, status=400)
+    except session_files.UnknownEntry:
+        return JsonResponse({"error": "Unknown attachment."}, status=400)
 
     # A turn needs EITHER text OR at least one attachment. Sending a media file
     # with no message is allowed; only a turn with neither is rejected.
@@ -628,11 +651,15 @@ def delete_session(request, session_id):
     else:
         # Permanent removal. Hard-delete the session's turns first, then the
         # session row itself. Use all_objects so already soft-deleted rows are
-        # purged too.
+        # purged too. Files attached but never processed are deleted from
+        # storage once the delete commits (processed Documents stay).
         from .models import Conversation
 
-        Conversation.all_objects.filter(session=session).hard_delete()
-        session.hard_delete()
+        with transaction.atomic():
+            keys = session_files.unsettled_keys(session)
+            Conversation.all_objects.filter(session=session).hard_delete()
+            session.hard_delete()
+            transaction.on_commit(partial(session_files.purge_unsettled, keys))
 
     return JsonResponse(
         {"id": str(session.session_id), "deleted": True, "soft": soft}
@@ -701,39 +728,29 @@ def document_status_json(request, session_id):
 @login_required
 @require_http_methods(["POST"])
 def attach(request, session_id):
-    """Store an uploaded file as a chat Document (not chunked) on the session.
+    """Store an uploaded file as an unprocessed entry on the session.
 
-    The document is stamped with the signed-in user and the session's company
-    (the invariant chat attachments require), so one user can never attach
-    into another company's session.
+    The bytes go under ``media/unsettled/`` and an entry is appended to
+    ``session.context["unprocessed_docs"]``. No Document row is created until
+    the user processes the file. The returned ``id`` is the entry id.
     """
     session = _resolve_session(request, session_id)
 
-    upload = request.FILES.get("file")
-    if upload is None:
-        return JsonResponse({"error": "A file is required."}, status=400)
-
-    file_type = (upload.name.rsplit(".", 1)[-1] if "." in upload.name else "").lower()
-
-    document = Document(
-        company=session.company,
-        uploaded_by=request.user,
-        session=session,
-        source=Document.SOURCE_CHAT,
-        status=Document.STATUS_READY,
-        title=upload.name,
-        file=upload,
-        file_type=file_type or "txt",
-        content_type=getattr(upload, "content_type", "") or "",
-        file_size=getattr(upload, "size", 0) or 0,
-    )
-    document.save(actor=request.user)
+    try:
+        entry = session_files.store_upload(
+            session, request.FILES.get("file"), request.user
+        )
+    except session_files.UploadRejected as exc:
+        return JsonResponse({"error": exc.message}, status=exc.status)
+    except Exception:
+        logger.exception("Could not attach a file to chat session %s", session.pk)
+        return JsonResponse({"error": "Could not attach the file."}, status=500)
 
     return JsonResponse(
         {
-            "id": str(document.id),
-            "title": document.title,
-            "file_type": document.file_type,
+            "id": entry["id"],
+            "title": entry["title"],
+            "file_type": entry["file_type"],
         },
         status=201,
     )

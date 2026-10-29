@@ -19,6 +19,8 @@ from documents.models import Document, DocumentChunk
 
 from chat.models import Conversation, ConversationSession
 from chat.retitle import retitle_if_default
+from chat.services import session_files
+from chat.services.session_files import FileUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +153,9 @@ class ChatService:
         single row (the two-table history model). The turn always inherits
         ``session.company`` (the company-match invariant is enforced in
         ``Conversation.save()``). The save is actor-aware so the audit columns
-        are stamped from the acting user. Attachments (when given) are linked to
-        the turn via its ``documents`` M2M and also stamped onto the session.
+        are stamped from the acting user. Attachments (session file entry ids,
+        when given) are recorded as chips in ``context["attachments"]`` as
+        ``[{"id", "title"}]``; ids not in the session's file lists are skipped.
 
         Chart/citations render-state no longer has its own columns: ``citations``
         and ``chart_data`` are folded into the turn's ``context`` under the
@@ -172,6 +175,10 @@ class ChatService:
         # question/response text, never a turn's raw context dict).
         if chart_data is not None:
             turn_context["chart"] = chart_data
+        # Render-state too: the user bubble's file chips. Never prompt text.
+        chips = session_files.attachment_chips(session, attachment_ids)
+        if chips:
+            turn_context["attachments"] = chips
         turn = Conversation(
             company=session.company,
             session=session,
@@ -183,7 +190,6 @@ class ChatService:
             metadata=metadata or {},
         )
         turn.save(actor=actor or user)
-        self._link_attachments(turn, session, attachment_ids)
         return turn
 
     def _find_relevant_chunks(self, user, question, conversation=None, company=None):
@@ -526,162 +532,89 @@ class ChatService:
         trimmed = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
         return trimmed or "Here is the chart you requested."
 
-    def _chat_csv_documents(self, conversation, attachment_ids=None):
-        """Chat-source CSV documents attached to this session.
+    def _chat_csv_documents(self, conversation, attachment_ids=None, question=None):
+        """Readable CSV files of this session, as ``SessionFile`` objects.
 
-        A chat-attached CSV is chat data only (never embedded), so chart
-        requests about it are answered from the file directly. Attachments are
-        linked to a session via ``documents.Document.session`` (and surfaced
-        through ``ConversationSession.documents``); we also fold in any CSVs
-        linked through the session's turns' ``documents`` M2M so a file
-        referenced on an individual turn is still reachable.
-
-        ``attachment_ids`` (when given) restricts to THIS turn's attachments —
-        used by the LangGraph path, where the current user message is not linked
-        yet, so the correct file is the one just uploaded, not an earlier one.
+        A chat CSV is answered from the file directly (processed or not), so
+        chart requests read its bytes. ``attachment_ids`` (when given)
+        restricts to THIS turn's attachments — used by the LangGraph path,
+        where the current turn is not stored yet, so the correct file is the
+        one just uploaded. Otherwise every readable session CSV, newest first.
         """
+        if conversation is None:
+            return []
+        files = [
+            f for f in session_files.list_files(conversation)
+            if f.is_csv and f.readable
+        ]
         if attachment_ids:
-            return Document.objects.filter(
-                pk__in=list(attachment_ids),
-                company=conversation.company,
-                source=Document.SOURCE_CHAT,
-                status=Document.STATUS_READY,
-                file_type="csv",
-            ).distinct()
-
-        session_docs = conversation.documents.filter(
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            file_type="csv",
-        )
-        turn_docs = Document.objects.filter(
-            conversation_turns__session=conversation,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            file_type="csv",
-        )
-        return (session_docs | turn_docs).distinct()
+            wanted = {str(i) for i in attachment_ids}
+            return [f for f in files if f.id in wanted]
+        return list(reversed(files))
 
 
     _MAX_ATTACHMENT_CHARS = 8000
     _MAX_ATTACHMENT_DOCS = 5
 
-    def _chat_attachment_texts(self, conversation, attachment_ids=None):
-        """Return ``(title, text)`` for this session's non-CSV chat attachments.
+    def _chat_attachment_texts(self, conversation, attachment_ids=None, question=None):
+        """Return ``(title, text)`` for this session's non-CSV chat files.
 
-        Chat attachments (``source=chat``) are never embedded in the vector
-        store, so a question about an attached txt/pdf/docx/image is answered by
-        reading the file directly and injecting its extracted text into the
-        prompt. CSV attachments are EXCLUDED here — they drive the deterministic
-        chart builder (``_build_csv_distribution_chart``) instead.
+        Chat files are read directly (processed or not) and their extracted
+        text is injected into the prompt. CSV files are EXCLUDED here — they
+        drive the deterministic chart builder (``_build_csv_distribution_chart``)
+        instead.
 
-        Documents are reachable the same two ways as ``_chat_csv_documents``:
-        the session (``ConversationSession.documents`` via ``Document.session``)
-        and the session's turns (``Conversation.documents`` M2M). Each
-        document's text is read via ``documents.services.extract_document_text``
-        (which OCRs images via tesseract), capped per document, and docs with no
-        usable text are skipped. The number of docs folded in is bounded.
-
-        ``attachment_ids`` (when given) restricts to THIS turn's attachments and
-        takes precedence over the "latest turn" heuristic. The LangGraph path
-        passes it because the current turn is not persisted yet when the tool
-        runs — without it, document_search grounds on an EARLIER file (the bug
-        where an attached CSV returned the previous letter's answer).
+        Precedence: THIS turn's ``attachment_ids`` (the current turn is not
+        stored yet when this runs), else the latest stored turn's chips
+        (``context["attachments"]``), else every session file newest first.
+        Text comes from ``documents.services.extract_document_text`` (which
+        OCRs images via tesseract), capped per file; unreadable files and
+        files with no usable text are skipped. The number of files is bounded.
         """
         if conversation is None:
             return []
 
+        files = session_files.list_files(conversation)
+        by_id = {f.id: f for f in files}
+
+        def _eligible(candidates):
+            return [f for f in candidates if not f.is_csv and f.readable]
+
         if attachment_ids:
-            docs = (
-                Document.objects.filter(
-                    pk__in=list(attachment_ids),
-                    company=conversation.company,
-                    source=Document.SOURCE_CHAT,
-                    status=Document.STATUS_READY,
-                )
-                .exclude(file_type="csv")
-                .distinct()
+            chosen = _eligible(
+                by_id[i]
+                for i in dict.fromkeys(str(i) for i in attachment_ids)
+                if i in by_id
             )
-            sections = []
-            for document in docs[: self._MAX_ATTACHMENT_DOCS]:
-                try:
-                    text = document_services.extract_document_text(document)
-                except Exception:
-                    logger.exception(
-                        "Could not extract text from chat attachment %s",
-                        document.pk,
-                    )
-                    continue
-                if text:
-                    sections.append(
-                        (document.title, text[: self._MAX_ATTACHMENT_CHARS])
-                    )
-            return sections
-
-        # Prefer the attachments on the LATEST turn (the current conversation
-        # turn): a file belongs to the turn it was sent with, so only that
-        # turn's attachments ground the answer — not every file ever added to
-        # the session. Fall back to session-linked docs only when the latest
-        # turn has none.
-        latest_turn = conversation.turns.order_by("-created_at").first()
-        if latest_turn is not None:
-            turn_docs = latest_turn.documents.filter(
-                source=Document.SOURCE_CHAT,
-                status=Document.STATUS_READY,
-            ).exclude(file_type="csv")
-            if turn_docs.exists():
-                sections = []
-                seen = set()
-                for document in turn_docs[: self._MAX_ATTACHMENT_DOCS]:
-                    if document.pk in seen:
-                        continue
-                    seen.add(document.pk)
-                    try:
-                        text = document_services.extract_document_text(document)
-                    except Exception:
-                        logger.exception(
-                            "Could not extract text from chat attachment %s",
-                            document.pk,
-                        )
-                        continue
-                    if text:
-                        sections.append(
-                            (document.title, text[: self._MAX_ATTACHMENT_CHARS])
-                        )
-                return sections
-
-        session_docs = conversation.documents.filter(
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-        ).exclude(file_type="csv")
-        turn_docs = Document.objects.filter(
-            conversation_turns__session=conversation,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-        ).exclude(file_type="csv")
-        # Dedupe by primary key: a document reachable via BOTH the session and a
-        # turn would otherwise appear twice (the earlier OR-union could leak
-        # duplicates across the join), padding the prompt with the same file.
-        seen_pks = set()
-        documents = []
-        for document in list(session_docs) + list(turn_docs):
-            if document.pk in seen_pks:
-                continue
-            seen_pks.add(document.pk)
-            documents.append(document)
+        else:
+            chosen = []
+            latest_turn = conversation.turns.order_by("-created_at").first()
+            if latest_turn is not None:
+                chips = (latest_turn.context or {}).get("attachments") or []
+                chip_ids = [
+                    str(c.get("id")) for c in chips if isinstance(c, dict)
+                ]
+                chosen = _eligible(
+                    by_id[i] for i in dict.fromkeys(chip_ids) if i in by_id
+                )
+            if not chosen:
+                chosen = _eligible(reversed(files))
 
         sections = []
-        for document in documents[: self._MAX_ATTACHMENT_DOCS]:
+        for session_file in chosen[: self._MAX_ATTACHMENT_DOCS]:
             try:
-                text = document_services.extract_document_text(document)
+                text = document_services.extract_document_text(
+                    session_file.as_extractable()
+                )
             except Exception:
-                logger.exception(
-                    "Could not extract text from chat attachment %s", document.pk
+                logger.warning(
+                    "Could not read chat file %s", session_file.id, exc_info=True
                 )
                 continue
-            if not text:
-                continue
-            sections.append((document.title, text[: self._MAX_ATTACHMENT_CHARS]))
+            if text:
+                sections.append(
+                    (session_file.title, text[: self._MAX_ATTACHMENT_CHARS])
+                )
         return sections
 
     def _build_csv_distribution_chart(
@@ -698,12 +631,12 @@ class ChatService:
             or re.search(r"over\s+time", question, re.I)
         )
 
-        documents = self._chat_csv_documents(
+        csv_files = self._chat_csv_documents(
             conversation, attachment_ids=attachment_ids
         )
-        for document in documents:
+        for csv_file in csv_files:
             try:
-                with document.file.open("rb") as source:
+                with csv_file.open() as source:
                     text_source = TextIOWrapper(source, encoding="utf-8-sig", newline="")
                     sample = text_source.read(8192)
                     try:
@@ -728,10 +661,10 @@ class ChatService:
                         for row in reader
                         if row and any(cell.strip() for cell in row)
                     ]
-            except (OSError, UnicodeDecodeError, csv.Error):
+            except (OSError, FileUnavailable, UnicodeDecodeError, csv.Error):
                 logger.exception(
                     "Could not read CSV %s to generate a local chart",
-                    document.pk,
+                    csv_file.id,
                 )
                 continue
 
@@ -763,7 +696,7 @@ class ChatService:
                 total = sum(value for _, value in label_values)
                 return (
                     f"Here is the {chart_type} chart of {headers[value_index]} "
-                    f"by {headers[label_index]} from {document.title}, "
+                    f"by {headers[label_index]} from {csv_file.title}, "
                     f"totalling {total:,.0f}.",
                     chart,
                 )
@@ -816,7 +749,7 @@ class ChatService:
             total_records = sum(count for _, count in label_counts)
             return (
                 f"Here is the {chart_type} chart of {headers[selected_index]} "
-                f"from {document.title}, based on {total_records:,} records.",
+                f"from {csv_file.title}, based on {total_records:,} records.",
                 chart,
             )
         return None
@@ -1033,7 +966,11 @@ class ChatService:
             )
 
 
-            attachment_sections = self._chat_attachment_texts(conversation)
+            attachment_sections = self._chat_attachment_texts(
+                conversation,
+                attachment_ids=attachment_ids,
+                question=message_text,
+            )
             prompt, citations = self._build_prompt(
                 history,
                 message_text,
@@ -1145,27 +1082,3 @@ class ChatService:
         )
         session.save(actor=user)
         return session
-
-    def _link_attachments(self, turn, session, attachment_ids):
-        """Link uploaded attachments to a turn and stamp them onto the session.
-
-        ``turn`` is a ``Conversation`` row whose ``documents`` M2M holds the
-        per-turn attachments; the documents are ALSO stamped with
-        ``Document.session`` so they stay reachable from the session even when
-        no turn references them directly.
-        """
-        if not attachment_ids:
-            return
-        documents = list(
-            Document.objects.filter(
-                pk__in=attachment_ids,
-                company=session.company,
-            )
-        )
-        if not documents:
-            return
-        turn.documents.add(*documents)
-        for document in documents:
-            if document.session_id != session.pk:
-                document.session = session
-                document.save(update_fields=["session", "updated_at"])

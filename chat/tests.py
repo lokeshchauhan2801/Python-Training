@@ -24,8 +24,10 @@ from documents import services as document_services
 from documents.models import Document, DocumentChunk
 
 from .admin import ConversationSessionAdmin
+from .file_test_support import attach_entry
 from .models import Conversation, ConversationSession
 from .services import ChatCompletion, ChartData, ChartPoint, ChatService
+from .services import session_files
 
 User = get_user_model()
 
@@ -743,21 +745,13 @@ class ProcessMessageTests(TestCase):
     @override_settings(MEDIA_ROOT=_MEDIA)
     def test_csv_distribution_chart_fallback_without_key(self):
         """A chat-attached CSV yields a deterministic chart with no LLM chart."""
-        csv_doc = Document.objects.create(
-            company=self.company,
-            uploaded_by=self.user,
-            session=self.session,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            title="people.csv",
-            file=SimpleUploadedFile(
-                "people.csv",
-                b"name,city\nAlice,NYC\nBob,LA\nCara,NYC\n",
-                content_type="text/csv",
-            ),
-            file_type="csv",
+        csv_entry = attach_entry(
+            self.session,
+            "people.csv",
+            b"name,city\nAlice,NYC\nBob,LA\nCara,NYC\n",
+            self.user,
         )
-        self.assertTrue(csv_doc.file)
+        self.assertTrue(csv_entry["storage_key"])
 
         with self._no_chunks():
             assistant = self._service(
@@ -793,19 +787,8 @@ class ProcessMessageTests(TestCase):
         SF=3) and be a pie chart (the user asked for a pie). This proves the
         attached CSV wins over the LLM chart.
         """
-        Document.objects.create(
-            company=self.company,
-            uploaded_by=self.user,
-            session=self.session,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            title="cities.csv",
-            file=SimpleUploadedFile(
-                "cities.csv",
-                b"city,count\nNYC,10\nLA,5\nSF,3\n",
-                content_type="text/csv",
-            ),
-            file_type="csv",
+        attach_entry(
+            self.session, "cities.csv", b"city,count\nNYC,10\nLA,5\nSF,3\n", self.user
         )
 
         fabricated = ChartData(
@@ -845,19 +828,8 @@ class ProcessMessageTests(TestCase):
         (``Attached file: notes.txt`` + its text) must be present, and the
         strict file-context instruction (no outside numbers) must be active.
         """
-        Document.objects.create(
-            company=self.company,
-            uploaded_by=self.user,
-            session=self.session,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            title="notes.txt",
-            file=SimpleUploadedFile(
-                "notes.txt",
-                b"The capital of France is Paris.",
-                content_type="text/plain",
-            ),
-            file_type="txt",
+        attach_entry(
+            self.session, "notes.txt", b"The capital of France is Paris.", self.user
         )
         fake = _FakeStructuredLLM(response="The capital of France is Paris.")
         with self._no_chunks():
@@ -895,20 +867,12 @@ class ProcessMessageTests(TestCase):
         image.save(buffer, format="PNG")
         buffer.seek(0)
 
-        document = Document.objects.create(
-            company=self.company,
-            uploaded_by=self.user,
-            session=self.session,
-            source=Document.SOURCE_CHAT,
-            status=Document.STATUS_READY,
-            title="invoice.png",
-            file=SimpleUploadedFile(
-                "invoice.png", buffer.read(), content_type="image/png"
-            ),
-            file_type="png",
-        )
+        entry = attach_entry(self.session, "invoice.png", buffer.read(), self.user)
+        (image_file,) = session_files.files_by_ids(self.session, [entry["id"]])
 
-        extracted = document_services.extract_document_text(document)
+        extracted = document_services.extract_document_text(
+            image_file.as_extractable()
+        )
         self.assertIn("4242", extracted)
 
         fake = _FakeStructuredLLM(response="The number is 4242.")
@@ -922,6 +886,33 @@ class ProcessMessageTests(TestCase):
         prompt = fake.prompts[0]
         self.assertIn("Attached file: invoice.png", prompt)
         self.assertIn("4242", prompt)
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_plain_path_reads_this_turns_attachment_first(self):
+        """C10c (V15): a new attachment beats the previous turn's chip."""
+        old = attach_entry(self.session, "old.txt", b"Old letter text.", self.user)
+        ChatService(llm_client=_FakeStructuredLLM()).create_turn(
+            self.session,
+            user=self.user,
+            question="",
+            response="What should I do with it?",
+            attachment_ids=[old["id"]],
+            actor=self.user,
+        )
+        new = attach_entry(self.session, "new.txt", b"New report text.", self.user)
+        fake = _FakeStructuredLLM(response="summary")
+        with self._no_chunks():
+            ChatService(llm_client=fake).process_message(
+                user=self.user,
+                message_text="summarise this",
+                conversation=self.session,
+                company=self.company,
+                attachment_ids=[new["id"]],
+            )
+        prompt = fake.prompts[0]
+        self.assertIn("Attached file: new.txt", prompt)
+        self.assertIn("New report text.", prompt)
+        self.assertNotIn("Old letter text.", prompt)
 
 
 class ChatUIViewTests(TestCase):
@@ -1065,8 +1056,9 @@ class ChatUIViewTests(TestCase):
 
 
     @override_settings(MEDIA_ROOT=_MEDIA)
-    def test_attach_creates_chat_source_document(self):
+    def test_attach_creates_unprocessed_entry(self):
         self.client.force_login(self.alice)
+        documents_before = Document.all_objects.count()
         upload = SimpleUploadedFile(
             "notes.txt", b"hello world", content_type="text/plain"
         )
@@ -1075,13 +1067,67 @@ class ChatUIViewTests(TestCase):
             {"file": upload},
         )
         self.assertEqual(resp.status_code, 201)
-        doc_id = resp.json()["id"]
-        document = Document.objects.get(pk=doc_id)
-        self.assertEqual(document.source, Document.SOURCE_CHAT)
-        self.assertEqual(document.status, Document.STATUS_READY)
-        self.assertEqual(document.session_id, self.alice_session.pk)
-        self.assertEqual(document.company_id, self.alice_co.id)
-        self.assertEqual(document.uploaded_by_id, self.alice.id)
+        data = resp.json()
+        self.assertEqual(set(data), {"id", "title", "file_type"})
+        self.assertEqual(data["title"], "notes.txt")
+        self.assertEqual(data["file_type"], "txt")
+        self.assertEqual(Document.all_objects.count(), documents_before)
+        self.alice_session.refresh_from_db()
+        entries = self.alice_session.context["unprocessed_docs"]
+        self.assertEqual([e["id"] for e in entries], [data["id"]])
+        self.assertIsNone(entries[0]["document_id"])
+        self.assertTrue(
+            entries[0]["storage_key"].startswith(
+                f"unsettled/{self.alice_session.pk}/{data['id']}/"
+            )
+        )
+
+    @override_settings(MEDIA_ROOT=_MEDIA)
+    def test_send_records_attachment_chips_replayed_by_messages_json(self):
+        """C1: send with attachment_ids stores chips; messages_json replays them."""
+        session = ConversationSession.objects.create(
+            company=self.alice_co, user=self.alice, title="Chips"
+        )
+        entry = attach_entry(session, "notes.txt", "hello", self.alice)
+        self.client.force_login(self.alice)
+        fake = ChatService(llm_client=_FakeStructuredLLM(response="ok"))
+        with mock.patch("chat.views._chat_service", return_value=fake), mock.patch(
+            "chat.services.document_services.find_relevant_chunks",
+            return_value=[],
+        ):
+            resp = self.client.post(
+                reverse("chat:send", args=[session.pk]),
+                {"question": "what is this?", "attachment_ids": [entry["id"]]},
+            )
+        self.assertEqual(resp.status_code, 201)
+        chips = [{"id": entry["id"], "title": "notes.txt"}]
+        self.assertEqual(resp.json()["user"]["attachments"], chips)
+        turn = Conversation.objects.get(session=session)
+        self.assertEqual(turn.context["attachments"], chips)
+        self.assertEqual(list(turn.documents.all()), [])
+
+        replay = self.client.get(reverse("chat:messages_json", args=[session.pk]))
+        self.assertEqual(replay.status_code, 200)
+        user_message = replay.json()["messages"][0]
+        self.assertEqual(user_message["attachments"], chips)
+
+    def test_send_rejects_unknown_attachment(self):
+        self.client.force_login(self.alice)
+        resp = self.client.post(
+            reverse("chat:send", args=[self.alice_session.pk]),
+            {"question": "hi", "attachment_ids": ["0" * 26]},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "Unknown attachment.")
+        resp = self.client.post(
+            reverse("chat:send", args=[self.alice_session.pk]),
+            {"question": "hi", "attachment_ids": [f"{i:026d}" for i in range(51)]},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "Too many files in one request.")
+        self.assertFalse(
+            Conversation.objects.filter(session=self.alice_session).exists()
+        )
 
 
     def test_delete_session_soft_deletes_in_scope(self):
