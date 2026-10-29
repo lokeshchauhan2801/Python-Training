@@ -57,6 +57,7 @@ class ToolResult:
     ok: bool = True
     error: str | None = None
     metadata: dict = field(default_factory=dict)
+    llm_generated: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -100,6 +101,16 @@ def _history_messages(conversation, message_text):
 
 
 _PROVIDER_DISPLAY = {"openai": "OpenAI", "deepseek": "DeepSeek"}
+_PLAIN_TEXT_GUIDANCE = (
+    "Format every visible response as plain text. Use normal sentences, dot "
+    "bullets, or numbered lists. Do not use Markdown emphasis or asterisk bullets."
+)
+
+
+def _plain_text_system_prompt(system_text: str) -> str:
+    """Append common visible-response formatting guidance to an LLM prompt."""
+    system_text = (system_text or "").strip()
+    return f"{system_text}\n\n{_PLAIN_TEXT_GUIDANCE}" if system_text else _PLAIN_TEXT_GUIDANCE
 
 
 def identity_line(llm) -> str:
@@ -125,7 +136,7 @@ def identity_line(llm) -> str:
 def _with_identity(system_text: str, llm) -> str:
     """Prepend the real-identity line to a system prompt (or start one)."""
     line = identity_line(llm)
-    system_text = (system_text or "").strip()
+    system_text = _plain_text_system_prompt(system_text)
     return f"{line}\n\n{system_text}" if system_text else line
 
 
@@ -215,7 +226,12 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
             if chart_data is not None
             else "I could not produce a chart for that request."
         )
-    return ToolResult(content=content, chart_data=chart_data, tool_used=tool_slug)
+    return ToolResult(
+        content=content,
+        chart_data=chart_data,
+        tool_used=tool_slug,
+        llm_generated=True,
+    )
 
 
 def _file_chart_reply(
@@ -275,7 +291,12 @@ def _file_chart_reply(
         )
     if chart_data is not None:
         content = ChatService._with_source_line(content, title)
-    return ToolResult(content=content, chart_data=chart_data, tool_used=tool_slug)
+    return ToolResult(
+        content=content,
+        chart_data=chart_data,
+        tool_used=tool_slug,
+        llm_generated=True,
+    )
 
 
 def _system_prompt(ctx: "ToolContext", default_name: str, fallback: str = "") -> str:
@@ -317,7 +338,9 @@ def _general_assistant(ctx: "ToolContext") -> "ToolResult":
     messages.insert(0, {"role": "system", "content": sys})
 
     content = ctx.llm.complete(messages)
-    return ToolResult(content=content, tool_used="general_assistant")
+    return ToolResult(
+        content=content, tool_used="general_assistant", llm_generated=True
+    )
 
 
 @register("web_search")
@@ -356,7 +379,7 @@ def _web_search(ctx: "ToolContext") -> "ToolResult":
     )
 
     content = ctx.llm.complete(messages)
-    return ToolResult(content=content, tool_used="web_search")
+    return ToolResult(content=content, tool_used="web_search", llm_generated=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,6 +464,7 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
         citations=citations,
         chart_data=chart_data,
         tool_used="document_search",
+        llm_generated=True,
     )
 
 
@@ -461,6 +485,7 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
         if ctx.langfuse
         else _SUMMARY_SYSTEM_PROMPT
     )
+    sys = _plain_text_system_prompt(sys)
 
     try:
         if "{{conversation}}" in sys or "{{history}}" in sys:
@@ -479,7 +504,9 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
             {"role": "user", "content": conversation_context},
         ]
 
-    content = ctx.llm.complete(messages)
+    from chat.services.plain_text import normalize_llm_response
+
+    content = normalize_llm_response(ctx.llm.complete(messages))
 
     # Persist the summary onto the session so it is saved with the chat and
     # OVERWRITTEN on each subsequent summary (the session keeps the latest).
@@ -491,7 +518,9 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     except Exception:  # noqa: BLE001 - persistence must never break the reply
         logger.exception("Could not persist chat summary to session")
 
-    return ToolResult(content=content, tool_used="chat_summarise")
+    return ToolResult(
+        content=content, tool_used="chat_summarise", llm_generated=True
+    )
 
 
 @register("prompt_tool")
@@ -512,7 +541,7 @@ def _prompt_tool(ctx: "ToolContext") -> "ToolResult":
     content = ctx.llm.complete(messages)
 
     used = ctx.tool.slug if ctx.tool and ctx.tool.slug else "prompt_tool"
-    return ToolResult(content=content, tool_used=used)
+    return ToolResult(content=content, tool_used=used, llm_generated=True)
 
 
 # --------------------------------------------------------------------------- #

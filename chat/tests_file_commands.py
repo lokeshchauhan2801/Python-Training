@@ -1043,3 +1043,19 @@ class BothPathsTests(LangGraphEntryAgentMixin, _Base):
                 self.assertEqual(msg["metadata"]["source"], "langgraph")
                 self.assertNotIn("file_panel", msg["metadata"])
         self.enqueue.assert_not_called()
+
+
+class LangGraphPlainTextTests(LangGraphEntryAgentMixin, _Base):
+    def test_forced_general_assistant_persists_plain_text(self):
+        self.llm._response = "**Elon Musk**\n- **CEO of Tesla**"
+        self.enable_langgraph()
+
+        with mock.patch("chat.views._file_command_reply", return_value=None), self.route_to(
+            "general_assistant"
+        ):
+            message = self.assistant(self.send("Who is Elon?"))
+
+        turn = Conversation.objects.get(session=self.session)
+        self.assertEqual(message["content"], "Elon Musk\n• CEO of Tesla")
+        self.assertEqual(turn.response, "Elon Musk\n• CEO of Tesla")
+        self.assertEqual(message["metadata"]["tool_used"], "general_assistant")

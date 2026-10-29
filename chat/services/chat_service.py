@@ -20,13 +20,16 @@ from documents.models import Document, DocumentChunk
 from chat.models import Conversation, ConversationSession
 from chat.retitle import retitle_if_default
 from chat.services import file_matching, session_files
+from chat.services.plain_text import normalize_llm_response
 from chat.services.session_files import FileUnavailable
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_SYSTEM_PROMPT = (
     "You are a helpful assistant. Summarize the following conversation "
-    "concisely, capturing the key questions and conclusions."
+    "concisely, capturing the key questions and conclusions. Format the "
+    "visible response as plain text with normal sentences, dot bullets, or "
+    "numbered lists. Do not use Markdown emphasis or asterisk bullets."
 )
 
 _DEFAULT_MODEL_NAME = "gpt-4o-mini"
@@ -99,7 +102,7 @@ class ChatService:
         messages = self._session_messages(session)
         messages.append({"role": "user", "content": question})
 
-        answer = self._llm.complete(messages)
+        answer = normalize_llm_response(self._llm.complete(messages))
 
         turn = Conversation(
             session=session,
@@ -122,7 +125,7 @@ class ChatService:
         messages = [{"role": "system", "content": _SUMMARY_SYSTEM_PROMPT}]
         messages.extend(self._session_messages(session))
 
-        summary = self._llm.complete(messages)
+        summary = normalize_llm_response(self._llm.complete(messages))
 
         session.summary = summary
         session.save(
@@ -322,7 +325,9 @@ class ChatService:
             + chart_instructions
             + "The chart must ALWAYS go in the structured chart field only. "
             "NEVER put JSON, code fences, or a chart specification in the "
-            "response text; the response is prose for humans to read. "
+            "response text; the response is prose for humans to read. Format "
+            "the visible response as plain text with normal sentences, dot bullets, "
+            "or numbered lists. Do not use Markdown emphasis or asterisk bullets. "
             "For pie charts use one series and non-negative values. For bar/line "
             "charts use one or more named series. The chart must use this schema: "
             "{type: pie|bar|line, title, x_axis, y_axis, series: [names], "
@@ -1034,6 +1039,7 @@ class ChatService:
 
             completion = None
             provider_error = None
+            llm_response = False
             try:
                 if chart_file is not None and not attachment_sections:
                     # Nothing readable in the target: no LLM call. The CSV
@@ -1045,6 +1051,7 @@ class ChatService:
                     completion = self._llm.generate_structured(
                         prompt, ChatCompletion
                     )
+                    llm_response = True
 
 
                 sanitized = self._strip_chart_json_blocks(completion.response)
@@ -1079,6 +1086,7 @@ class ChatService:
                     completion = ChatCompletion(
                         response=response_text, chart=chart
                     )
+                    llm_response = False
 
 
             if completion is None:
@@ -1105,6 +1113,11 @@ class ChatService:
             raise ChatProviderError(
                 "The LLM provider failed to generate a response."
             ) from exc
+
+        if llm_response:
+            completion = completion.model_copy(
+                update={"response": normalize_llm_response(completion.response)}
+            )
 
         if not completion.response.strip():
             raise ChatProviderError("The LLM provider returned an empty response.")

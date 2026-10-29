@@ -28,6 +28,7 @@ from chat.services.llm_tools import (  # noqa: F401
     get_handler,
     register,
 )
+from chat.services.plain_text import normalize_llm_response
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,8 @@ class LangGraphChatService:
 
         tool_result = result["tool_result"]
         content = (tool_result.content or "").strip()
+        if getattr(tool_result, "llm_generated", False):
+            content = normalize_llm_response(content)
         if not content:
             raise ChatProviderError("The LLM provider returned an empty response.")
 
