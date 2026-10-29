@@ -191,6 +191,9 @@ class LangGraphChatService:
                 citations=tool_result.citations or [],
                 chart_data=tool_result.chart_data,
                 metadata={
+                    # Tool metadata (file_panel, temporal_links, ...) first so
+                    # the fixed keys below always win.
+                    **(getattr(tool_result, "metadata", None) or {}),
                     "tool_used": tool_result.tool_used or "",
                     "node_slug": result["node_slug"],
                     "route_reason": result["route_reason"],

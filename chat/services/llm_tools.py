@@ -55,6 +55,7 @@ class ToolResult:
     tool_used: str = ""
     ok: bool = True
     error: str | None = None
+    metadata: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -410,105 +411,55 @@ def _prompt_tool(ctx: "ToolContext") -> "ToolResult":
 # --------------------------------------------------------------------------- #
 @register("add_to_knowledge_base")
 def _add_to_knowledge_base(ctx: "ToolContext") -> "ToolResult":
-    """``add_to_knowledge_base`` tool — promote chat attachment(s) and process.
+    """``add_to_knowledge_base`` tool — process / stop / resume / list the
+    chat's files through the same command service as ``views.send`` (F.4).
 
-    Processing for the CHAT path always goes through Temporal (chunk + embed +
-    index in the background). Already-embedded files are skipped (dedup). The
-    reply names the Temporal workflow id so the user can track it under
-    Documents.
+    A gated-out STOP/RESUME (or any other kind) falls back to PROCESS, because
+    the router already chose a KB tool.
     """
-    from chat.services import kb
+    from chat.services.file_commands import Kind
 
-    # If a selection is already pending (the router mis-routed a follow-up like
-    # "second one" back to this tool), interpret this message as the answer.
-    metadata = getattr(ctx.conversation, "metadata", None) or {}
-    if metadata.get(kb.PENDING_KB_KEY):
-        result = kb.handle_pending_selection(
-            conversation=ctx.conversation,
-            company=ctx.company,
-            message_text=ctx.message_text,
-            actor=ctx.user,
-        )
-        # When the deterministic parser abstained (re-ask) but an LLM is
-        # available, let it map the free text to 1-based indices and dispatch.
-        if result is not None and result.get("reask") and ctx.llm is not None:
-            llm_result = _llm_resolve_pending(ctx, kb)
-            if llm_result is not None:
-                result = llm_result
-        if result is not None:
-            return ToolResult(
-                content=result["content"], tool_used="add_to_knowledge_base"
-            )
-
-    result = kb.add_session_attachments_to_kb(
-        conversation=ctx.conversation,
-        company=ctx.company,
-        attachment_ids=ctx.attachment_ids,
-        actor=ctx.user,
+    return _file_command_tool(
+        ctx,
+        allowed={Kind.PROCESS, Kind.STOP, Kind.RESUME, Kind.LIST},
+        default=Kind.PROCESS,
+        tool_used="add_to_knowledge_base",
     )
-    return ToolResult(content=result["content"], tool_used="add_to_knowledge_base")
-
-
-def _llm_resolve_pending(ctx: "ToolContext", kb):
-    """LLM assist: map the free-text answer to 1-based indices, then dispatch.
-
-    Only consulted when the deterministic ``resolve_selection`` abstained and an
-    LLM is present on the context. Returns a dispatch result dict (and clears
-    pending state), or ``None`` to fall back to the deterministic re-ask.
-    """
-    from pydantic import BaseModel
-
-    class _IndexChoice(BaseModel):
-        indices: list[int]
-
-    state = (getattr(ctx.conversation, "metadata", None) or {}).get(kb.PENDING_KB_KEY)
-    if not state:
-        return None
-    files = list(state.get("files") or [])
-    numbered = "\n".join(
-        f"{i}. {f.get('title')}" for i, f in enumerate(files, start=1)
-    )
-    prompt = (
-        "The user was shown this numbered list of files and asked which to add "
-        "to the knowledge base:\n"
-        f"{numbered}\n\n"
-        f'The user replied: "{ctx.message_text}"\n\n'
-        "Return the 1-based index numbers of the file(s) they chose. If they "
-        "asked for all files, return every index. Only use indices that appear "
-        "in the list above."
-    )
-    try:
-        choice = ctx.llm.generate_structured(prompt, _IndexChoice)
-    except Exception:  # noqa: BLE001 - LLM assist must never break the reply
-        logger.exception("LLM index-resolution failed for pending KB selection")
-        return None
-
-    ids = kb.ids_for_indices(files, list(choice.indices or []))
-    if not ids:
-        return None
-    result = kb.dispatch_selected(
-        conversation=ctx.conversation,
-        company=ctx.company,
-        ids=ids,
-        actor=ctx.user,
-    )
-    kb.clear_pending_selection(conversation=ctx.conversation, actor=ctx.user)
-    return result
 
 
 @register("document_processing_status")
 def _document_processing_status(ctx: "ToolContext") -> "ToolResult":
-    """``document_processing_status`` tool — report in-flight document status.
+    """``document_processing_status`` tool — the chat files' processing status.
 
-    Lists the company's documents that are queued/processing (plus the most
-    recent ready/failed), or reports a single document when the user names a
-    document/task id. The data is injected into the reply deterministically so
-    the status is accurate rather than hallucinated.
+    Answers through the same command service as ``views.send`` (F.4); STOP,
+    RESUME and LIST pass through, anything else reports STATUS.
     """
-    from chat.services.kb import document_status_report
+    from chat.services.file_commands import Kind
 
-    content = document_status_report(
-        company=ctx.company,
-        message_text=ctx.message_text,
+    return _file_command_tool(
+        ctx,
+        allowed={Kind.STOP, Kind.RESUME, Kind.STATUS, Kind.LIST},
+        default=Kind.STATUS,
+        tool_used="document_processing_status",
     )
-    return ToolResult(content=content, tool_used="document_processing_status")
+
+
+def _file_command_tool(ctx, *, allowed, default, tool_used) -> "ToolResult":
+    from chat.services import file_commands
+
+    kind = file_commands.effective_kind(
+        file_commands.classify(ctx.message_text), ctx.conversation
+    )
+    if kind not in allowed:
+        kind = default
+    reply = file_commands.handle_file_command(
+        session=ctx.conversation,
+        kind=kind,
+        message=ctx.message_text,
+        attachment_ids=list(ctx.attachment_ids or []),
+        entry_ids=None,
+        actor=ctx.user,
+    )
+    return ToolResult(
+        content=reply.content, metadata=dict(reply.metadata), tool_used=tool_used
+    )

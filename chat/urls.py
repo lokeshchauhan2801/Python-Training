@@ -24,6 +24,12 @@ urlpatterns = [
         views.document_status_json,
         name="document_status_json",
     ),
+    path("<str:session_id>/files-json/", views.files_json, name="files_json"),
+    path(
+        "<str:session_id>/files/<str:entry_id>/<str:action>/",
+        views.file_action,
+        name="file_action",
+    ),
     path("<str:session_id>/delete/", views.delete_session, name="delete_session"),
     path("<str:session_id>/", views.chat_session, name="session"),
 ]

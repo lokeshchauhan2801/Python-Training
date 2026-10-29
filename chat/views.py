@@ -332,7 +332,10 @@ def new_session(request):
     )
 
 
+from chat.services import file_commands
 from chat.services import kb as _kb
+from documents import controls
+from documents.models import Document
 
 # ChatGPT-style phrasing when a file is attached with no message: the assistant
 # asks what to do instead of auto-summarising (Option A). Kept short; the user
@@ -343,16 +346,6 @@ _EMPTY_ATTACHMENT_REPLY = (
     "create a chart from its data, or add it to the company knowledge base so "
     "it's searchable later — just tell me."
 )
-
-
-def _is_add_to_kb_request(text):
-    """True when the message asks to add the attached file to the knowledge base."""
-    return _kb.is_add_to_kb_request(text)
-
-
-def _is_status_request(text):
-    """True when the message asks about document processing status/progress."""
-    return _kb.is_status_request(text)
 
 
 def _attachment_titles(session, attachment_ids):
@@ -368,8 +361,12 @@ def _attachment_titles(session, attachment_ids):
     return ", ".join(f"“{t}”" for t in titles[:-1]) + f" and “{titles[-1]}”"
 
 
-def _turn_response(request, session, turn):
-    """Serialize a stored turn as the ``{user, assistant, session}`` ``send`` shape."""
+def _turn_response(request, session, turn, selection_consumed=False):
+    """Serialize a stored turn as the ``send`` shape.
+
+    ``{user, assistant, session, selection_consumed}``; ``selection_consumed``
+    tells the page to clear the picker's checkboxes.
+    """
     session.refresh_from_db(fields=["title"])
     pair = _turn_payload(turn)
     return JsonResponse(
@@ -377,6 +374,7 @@ def _turn_response(request, session, turn):
             "user": pair["user"],
             "assistant": pair["assistant"],
             "session": {"id": str(session.session_id), "title": session.title},
+            "selection_consumed": bool(selection_consumed),
         },
         status=201,
     )
@@ -402,108 +400,76 @@ def _reply_empty_attachment(request, session, attachment_ids):
     return _turn_response(request, session, turn)
 
 
-def _add_attachments_to_knowledge_base(request, session, question, attachment_ids):
-    """Promote chat attachments to library Documents and dispatch via Temporal.
-
-    Delegates to ``chat.services.kb.add_session_attachments_to_kb`` (dedup +
-    Temporal dispatch; the CHAT path always uses Temporal). Persists the user
-    message and a direct assistant confirmation (no LLM call) that names the
-    Temporal workflow id, and returns the pair in the shape ``send`` returns.
-    When a dispatch fails (transient), the assistant message carries
-    ``metadata.retry_document_ids`` so the chat can render a Retry button.
-    """
-    service = _chat_service()
-
-    result = _kb.add_session_attachments_to_kb(
-        conversation=session,
-        company=session.company,
+def _command_turn(
+    request, session, question, attachment_ids, *, kind, entry_ids, consumed
+):
+    """Store a deterministic file-command turn (no LLM) and return it."""
+    reply = file_commands.handle_file_command(
+        session=session,
+        kind=kind,
+        message=question,
         attachment_ids=attachment_ids,
+        entry_ids=entry_ids,
         actor=request.user,
     )
-
-    turn = service.create_turn(
+    turn = _chat_service().create_turn(
         session,
         user=session.user,
         question=question,
-        response=result["content"],
+        response=reply.content,
         model_name="knowledge_base",
-        metadata=_kb_reply_metadata(result),
+        metadata=reply.metadata,
         attachment_ids=attachment_ids,
         actor=request.user,
     )
+    return _turn_response(request, session, turn, selection_consumed=consumed)
 
-    return _turn_response(request, session, turn)
 
+def _file_command_reply(request, session, question, attachment_ids, selected):
+    """``send`` steps 2–5 (design F.1): a file-command turn, or None.
 
-def _kb_reply_metadata(result):
-    """Map a kb.py dispatch result to the assistant message metadata keys.
-
-    One place that maps ``result`` -> ``{retry_document_ids, temporal_links,
-    live_status_document_ids}`` so both ``_add_attachments_to_knowledge_base``
-    and the pending-selection seam set identical metadata.
+    None means the message is not a file command for this session and goes to
+    the orchestrator. Tests of the LangGraph tool path patch this wrapper.
     """
-    extra_meta = {}
-    if result.get("failed_ids"):
-        extra_meta["retry_document_ids"] = result["failed_ids"]
-    # Quick links to the Temporal workflow(s) for the dispatched file(s).
-    temporal_links = [
-        {"title": q["title"], "url": q["temporal_url"], "workflow_id": q["workflow_id"]}
-        for q in result.get("queued", [])
-        if q.get("temporal_url")
-    ]
-    if temporal_links:
-        extra_meta["temporal_links"] = temporal_links
-    # Live-track the freshly queued documents right in this reply.
-    queued_ids = [q["id"] for q in result.get("queued", [])]
-    if queued_ids:
-        extra_meta["live_status_document_ids"] = queued_ids
-    return extra_meta
+    Kind = file_commands.Kind
+    cmd = file_commands.classify(question)
 
+    # 3. A picker selection with no text, or with a process command.
+    if selected and (not question or cmd.kind == Kind.PROCESS):
+        if not question:
+            titles = [
+                f.title for f in session_files.files_by_ids(session, selected)
+            ]
+            question = "Process: " + ", ".join(titles)
+        return _command_turn(
+            request,
+            session,
+            question,
+            attachment_ids,
+            kind=Kind.PROCESS,
+            entry_ids=selected,
+            consumed=True,
+        )
 
-def _answer_pending_kb_selection(request, session, question, attachment_ids, result):
-    """Persist the user answer + deterministic assistant reply for a pending KB
-    selection (dispatch/cancel/re-ask), mirroring the add-to-KB reply shape."""
-    service = _chat_service()
-    # A re-ask or a cancel dispatched nothing, so there is no metadata to set.
-    turn = service.create_turn(
+    # 4. A file attached with no message: ask what to do.
+    if not question and attachment_ids:
+        return _reply_empty_attachment(request, session, attachment_ids)
+
+    # 5. A STOP / RESUME / STATUS / PROCESS / LIST command for this session.
+    kind = file_commands.effective_kind(cmd, session)
+    if kind is None:
+        return None
+    # STOP and LIST ignore the selection: in-flight rows have no checkbox (V12).
+    entry_ids = selected if selected and kind in (Kind.RESUME, Kind.STATUS) else None
+    return _command_turn(
+        request,
         session,
-        user=session.user,
-        question=question,
-        response=result["content"],
-        model_name="knowledge_base",
-        metadata=_kb_reply_metadata(result),
-        attachment_ids=attachment_ids,
-        actor=request.user,
+        question,
+        attachment_ids,
+        kind=kind,
+        entry_ids=entry_ids,
+        consumed=bool(entry_ids),
     )
-    return _turn_response(request, session, turn)
-
-
-def _answer_document_status(request, session, question, attachment_ids):
-    """Report document processing status directly (no LLM call).
-
-    The assistant message carries ``metadata.live_status_document_ids`` so the
-    chat UI can render a live tracker that polls the status endpoint until the
-    referenced documents reach a terminal state.
-    """
-    service = _chat_service()
-    content = _kb.document_status_report(
-        company=session.company, message_text=question
-    )
-    track_ids = _kb.status_document_ids(
-        company=session.company, message_text=question
-    )
-    metadata = {"live_status_document_ids": track_ids} if track_ids else {}
-    turn = service.create_turn(
-        session,
-        user=session.user,
-        question=question,
-        response=content,
-        model_name="assistant",
-        metadata=metadata,
-        attachment_ids=attachment_ids,
-        actor=request.user,
-    )
-    return _turn_response(request, session, turn)
 
 
 @login_required
@@ -531,49 +497,28 @@ def send(request, session_id):
         return JsonResponse({"error": "Too many files in one request."}, status=400)
     except session_files.UnknownEntry:
         return JsonResponse({"error": "Unknown attachment."}, status=400)
+    # Files checked in a picker; all-or-nothing.
+    selected = list(dict.fromkeys(request.POST.getlist("selected_file_ids")))
+    try:
+        session_files.files_by_ids(session, selected)
+    except session_files.TooManyIds:
+        return JsonResponse({"error": "Too many files in one request."}, status=400)
+    except session_files.UnknownEntry:
+        return JsonResponse(
+            {"error": "Some selected files are not in this chat."}, status=400
+        )
 
-    # A turn needs EITHER text OR at least one attachment. Sending a media file
-    # with no message is allowed; only a turn with neither is rejected.
-    if not question and not attachment_ids:
+    # A turn needs text, an attachment or a picker selection.
+    if not question and not attachment_ids and not selected:
         return JsonResponse(
             {"error": "Type a message or attach a file."}, status=400
         )
-    # File attached with NO message (ChatGPT/Claude behaviour, Option A): don't
-    # fabricate a prompt or auto-summarise — store the attachment turn and ask
-    # the user what they want to do with it.
-    if not question and attachment_ids:
-        return _reply_empty_attachment(request, session, attachment_ids)
 
-    # Stateful KB-selection follow-up: if we previously asked "which file(s)?"
-    # and saved pending state, interpret THIS message as the selection answer
-    # BEFORE the add-to-KB / router path, so "all" / "second one" / a filename
-    # resolve the pending choice instead of re-triggering a brand-new add. Runs
-    # for BOTH orchestration paths because send() is shared. Deterministic (no
-    # LLM) — the view seam only uses the deterministic parser in kb.py.
-    pending = _kb.handle_pending_selection(
-        conversation=session,
-        company=session.company,
-        message_text=question,
-        actor=request.user,
-    )
-    if pending is not None:
-        return _answer_pending_kb_selection(
-            request, session, question, attachment_ids, pending
-        )
-
-    # Intent net (works for BOTH the LangGraph router path and the plain
-    # ChatService path, i.e. companies with no agent graph):
-    #   * "add/process this file to the knowledge base" -> Temporal processing.
-    #   * "what's processing / status of <id>"          -> status report.
-    # Honour an add-to-KB request even when no file is re-attached on this turn:
-    # the file is commonly uploaded on an earlier empty-text turn, so defer to
-    # the session fallback in ``kb.add_session_attachments_to_kb`` to resolve it.
-    if _is_add_to_kb_request(question):
-        return _add_attachments_to_knowledge_base(
-            request, session, question, attachment_ids
-        )
-    if _is_status_request(question):
-        return _answer_document_status(request, session, question, attachment_ids)
+    # File commands (process / stop / resume / status / list) and the empty
+    # attachment reply run before either orchestrator, with no LLM call.
+    reply = _file_command_reply(request, session, question, attachment_ids, selected)
+    if reply is not None:
+        return reply
 
     resolved_provider, resolved_model = resolve_provider_model(model_name, provider)
 
@@ -620,6 +565,7 @@ def send(request, session_id):
             "user": pair["user"],
             "assistant": pair["assistant"],
             "session": {"id": str(session.session_id), "title": session.title},
+            "selection_consumed": False,
         },
         status=201,
     )
@@ -690,6 +636,10 @@ def reprocess_document(request, session_id):
     result = _kb.retry_document_processing(
         document_id=document_id, company=session.company, actor=request.user
     )
+    if result.get("conflict"):
+        status = 409
+    else:
+        status = 200 if result["ok"] else 502
     return JsonResponse(
         {
             "ok": result["ok"],
@@ -697,7 +647,86 @@ def reprocess_document(request, session_id):
             "workflow_id": result.get("workflow_id"),
             "document_id": document_id,
         },
-        status=200 if result["ok"] else 502,
+        status=status,
+    )
+
+
+@login_required
+@require_http_methods(["GET"])
+def files_json(request, session_id):
+    """Live rows for every file of the chat (the picker / tracker panels)."""
+    session = _resolve_session(request, session_id)
+    rows = [session_files.file_row(f) for f in session_files.reconcile(session)]
+    return JsonResponse(
+        {"files": rows, "all_terminal": all(row["terminal"] for row in rows)}
+    )
+
+
+_FILE_ACTIONS = {"stop": "stop", "resume": "resume", "retry": "resume"}
+
+
+def _one_file(session, entry_id):
+    try:
+        found = session_files.files_by_ids(session, [entry_id])
+    except session_files.UnknownEntry:
+        return None
+    return found[0] if found else None
+
+
+@login_required
+@require_http_methods(["POST"])
+def file_action(request, session_id, entry_id, action):
+    """Stop (200) or resume (202) one chat file; 409 when its state disallows it."""
+    session = _resolve_session(request, session_id)
+    action = _FILE_ACTIONS.get(action)
+    if action is None:
+        return JsonResponse({"error": "Unknown action."}, status=404)
+    session_files.reconcile(session)
+    target = _one_file(session, entry_id)
+    if target is None:
+        return JsonResponse({"error": "Unknown file."}, status=404)
+
+    def _conflict(message, current=target):
+        return JsonResponse(
+            {"ok": False, "error": message, "file": session_files.file_row(current)},
+            status=409,
+        )
+
+    title = f"“{target.title}”"
+    if target.state == "not_started":
+        return _conflict(f"{title} hasn't been processed yet. Select it and press Process.")
+    if target.state == "removed":
+        return _conflict(f"{title} was removed from Documents.")
+
+    try:
+        if action == "stop":
+            # Outside the session lock: terminate is network IO.
+            result = controls.stop_document(target.document)
+            status = 200
+        else:
+            with session_files.locked_files(session, actor=request.user):
+                document = (
+                    Document.objects.select_for_update()
+                    .filter(pk=target.document_id, company=session.company_id)
+                    .first()
+                )
+                if document is None:
+                    raise controls.ControlError(f"{title} was removed from Documents.")
+                result = controls.resume_document(document)
+            status = 202
+    except controls.ControlError as exc:
+        return _conflict(exc.message, _one_file(session, entry_id) or target)
+    except Exception:  # noqa: BLE001 - report a retryable failure
+        logger.exception("Chat file %s %s failed in session %s", entry_id, action, session.pk)
+        return JsonResponse(
+            {"ok": False, "error": f"Couldn't {action} {title}. Please try again."},
+            status=502,
+        )
+
+    current = _one_file(session, entry_id) or target
+    return JsonResponse(
+        {"ok": True, "message": result.message, "file": session_files.file_row(current)},
+        status=status,
     )
 
 

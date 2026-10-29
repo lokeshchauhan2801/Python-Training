@@ -1,21 +1,37 @@
-"""File commands typed in the chat (design F.2).
+"""File commands typed in the chat (design F.1 step 5, F.2, F.3, G.4).
 
-For now only the pure classifier: ``classify(text) -> Command``. It never reads
-the session; the session-dependent gate (``effective_kind``) and the handler
-come later.
+* ``classify(text) -> Command`` is pure: it never reads the session.
+* ``effective_kind(cmd, session)`` gates STOP/RESUME/weak STATUS on the
+  session's files, so ordinary chat use of those words reaches the LLM.
+* ``handle_file_command(...) -> CommandReply`` answers a command
+  deterministically (no LLM). ``views.send`` and the two LangGraph KB tools
+  both call it, so both orchestration paths give the same reply.
+* ``process_entries(...)`` creates / starts / resumes / reprocesses the
+  Documents behind the chosen entries.
 """
 from __future__ import annotations
 
+import functools
+import logging
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from chat.services import kb
+from django.db import transaction
+
+from chat.services import kb, session_files
 from chat.services.chat_service import ChatService
 from chat.services.file_matching import (
     COMMAND_STOPWORDS,
     explicit_name_tokens,
+    match_command_segments,
     name_tokens,
+    prefix_hits,
 )
+from documents import controls
+from documents.models import Document
+
+logger = logging.getLogger(__name__)
 
 
 class Kind:
@@ -219,3 +235,498 @@ def classify(text: str | None) -> Command:
         return _command(Kind.LIST, text)
 
     return Command(Kind.NONE)
+
+
+# --------------------------------------------------------------------------
+# Session gate (F.1 step 5, review-3 F3/F5)
+# --------------------------------------------------------------------------
+
+
+def _has_started_file(session) -> bool:
+    state = session_files.FilesState.from_context(session.context)
+    return any(entry.get("document_id") for entry in state.all_entries())
+
+
+def effective_kind(cmd: Command, session) -> str | None:
+    """The command kind to run on this session, or None to route as chat."""
+    if cmd.kind == Kind.NONE:
+        return None
+    if cmd.kind == Kind.STATUS:
+        if cmd.weak and not _has_started_file(session):
+            return None
+        return Kind.STATUS
+    if cmd.kind in (Kind.PROCESS, Kind.LIST):
+        return cmd.kind
+    # STOP / RESUME
+    files = session_files.reconcile(session)
+    if cmd.needs_name:
+        if cmd.loose_tokens and all(prefix_hits(t, files) for t in cmd.loose_tokens):
+            return cmd.kind
+        return None
+    if cmd.bare:
+        return cmd.kind if session_files.has_eligible(session, cmd.kind) else None
+    if not cmd.strong and any(not prefix_hits(t, files) for t in cmd.loose_tokens):
+        return None
+    return cmd.kind
+
+
+# --------------------------------------------------------------------------
+# Replies (F.3, G.4)
+# --------------------------------------------------------------------------
+
+PICKER_NOTE = (
+    "Here is the list of files in this chat. Select the file(s) you want to "
+    "process."
+)
+NO_FILES_REPLY = (
+    "I don't see any files in this chat yet. Attach one and ask me again."
+)
+NOTHING_TO_STOP = "Nothing is processing in this chat right now."
+NOTHING_TO_RESUME = "There is nothing stopped or failed to resume."
+START_FAILED = (
+    "I couldn't start processing. Nothing was changed. Please try again."
+)
+STATUS_HEADER = "Here is the status of the files in this chat:"
+
+PLURAL_CUE = re.compile(
+    r"\b(all|both|these|those|them|everything|files|documents|docs|attachments)\b",
+    _I,
+)
+
+_IN_FLIGHT = {"queued", "processing"}
+_RESUMABLE = {"stopped", "failed"}
+
+
+@dataclass(frozen=True)
+class CommandReply:
+    content: str
+    metadata: dict = field(default_factory=dict)
+
+
+def _panel(mode: str, entry_ids=None, note: str = "") -> dict:
+    """``metadata.file_panel``: ``entry_ids=None`` means every file."""
+    return {
+        "mode": mode,
+        "entry_ids": list(entry_ids) if entry_ids is not None else None,
+        "note": note,
+    }
+
+
+def _q(title) -> str:
+    return f"“{title}”"
+
+
+def _ids(files) -> list:
+    return list(dict.fromkeys(f.id for f in files))
+
+
+def _company_status(session, message) -> CommandReply:
+    """Today's company-wide report, with its live progress rows (V10)."""
+    content = kb.document_status_report(
+        company=session.company, message_text=message
+    )
+    track = kb.status_document_ids(company=session.company, message_text=message)
+    return CommandReply(content, {"live_status_document_ids": track} if track else {})
+
+
+def _status_line(f) -> str:
+    state = f.state
+    doc = f.document
+    if state == "not_started":
+        text = "not started"
+    elif state == "queued":
+        text = "queued"
+    elif state == "processing":
+        stage = controls.current_stage(doc)
+        progress = f"{doc.processing_progress_display}%"
+        text = f"processing ({stage}, {progress})" if stage else f"processing ({progress})"
+    elif state == "stopped":
+        stage = controls.current_stage(doc)
+        text = (f"stopped at {stage}" if stage else "stopped") + (
+            f" — say “resume {f.title}” to continue"
+        )
+    elif state == "failed":
+        stage = controls.current_stage(doc)
+        text = f"failed at {stage}" if stage else "failed"
+        error = (doc.processing_error or "").strip()[:200]
+        if error:
+            text += f" — {error}"
+        text += ("" if text.endswith((".", "!", "?")) else ".") + " "
+        text += session_files.FAILED_HINT
+    elif state == "processed":
+        text = "processed"
+    else:
+        text = "removed from Documents"
+    return f"- {f.title}: {text}"
+
+
+def _status_reply(targets, lines, entry_ids) -> CommandReply:
+    body = [STATUS_HEADER, *(_status_line(f) for f in targets)] if targets else []
+    content = "\n".join([*lines, *body]) if (lines or body) else STATUS_HEADER
+    return CommandReply(content, {"file_panel": _panel("tracker", entry_ids)})
+
+
+def _stop_lines(targets) -> list:
+    lines = []
+    for f in targets:
+        if f.state not in _IN_FLIGHT:
+            lines.append(f"{_q(f.title)} isn't processing, so there is nothing to stop.")
+            continue
+        try:
+            controls.stop_document(f.document)
+        except controls.ControlError as exc:
+            lines.append(f"Couldn't stop {_q(f.title)}: {exc.message}")
+            continue
+        except Exception:  # noqa: BLE001 - one file must not break the reply
+            logger.exception("Could not stop chat file %s", f.id)
+            lines.append(f"Couldn't stop {_q(f.title)}. Please try again.")
+            continue
+        lines.append(f"Stopped {_q(f.title)}.")
+    return lines
+
+
+def _temporal_links(outcomes) -> list:
+    links = []
+    for outcome in outcomes:
+        if outcome.result not in _QUEUED_RESULTS or not outcome.document_id:
+            continue
+        wf = kb.workflow_id_for(outcome.document_id)
+        url = kb.temporal_ui_url(wf)
+        if url:
+            links.append({"title": outcome.title, "url": url, "workflow_id": wf})
+    return links
+
+
+def _run_processing(session, targets, actor, allowed):
+    """``(lines, metadata_extra, failed)`` for PROCESS / RESUME targets."""
+    try:
+        outcomes = process_entries(session, _ids(targets), actor, allowed=allowed)
+    except Exception:  # noqa: BLE001 - rolled back; tell the user nothing changed
+        logger.exception("Could not process chat files in session %s", session.pk)
+        return [START_FAILED], {}, True
+    extra = {}
+    links = _temporal_links(outcomes)
+    if links:
+        extra["temporal_links"] = links
+    return [o.line for o in outcomes], extra, False
+
+
+@dataclass
+class _NameTargets:
+    files: list = field(default_factory=list)
+    ambiguous: list = field(default_factory=list)  # [(tokens, files)]
+    missing: list = field(default_factory=list)  # [tokens]
+
+    @property
+    def named(self) -> bool:
+        return bool(self.files or self.ambiguous or self.missing)
+
+
+def _hit_tokens(m) -> tuple:
+    hits = tuple(t for t in m.name_tokens if prefix_hits(t, m.files, start_only=False))
+    return hits or m.name_tokens
+
+
+def _name_targets(message, files) -> _NameTargets:
+    """The F.3 name-match table, per segment (review-3 F6)."""
+    found = _NameTargets()
+    seen = set()
+    for m in match_command_segments(message, files, stopwords=COMMAND_STOPWORDS):
+        if m.kind == "exact" or (m.kind == "prefix" and len(m.files) == 1):
+            for f in m.files:
+                if f.id not in seen:
+                    seen.add(f.id)
+                    found.files.append(f)
+        elif m.kind == "prefix":
+            found.ambiguous.append((" ".join(_hit_tokens(m)), list(m.files)))
+        elif m.explicit_tokens:
+            found.missing.append(" ".join(m.explicit_tokens))
+    return found
+
+
+def handle_file_command(
+    *, session, kind, message, attachment_ids=None, entry_ids=None, actor=None
+) -> CommandReply:
+    """Answer one file command deterministically (design F.3)."""
+    message = message or ""
+    files = session_files.reconcile(session)
+    if kind == Kind.STATUS and (kb._extract_doc_id(message) or not files):
+        return _company_status(session, message)
+    if not files:
+        return CommandReply(NO_FILES_REPLY)
+    if kind == Kind.LIST:
+        return CommandReply(PICKER_NOTE, {"file_panel": _panel("picker", None, PICKER_NOTE)})
+
+    by_id = {f.id: f for f in files}
+
+    # 1. The picker selection.
+    if entry_ids:
+        targets = [by_id[i] for i in dict.fromkeys(entry_ids) if i in by_id]
+        return _act(session, kind, targets, actor, entry_ids=_ids(targets))
+
+    # 2. Names in the message.
+    names = _name_targets(message, files)
+    if names.named:
+        return _named_reply(session, kind, names, actor)
+
+    # 3. PROCESS only: this turn's attachments.
+    if kind == Kind.PROCESS:
+        attached = [by_id[i] for i in dict.fromkeys(attachment_ids or []) if i in by_id]
+        if len(attached) == 1 or (attached and PLURAL_CUE.search(message)):
+            return _act(session, kind, attached, actor, entry_ids=_ids(attached))
+        picker_ids = _ids(attached) if attached else None
+        return CommandReply(
+            PICKER_NOTE, {"file_panel": _panel("picker", picker_ids, PICKER_NOTE)}
+        )
+
+    # 4. No file named: the last table row.
+    if kind == Kind.STOP:
+        targets = [f for f in files if f.state in _IN_FLIGHT]
+        if not targets:
+            return CommandReply(NOTHING_TO_STOP)
+    elif kind == Kind.RESUME:
+        targets = [f for f in files if f.state in _RESUMABLE]
+        if not targets:
+            return CommandReply(NOTHING_TO_RESUME)
+    else:
+        return _status_reply(files, [], None)
+    return _act(session, kind, targets, actor, entry_ids=_ids(targets))
+
+
+def _act(session, kind, targets, actor, *, entry_ids, lines=()) -> CommandReply:
+    """Run ``kind`` on ``targets``; ``lines`` are name-table lines to prepend."""
+    lines = list(lines)
+    if kind == Kind.STATUS:
+        return _status_reply(targets, lines, entry_ids)
+    extra = {}
+    if kind == Kind.STOP:
+        lines += _stop_lines(targets)
+    elif targets:
+        allowed = _RESUMABLE if kind == Kind.RESUME else None
+        result_lines, extra, failed = _run_processing(session, targets, actor, allowed)
+        if failed:
+            return CommandReply(START_FAILED)
+        lines += result_lines
+    if not lines:
+        lines = [{
+            Kind.STOP: NOTHING_TO_STOP,
+            Kind.RESUME: NOTHING_TO_RESUME,
+        }.get(kind, "There is nothing to process.")]
+    return CommandReply(
+        "\n".join(lines),
+        {**extra, "file_panel": _panel("tracker", entry_ids)},
+    )
+
+
+def _named_reply(session, kind, names: _NameTargets, actor) -> CommandReply:
+    """Targets from names; ambiguous / not-found segments add their own line."""
+    targets = list(names.files)
+    candidates = [f for _tokens, group in names.ambiguous for f in group]
+    notes = []
+    if kind == Kind.PROCESS:
+        for tokens, _group in names.ambiguous:
+            notes.append(
+                f"I found several files matching “{tokens}”. Select the ones you "
+                "want to process."
+            )
+        for tokens in names.missing:
+            notes.append(
+                f"I couldn't find a file matching “{tokens}”. Here is the list of "
+                "files in this chat."
+            )
+        if not notes:
+            return _act(session, kind, targets, actor, entry_ids=_ids(targets))
+        lines = []
+        extra = {}
+        if targets:
+            lines, extra, failed = _run_processing(session, targets, actor, None)
+            if failed:
+                return CommandReply(START_FAILED)
+        note = " ".join(notes)
+        picker_ids = None if names.missing else _ids([*targets, *candidates])
+        return CommandReply(
+            "\n".join([*lines, *notes]),
+            {**extra, "file_panel": _panel("picker", picker_ids, note)},
+        )
+
+    lines = []
+    if kind == Kind.STATUS:
+        targets = list(dict.fromkeys([*targets, *candidates]))  # report matches
+    else:
+        button = "Stop" if kind == Kind.STOP else "Resume"
+        for tokens, group in names.ambiguous:
+            titles = ", ".join(f.title for f in group)
+            lines.append(
+                f"I found several files matching “{tokens}”: {titles}. Use the "
+                f"{button} button on the one you mean, or name it in full."
+            )
+    for tokens in names.missing:
+        lines.append(f"I couldn't find a file matching “{tokens}” in this chat.")
+    if names.missing:
+        panel_ids = None
+    else:
+        panel_ids = _ids([*targets, *candidates])
+    if kind != Kind.STATUS and not targets:
+        return CommandReply(
+            "\n".join(lines), {"file_panel": _panel("tracker", panel_ids)}
+        )
+    return _act(session, kind, targets, actor, entry_ids=panel_ids, lines=lines)
+
+
+# --------------------------------------------------------------------------
+# Processing (F.3 phases 0 and 1, review-3 F7)
+# --------------------------------------------------------------------------
+
+_QUEUED_RESULTS = {"queued", "resumed", "reprocessed"}
+
+
+@dataclass(frozen=True)
+class Outcome:
+    entry_id: str
+    title: str
+    result: str  # queued|resumed|reprocessed|processing|removed|not_allowed|missing|blocked|unknown
+    document_id: str | None = None
+    detail: str = ""
+
+    @property
+    def line(self) -> str:
+        name = _q(self.title)
+        return {
+            "queued": f"Queued {name} for processing.",
+            "resumed": f"Resuming {name} from the last completed step.",
+            "reprocessed": f"Queued {name} for processing again from the start.",
+            "processing": f"{name} is already processing.",
+            "removed": f"{name} was removed from Documents.",
+            "not_allowed": f"{name} isn't stopped or failed.",
+            "missing": f"{name}: the file is missing; please attach it again.",
+            "blocked": f"Couldn't process {name}: {self.detail}",
+        }.get(self.result, f"{name} is no longer in this chat.")
+
+
+def _delete_unsettled(key) -> None:
+    """``on_commit`` callback: drop the unsettled copy once the Document exists."""
+    session_files.purge_unsettled([key])
+
+
+def _delete_precopies(names) -> None:
+    storage = Document._meta.get_field("file").storage
+    for name in names:
+        try:
+            storage.delete(name)
+        except OSError:
+            logger.warning("Could not delete unused document copy %s", name, exc_info=True)
+
+
+def _precopy(session, ids) -> dict:
+    """Phase 0, no lock: copy each unstarted entry's bytes under documents/."""
+    file_field = Document._meta.get_field("file")
+    by_id = {f.id: f for f in session_files.list_files(session)}
+    precopies = {}
+    try:
+        for entry_id in ids:
+            f = by_id.get(entry_id)
+            if f is None or f.document_id:
+                continue
+            key = str(f.entry.get("storage_key") or "")
+            name = file_field.generate_filename(None, os.path.basename(key))
+            try:
+                with f.open() as src:
+                    precopies[entry_id] = file_field.storage.save(
+                        name, src, max_length=file_field.max_length
+                    )
+            except session_files.FileUnavailable:
+                # No outcome yet: phase 1 decides (another request may have
+                # processed it meanwhile).
+                logger.warning("Unsettled bytes missing for chat file %s", entry_id)
+    except Exception:
+        _delete_precopies(precopies.values())
+        raise
+    return precopies
+
+
+def _process_one(session, state, entry_id, actor, allowed, precopies, used) -> Outcome:
+    found = state.find(entry_id)
+    if found is None:
+        return Outcome(entry_id, entry_id, "unknown")
+    entry = found[1]
+    title = str(entry.get("title") or "")
+    document = None
+    if entry.get("document_id"):
+        document = (
+            Document.objects.select_for_update()
+            .filter(pk=entry["document_id"], company=session.company_id)
+            .first()
+        )
+    doc_id = str(document.pk) if document is not None else None
+    current = session_files.derive_state(entry, document)
+    if current in _IN_FLIGHT:
+        return Outcome(entry_id, title, "processing", doc_id)
+    if current == "removed":
+        return Outcome(entry_id, title, "removed")
+    if allowed is not None and current not in allowed:
+        return Outcome(entry_id, title, "not_allowed", doc_id)
+    try:
+        if current == "not_started" and document is None:
+            final = precopies.get(entry_id)
+            if final is None:
+                logger.warning("Chat file %s has no bytes to process", entry_id)
+                return Outcome(entry_id, title, "missing")
+            document = Document(
+                company=session.company,
+                uploaded_by=actor,
+                session=session,
+                source=Document.SOURCE_LIBRARY,
+                status=Document.STATUS_UPLOADED,
+                title=title,
+                file=final,
+                file_type=str(entry.get("file_type") or ""),
+                content_type=str(entry.get("content_type") or ""),
+                file_size=int(entry.get("size") or 0),
+            )
+            document.save(actor=actor)
+            used.add(entry_id)
+            state.set_document(entry_id, document.pk)
+            transaction.on_commit(
+                functools.partial(_delete_unsettled, entry.get("storage_key"))
+            )
+            controls.start_document(document)
+            return Outcome(entry_id, title, "queued", str(document.pk))
+        if current == "not_started":  # a legacy UPLOADED row
+            controls.start_document(document)
+            return Outcome(entry_id, title, "queued", doc_id)
+        if current in _RESUMABLE:
+            controls.resume_document(document)
+            return Outcome(entry_id, title, "resumed", doc_id)
+        # processed: same row, clean full reprocess
+        controls.reprocess_document(document)
+        state.move_to_unprocessed(entry_id)
+        return Outcome(entry_id, title, "reprocessed", doc_id)
+    except controls.ControlError as exc:
+        return Outcome(entry_id, title, "blocked", doc_id, exc.message)
+
+
+def process_entries(session, entry_ids, actor, allowed=None) -> list[Outcome]:
+    """Create / start / resume / reprocess the Documents behind ``entry_ids``.
+
+    Phase 0 copies unstarted files under ``documents/`` without a lock; phase 1
+    acts inside ``locked_files`` so a second request sees ``queued`` and skips.
+    The Temporal call itself runs on commit (``enqueue_document_processing``).
+    """
+    ids = list(dict.fromkeys(str(i) for i in (entry_ids or [])))
+    if not ids:
+        return []
+    precopies = {}
+    if allowed is None or "not_started" in allowed:
+        precopies = _precopy(session, ids)
+    used: set = set()
+    try:
+        with session_files.locked_files(session, actor=actor) as state:
+            outcomes = [
+                _process_one(session, state, entry_id, actor, allowed, precopies, used)
+                for entry_id in ids
+            ]
+    except Exception:
+        _delete_precopies(precopies.values())
+        raise
+    _delete_precopies(v for k, v in precopies.items() if k not in used)
+    return outcomes
