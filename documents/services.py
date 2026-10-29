@@ -10,6 +10,7 @@ from collections.abc import Callable
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from docx import Document as WordDocument
@@ -59,12 +60,24 @@ SUPPORTED_FILE_TYPES = {
 
 IMAGE_FILE_TYPES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
-OCR_PDF_DPI = 300
 OCR_UNAVAILABLE_MESSAGE = (
     "This file needs OCR because it has no selectable text, but the OCR engine "
     "(Tesseract) is not installed on the server. Install 'tesseract-ocr' and "
     "'poppler-utils', then retry — or upload a text-based PDF instead."
 )
+
+
+def _log_timing(document_id: str, phase: str, started: float, **fields) -> None:
+    """Log bounded processing timing without document content or storage data."""
+    logger.info(
+        "document_timing",
+        extra={
+            "document_id": str(document_id),
+            "phase": phase,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            **fields,
+        },
+    )
 
 
 class DocumentValidationError(Exception):
@@ -115,50 +128,110 @@ def _tesseract_available() -> bool:
         return False
 
 
-def _ocr_image(image) -> str:
+def _ocr_image(image, timeout: int | None = None) -> str:
     """Run Tesseract OCR on a single PIL image and return extracted text."""
     import pytesseract
 
-    return pytesseract.image_to_string(image) or ""
+    kwargs = {"timeout": timeout} if timeout is not None else {}
+    return pytesseract.image_to_string(image, **kwargs) or ""
 
 
-def _ocr_pdf(document: Document, raw: bytes | None = None) -> list[tuple[int, str, str]]:
-    """OCR a scanned/image-only PDF by rasterising each page then reading text.
+def _validate_pdf_limits(raw: bytes, page_count: int) -> None:
+    if len(raw) > settings.DOCUMENT_MAX_PDF_BYTES:
+        raise DocumentValidationError(
+            "This PDF is too large for OCR. Limit it to "
+            f"{settings.DOCUMENT_MAX_PDF_BYTES // (1024 * 1024)} MiB or less."
+        )
+    if page_count > settings.DOCUMENT_MAX_PDF_PAGES:
+        raise DocumentValidationError(
+            "This PDF has too many pages for OCR. Limit it to "
+            f"{settings.DOCUMENT_MAX_PDF_PAGES} pages or fewer."
+        )
 
-    Requires the Tesseract binary and Poppler (``pdf2image``). Raises a clear,
-    actionable ``DocumentValidationError`` when OCR is unavailable or produces
-    no text, so the failure is understandable from the Documents UI.
-    """
+
+def _ocr_pdf(
+    document: Document,
+    raw: bytes,
+    page_count: int,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[tuple[int, str, str]]:
+    """OCR a scanned PDF one bounded page range at a time."""
     if not _tesseract_available():
         raise DocumentValidationError(OCR_UNAVAILABLE_MESSAGE)
-
     if convert_from_bytes is None:
         raise DocumentValidationError(
             "Could not rasterise this PDF for OCR. Ensure 'poppler-utils' and "
             "the 'pdf2image' package are installed on the server, then retry."
         )
 
-    if raw is None:
-        with document.file.open("rb") as pdf_file:
-            raw = pdf_file.read()
-    try:
-        images = convert_from_bytes(raw, dpi=OCR_PDF_DPI)
-    except Exception as exc:
-        raise DocumentValidationError(
-            "Could not rasterise this PDF for OCR. Ensure 'poppler-utils' is "
-            "installed on the server, then retry."
-        ) from exc
-
     chunks: list[tuple[int, str, str]] = []
-    for page_number, image in enumerate(images, start=1):
+    batch_pages = settings.DOCUMENT_OCR_BATCH_PAGES
+    for first_page in range(1, page_count + 1, batch_pages):
+        last_page = min(page_count, first_page + batch_pages - 1)
+        render_started = time.monotonic()
         try:
-            text = _ocr_image(image)
-        finally:
-            image.close()
-        chunks.extend(
-            (page, f"Page {page} (OCR)", content)
-            for page, content in split_page_text(text, page_number)
+            images = convert_from_bytes(
+                raw,
+                dpi=settings.DOCUMENT_OCR_PDF_DPI,
+                first_page=first_page,
+                last_page=last_page,
+                thread_count=1,
+                timeout=settings.DOCUMENT_OCR_RENDER_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            if "timeout" in message:
+                raise DocumentValidationError(
+                    "PDF rendering timed out. Retry with a smaller or simpler PDF."
+                ) from exc
+            raise DocumentValidationError(
+                "Could not rasterise this PDF for OCR. Ensure 'poppler-utils' is "
+                "installed on the server, then retry."
+            ) from exc
+        _log_timing(
+            document.pk,
+            "ocr_render",
+            render_started,
+            first_page=first_page,
+            last_page=last_page,
+            count=len(images),
         )
+
+        try:
+            for offset, image in enumerate(images):
+                page_number = first_page + offset
+                ocr_started = time.monotonic()
+                try:
+                    text = _ocr_image(
+                        image, timeout=settings.DOCUMENT_OCR_PAGE_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    if "timeout" in str(exc).lower():
+                        raise DocumentValidationError(
+                            "OCR timed out. Retry with a smaller or simpler PDF."
+                        ) from exc
+                    if "tesseract" in str(exc).lower() or "not found" in str(exc).lower():
+                        raise DocumentValidationError(OCR_UNAVAILABLE_MESSAGE) from exc
+                    raise DocumentValidationError("OCR could not read this PDF page.") from exc
+                finally:
+                    image.close()
+                _log_timing(
+                    document.pk,
+                    "ocr_page",
+                    ocr_started,
+                    page=page_number,
+                    count=len(split_page_text(text, page_number)),
+                )
+                chunks.extend(
+                    (page, f"Page {page} (OCR)", content)
+                    for page, content in split_page_text(text, page_number)
+                )
+                if progress_callback is not None:
+                    progress_callback(page_number, page_count)
+        except Exception:
+            for image in images[offset + 1 :]:
+                image.close()
+            raise
 
     if not chunks:
         raise DocumentValidationError(
@@ -200,11 +273,17 @@ def _extract_image(document: Document) -> list[tuple[int, str, str]]:
     return chunks
 
 
-def _extract_pdf(document: Document) -> list[tuple[int, str, str]]:
+def _extract_pdf(
+    document: Document,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[tuple[int, str, str]]:
+    started = time.monotonic()
     try:
         with document.file.open("rb") as pdf_file:
             raw = pdf_file.read()
         reader = PdfReader(BytesIO(raw))
+        page_count = len(reader.pages)
+        _validate_pdf_limits(raw, page_count)
         chunks = []
         for page_number, page in enumerate(reader.pages, start=1):
             chunks.extend(
@@ -214,17 +293,22 @@ def _extract_pdf(document: Document) -> list[tuple[int, str, str]]:
                     page_number,
                 )
             )
+    except DocumentValidationError:
+        raise
     except Exception as exc:
         raise DocumentValidationError(
             "This PDF could not be read. Check that it is a valid, unencrypted PDF."
         ) from exc
-
+    _log_timing(document.pk, "pdf_text_extract", started, count=page_count)
 
     if not chunks:
-        logger.info(
-            "No text layer in PDF %s; falling back to OCR.", document.pk
+        logger.info("No text layer in PDF %s; falling back to OCR.", document.pk)
+        return _ocr_pdf(
+            document,
+            raw=raw,
+            page_count=page_count,
+            progress_callback=progress_callback,
         )
-        return _ocr_pdf(document, raw=raw)
     return chunks
 
 
@@ -480,10 +564,13 @@ def resolve_file_extension(document: Document) -> str:
     return ""
 
 
-def extract_document_chunks(document: Document) -> list[tuple[int, str, str]]:
+def extract_document_chunks(
+    document: Document,
+    ocr_progress_callback: Callable[[int, int], None] | None = None,
+) -> list[tuple[int, str, str]]:
     file_type = resolve_file_extension(document)
     if file_type == ".pdf":
-        chunks = _extract_pdf(document)
+        chunks = _extract_pdf(document, progress_callback=ocr_progress_callback)
     elif file_type == ".docx":
         chunks = _extract_docx(document)
     elif file_type in {".txt", ".md"}:
@@ -656,6 +743,7 @@ def _set_processing_progress(document: Document, stage: str, progress: int) -> N
 def _embed_chunks(
     extracted_chunks: list[tuple[int, str, str]],
     progress_callback: Callable[[int, int], None] | None = None,
+    document_id: str | None = None,
 ) -> list[list[float]]:
     """Embed chunk texts in offset-ordered batches across a worker pool.
 
@@ -681,11 +769,11 @@ def _embed_chunks(
     batch_results: dict[int, list[list[float]]] = {}
     with ThreadPoolExecutor(max_workers=EMBEDDING_WORKERS) as executor:
         futures = {
-            executor.submit(client.embed_documents, texts): offset
+            executor.submit(client.embed_documents, texts): (offset, time.monotonic())
             for offset, texts in embedding_batches
         }
         for future in as_completed(futures):
-            offset = futures[future]
+            offset, batch_started = futures[future]
             batch_embeddings = future.result()
             expected_count = min(
                 EMBEDDING_BATCH_SIZE, len(extracted_chunks) - offset
@@ -695,6 +783,14 @@ def _embed_chunks(
                     "The embedding service returned an incomplete result."
                 )
             batch_results[offset] = batch_embeddings
+            if document_id is not None:
+                _log_timing(
+                    document_id,
+                    "embedding_batch",
+                    batch_started,
+                    batch=offset // EMBEDDING_BATCH_SIZE + 1,
+                    count=expected_count,
+                )
             if progress_callback is not None:
                 progress_callback(len(batch_results), len(embedding_batches))
     embeddings = [
@@ -762,6 +858,7 @@ def process_document(document: Document) -> Document:
                 embeddings = _embed_chunks(
                     extracted_chunks,
                     progress_callback=update_embedding_progress,
+                    document_id=str(document.pk),
                 )
             except LLMConfigurationError as exc:
                 raise DocumentIndexError(
@@ -800,6 +897,7 @@ def process_document(document: Document) -> Document:
             ):
                 rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
                 vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
+                batch_started = time.monotonic()
                 vector_ids.extend(
                     vector_store.add_documents(
                         [
@@ -825,6 +923,13 @@ def process_document(document: Document) -> Document:
                         ],
                         collection=VECTOR_COLLECTION,
                     )
+                )
+                _log_timing(
+                    document.pk,
+                    "chroma_batch",
+                    batch_started,
+                    batch=batch_index,
+                    count=len(rows),
                 )
                 progress = 75 + int(23 * batch_index / total_batches)
                 _set_processing_progress(document, "indexing", progress)
@@ -1225,8 +1330,25 @@ def stage_extract_text(document_id: str) -> dict:
         return {"skipped": True, "chunk_count": document.chunks.count()}
 
     _stage_start(document, STAGE_EXTRACT_TEXT, progress=25)
+    extraction_started = time.monotonic()
+    ocr_detail = ""
+
+    def update_ocr_progress(page_number: int, page_count: int) -> None:
+        nonlocal ocr_detail
+        progress = 25 + (5 * page_number // page_count)
+        ocr_detail = f"OCR page {page_number}/{page_count}"
+        DocumentStage.objects.filter(
+            document=document, name=STAGE_EXTRACT_TEXT
+        ).update(detail=ocr_detail, updated_at=timezone.now())
+        _touch_document_stage(document, STAGE_EXTRACT_TEXT, progress)
+
     try:
-        extracted_chunks = extract_document_chunks(document)
+        extracted_chunks = extract_document_chunks(
+            document, ocr_progress_callback=update_ocr_progress
+        )
+        _log_timing(
+            document.pk, "text_extract", extraction_started, count=len(extracted_chunks)
+        )
         chunk_rows = [
             DocumentChunk(
                 company=document.company,
@@ -1260,7 +1382,11 @@ def stage_extract_text(document_id: str) -> dict:
     _stage_complete(
         document,
         STAGE_EXTRACT_TEXT,
-        detail=f"{len(chunk_rows)} chunks",
+        detail=(
+            f"{ocr_detail}; {len(chunk_rows)} chunks"
+            if ocr_detail
+            else f"{len(chunk_rows)} chunks"
+        ),
         progress=30,
     )
     return {"chunk_count": len(chunk_rows)}
@@ -1374,7 +1500,9 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
             for chunk in chunk_rows
         ]
         try:
-            embeddings = _embed_chunks(extracted_chunks)
+            embeddings = _embed_chunks(
+                extracted_chunks, document_id=str(document.pk)
+            )
         except LLMConfigurationError as exc:
             raise DocumentIndexError(
                 "LLM key required to embed library documents. Set "
@@ -1390,6 +1518,7 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
         ):
             rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
             vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
+            batch_started = time.monotonic()
             pushed_ids.extend(
                 vector_store.add_documents(
                     [
@@ -1415,6 +1544,13 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
                     ],
                     collection=VECTOR_COLLECTION,
                 )
+            )
+            _log_timing(
+                document.pk,
+                "chroma_batch",
+                batch_started,
+                batch=batch_index,
+                count=len(rows),
             )
             progress = 55 + int(20 * batch_index / total_batches)
             _touch_document_stage(
@@ -1470,7 +1606,10 @@ def stage_mark_completed(document_id: str) -> dict:
     """
     document = Document.objects.get(pk=document_id)
     _ensure_stages(document)
-    if _stage_is_completed(document, STAGE_MARK_COMPLETED):
+    if (
+        _stage_is_completed(document, STAGE_MARK_COMPLETED)
+        and document.status == Document.STATUS_READY
+    ):
         return {"chunk_count": document.chunk_count}
 
     _stage_start(document, STAGE_MARK_COMPLETED, progress=90)

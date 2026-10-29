@@ -533,7 +533,7 @@ class ReadyDocumentStageConsistencyTests(TestCase):
         )
         self.assertEqual(statuses, {DocumentStage.STATUS_COMPLETED})
 
-    def test_info_view_reports_completed_stages_for_a_ready_document(self):
+    def test_info_view_reports_stale_stage_rows_without_masking_them(self):
         client = Client()
         client.force_login(self.owner)
         url = reverse(
@@ -542,9 +542,8 @@ class ReadyDocumentStageConsistencyTests(TestCase):
         resp = client.get(url, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
         self.assertEqual(resp.status_code, 200)
         payload = resp.json()
-        self.assertEqual(payload["processing_backend"], "celery")
+        self.assertEqual(payload["db"]["backend"], "celery")
         self.assertTrue(payload["stages"])
         reported = {stage["status"] for stage in payload["stages"]}
-        # No stage of a READY document may still read pending/running.
-        self.assertNotIn(DocumentStage.STATUS_PENDING, reported)
-        self.assertNotIn(DocumentStage.STATUS_RUNNING, reported)
+        self.assertIn(DocumentStage.STATUS_PENDING, reported)
+        self.assertIn("stale", " ".join(payload["warnings"]).lower())

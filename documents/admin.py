@@ -586,7 +586,11 @@ class DocumentAdmin(BaseModelAdmin):
                     {
                         **row,
                         "id": str(row["id"]),
-                        "status_display": status_display[row["status"]],
+                        "status_display": (
+                            "Completed"
+                            if row["status"] == Document.STATUS_READY
+                            else status_display[row["status"]]
+                        ),
                         "processing_progress": (
                             100
                             if row["status"] == Document.STATUS_READY
@@ -628,9 +632,11 @@ class DocumentAdmin(BaseModelAdmin):
                         "id": str(row["id"]),
                         "title": row["title"],
                         "status": row["status"],
-                        "status_display": dict(Document.STATUS_CHOICES)[
-                            row["status"]
-                        ],
+                        "status_display": (
+                            "Completed"
+                            if row["status"] == Document.STATUS_READY
+                            else dict(Document.STATUS_CHOICES)[row["status"]]
+                        ),
                         "chunk_count": row["chunk_count"],
                         "processing_error": row["processing_error"],
                         "processing_progress": (
@@ -647,76 +653,100 @@ class DocumentAdmin(BaseModelAdmin):
         )
 
     def temporal_info_view(self, request, pk):
-
-
         if request.method != "GET":
             return JsonResponse({"detail": "Method not allowed."}, status=405)
         document = get_object_or_404(self.get_queryset(request), pk=pk)
-
-        stages = list(
-            DocumentStage.objects.filter(document=document)
-            .order_by("order")
-            .values("name", "status", "detail")
-        )
-        # Reconcile against the document's terminal state. A document that is
-        # READY (processed, with chunks) has, by definition, finished every
-        # stage; if any stage row still reads "pending"/"running" (e.g. the
-        # synchronous path or an older run left it behind), report it as
-        # completed so the Info popup matches reality instead of showing
-        # "pending" for a processed document.
-        if document.status == Document.STATUS_READY and stages:
-            for stage in stages:
-                if stage["status"] in (
-                    DocumentStage.STATUS_PENDING,
-                    DocumentStage.STATUS_RUNNING,
-                ):
-                    stage["status"] = DocumentStage.STATUS_COMPLETED
-        if not stages:
-
-
-            stage_name = document.processing_stage or document.status
-            stages = [
+        now = timezone.now()
+        stages = []
+        for stage in DocumentStage.objects.filter(document=document).order_by("order"):
+            elapsed_end = stage.finished_at or now
+            elapsed_ms = (
+                int((elapsed_end - stage.started_at).total_seconds() * 1000)
+                if stage.started_at
+                else None
+            )
+            stages.append(
                 {
-                    "name": stage_name or "processing",
+                    "name": stage.name,
+                    "status": stage.status,
+                    "detail": stage.detail,
+                    "started_at": stage.started_at.isoformat() if stage.started_at else None,
+                    "finished_at": stage.finished_at.isoformat() if stage.finished_at else None,
+                    "elapsed_ms": elapsed_ms,
+                }
+            )
+        if not stages:
+            stages.append(
+                {
+                    "name": document.processing_stage or document.status or "processing",
                     "status": document.status,
                     "detail": document.processing_error or "",
+                    "started_at": None,
+                    "finished_at": None,
+                    "elapsed_ms": None,
                 }
-            ]
+            )
 
         from chat.services.kb import temporal_ui_url
 
         workflow_id = f"doc-{document.pk}"
         backend = document.processing_backend or ""
+        temporal = {
+            "status": None,
+            "run_id": None,
+            "started": None,
+            "closed": None,
+            "result": None,
+            "degraded": False,
+        }
         if backend == "temporal":
-            info = TemporalProcessingBackend().get_status(workflow_id)
-            payload = {
-                "processing_backend": backend,
-                "workflow_id": workflow_id,
-                "temporal_url": temporal_ui_url(workflow_id),
-                "status": info.get("status", "unknown"),
-                "run_id": info.get("run_id"),
-                "started": info.get("started"),
-                "closed": info.get("closed"),
-                "result": info.get("result"),
-                "degraded": info.get("degraded", False),
-                "note": "",
-                "stages": stages,
-            }
-        else:
+            temporal.update(TemporalProcessingBackend().get_status(workflow_id))
 
-            payload = {
+        db = {
+            "status": document.status,
+            "stage": document.processing_stage,
+            "progress": document.processing_progress_display,
+            "chunk_count": document.chunk_count,
+            "backend": backend,
+            "error": document.processing_error,
+            "attempts": document.processing_attempts,
+            "task_id": document.processing_task_id,
+            "updated_at": document.updated_at.isoformat(),
+            "updated_age_seconds": int((now - document.updated_at).total_seconds()),
+        }
+        warnings = []
+        db_active = document.status in (Document.STATUS_QUEUED, Document.STATUS_PROCESSING)
+        temporal_status = temporal["status"]
+        temporal_active = temporal_status == "RUNNING"
+        temporal_terminal = temporal_status in {
+            "COMPLETED", "FAILED", "CANCELED", "TERMINATED", "TIMED_OUT"
+        }
+        if document.status == Document.STATUS_READY and any(
+            stage["status"] != DocumentStage.STATUS_COMPLETED for stage in stages
+        ):
+            warnings.append("Document is completed but one or more DB stages are stale.")
+        if temporal["degraded"]:
+            warnings.append("Temporal is unreachable; its workflow state may be stale.")
+        elif backend == "temporal" and temporal_status in (None, "unknown"):
+            warnings.append("Temporal did not return a current workflow state.")
+        if backend == "temporal" and ((db_active and temporal_terminal) or (
+            not db_active and temporal_active
+        )):
+            warnings.append("Document and Temporal workflow states do not agree.")
+
+        polling = db_active or temporal_active or bool(warnings)
+        return JsonResponse(
+            {
+                "db": db,
+                "temporal": temporal,
                 "processing_backend": backend,
                 "workflow_id": workflow_id,
-                "status": document.status,
-                "run_id": None,
-                "started": None,
-                "closed": None,
-                "result": None,
-                "degraded": False,
-                "note": "",
+                "temporal_url": temporal_ui_url(workflow_id) if backend == "temporal" else None,
                 "stages": stages,
+                "warnings": warnings,
+                "polling": polling,
             }
-        return JsonResponse(payload)
+        )
 
     def dispatch_view(self, request, pk):
 

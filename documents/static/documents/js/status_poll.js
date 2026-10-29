@@ -53,7 +53,7 @@
     title.style.marginBottom = "2px";
     title.textContent =
       doc.status === "ready"
-        ? "Processed: " + doc.title
+        ? "Completed: " + doc.title
         : "Failed: " + doc.title;
     card.appendChild(title);
 

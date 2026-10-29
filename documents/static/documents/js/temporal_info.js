@@ -1,49 +1,19 @@
-
 (function () {
   "use strict";
 
   var root = document.getElementById("documents-temporal-info-root");
-  if (!root) {
-    return;
-  }
+  if (!root) { return; }
   var urlTemplate = root.getAttribute("data-info-url-template");
-  if (!urlTemplate) {
-    return;
-  }
+  if (!urlTemplate) { return; }
 
   var POLL_MS = 2000;
-
-  // "RUNNING" is Temporal's own (uppercase) status; "processing"/"queued" are
-  // this project's Document.STATUS_* values used by celery/kafka/the inline
-  // "django" (Process now) path. Keep polling for EITHER convention so the
-  // modal doesn't stop refreshing after one fetch for a non-Temporal document
-  // that is still actually processing.
-  var POLLING_STATUSES = {
-    RUNNING: true,
-    processing: true,
-    queued: true,
-  };
-
   var STATUS_COLORS = {
-    completed: "#16a34a",
-    running: "#6b7280",
-    pending: "#6b7280",
-    failed: "#dc2626",
+    completed: "#16a34a", running: "#d97706", pending: "#6b7280", failed: "#dc2626"
   };
-
   var BACKEND_LABELS = {
-    temporal: "Temporal",
-    celery: "Celery",
-    "local-background": "Celery (inline)",
-    django: "Django (process now)",
-    kafka: "Kafka",
+    temporal: "Temporal", celery: "Celery", "local-background": "Celery (inline)",
+    django: "Django (process now)", kafka: "Kafka"
   };
-
-  function backendLabel(backend) {
-    return BACKEND_LABELS[backend] || backend || "processing";
-  }
-
-
   var overlayEl = null;
   var pollTimer = null;
   var currentDocId = null;
@@ -51,347 +21,128 @@
   var bodyEl = null;
   var headingEl = null;
 
+  function backendLabel(backend) {
+    return BACKEND_LABELS[backend] || backend || "processing";
+  }
   function infoUrl(docId) {
     return urlTemplate.replace("__PK__", encodeURIComponent(docId));
   }
-
   function stopPolling() {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    if (pollTimer !== null) { window.clearInterval(pollTimer); pollTimer = null; }
   }
-
   function closeModal() {
     stopPolling();
-    if (overlayEl && overlayEl.parentNode) {
-      overlayEl.parentNode.removeChild(overlayEl);
-    }
-    overlayEl = null;
-    bodyEl = null;
-    headingEl = null;
-    currentDocId = null;
+    if (overlayEl && overlayEl.parentNode) { overlayEl.parentNode.removeChild(overlayEl); }
+    overlayEl = null; bodyEl = null; headingEl = null; currentDocId = null;
     document.removeEventListener("keydown", onKeydown);
-    if (triggerEl && typeof triggerEl.focus === "function") {
-      triggerEl.focus();
-    }
+    if (triggerEl && typeof triggerEl.focus === "function") { triggerEl.focus(); }
     triggerEl = null;
   }
-
   function onKeydown(event) {
-    if (event.key === "Escape" || event.key === "Esc") {
-      closeModal();
-    }
+    if (event.key === "Escape" || event.key === "Esc") { closeModal(); }
   }
-
-
   function buildShell() {
     var overlay = document.createElement("div");
-    overlay.style.position = "fixed";
-    overlay.style.top = "0";
-    overlay.style.left = "0";
-    overlay.style.right = "0";
-    overlay.style.bottom = "0";
-    overlay.style.background = "rgba(0,0,0,0.5)";
-    overlay.style.zIndex = "9999";
-    overlay.style.display = "flex";
-    overlay.style.alignItems = "flex-start";
-    overlay.style.justifyContent = "center";
-    overlay.style.padding = "48px 16px";
-    overlay.style.overflow = "auto";
-
-    overlay.addEventListener("click", function (event) {
-      if (event.target === overlay) {
-        closeModal();
-      }
+    Object.assign(overlay.style, {
+      position: "fixed", top: "0", left: "0", right: "0", bottom: "0", background: "rgba(0,0,0,0.5)",
+      zIndex: "9999", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px", overflow: "auto"
     });
-
+    overlay.addEventListener("click", function (event) { if (event.target === overlay) { closeModal(); } });
     var card = document.createElement("div");
-    card.setAttribute("role", "dialog");
-    card.setAttribute("aria-modal", "true");
-    card.setAttribute("aria-label", "Processing info");
-    card.style.position = "relative";
-    card.style.background = "#fff";
-    card.style.color = "#111827";
-    card.style.borderRadius = "8px";
-    card.style.boxShadow = "0 10px 30px rgba(0,0,0,0.3)";
-    card.style.maxWidth = "640px";
-    card.style.width = "100%";
-    card.style.padding = "20px 22px";
-    card.style.boxSizing = "border-box";
-
+    card.setAttribute("role", "dialog"); card.setAttribute("aria-modal", "true"); card.setAttribute("aria-label", "Processing info");
+    Object.assign(card.style, { position: "relative", background: "#fff", color: "#111827", borderRadius: "8px", boxShadow: "0 10px 30px rgba(0,0,0,0.3)", maxWidth: "900px", width: "100%", padding: "20px 22px", boxSizing: "border-box" });
     var heading = document.createElement("div");
-    heading.textContent = "Processing info";
-    heading.style.fontSize = "16px";
-    heading.style.fontWeight = "700";
-    heading.style.marginBottom = "12px";
-    heading.style.paddingRight = "24px";
-    card.appendChild(heading);
-    headingEl = heading;
-
+    heading.style.cssText = "font-size:16px;font-weight:700;margin-bottom:12px;padding-right:24px";
+    card.appendChild(heading); headingEl = heading;
     var close = document.createElement("button");
-    close.type = "button";
-    close.setAttribute("aria-label", "Close");
-    close.textContent = "×";
-    close.style.position = "absolute";
-    close.style.top = "12px";
-    close.style.right = "14px";
-    close.style.background = "transparent";
-    close.style.border = "none";
-    close.style.color = "#111827";
-    close.style.cursor = "pointer";
-    close.style.fontSize = "22px";
-    close.style.lineHeight = "1";
-    close.addEventListener("click", closeModal);
-    card.appendChild(close);
-
-    var body = document.createElement("div");
-    body.style.fontSize = "13px";
-    card.appendChild(body);
-
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-    overlayEl = overlay;
-    bodyEl = body;
-
-
-    close.focus();
-    return body;
+    close.type = "button"; close.setAttribute("aria-label", "Close"); close.textContent = "×";
+    close.style.cssText = "position:absolute;top:12px;right:14px;background:transparent;border:none;color:#111827;cursor:pointer;font-size:22px;line-height:1";
+    close.addEventListener("click", closeModal); card.appendChild(close);
+    var body = document.createElement("div"); body.style.fontSize = "13px"; card.appendChild(body);
+    overlay.appendChild(card); document.body.appendChild(overlay);
+    overlayEl = overlay; bodyEl = body; close.focus();
   }
-
-
   function labeledRow(label, value) {
-    var row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.gap = "8px";
-    row.style.padding = "3px 0";
-
-    var key = document.createElement("span");
-    key.textContent = label;
-    key.style.fontWeight = "600";
-    key.style.minWidth = "100px";
-    row.appendChild(key);
-
-    var val = document.createElement("span");
-    val.textContent = value === null || value === undefined || value === ""
-      ? "—"
-      : String(value);
-    val.style.wordBreak = "break-all";
-    row.appendChild(val);
-
+    var row = document.createElement("div"); row.style.cssText = "display:flex;gap:8px;padding:3px 0";
+    var key = document.createElement("span"); key.textContent = label; key.style.cssText = "font-weight:600;min-width:112px"; row.appendChild(key);
+    var val = document.createElement("span"); val.textContent = value === null || value === undefined || value === "" ? "—" : String(value); val.style.wordBreak = "break-all"; row.appendChild(val);
     return row;
   }
-
+  function section(title, rows) {
+    var wrap = document.createElement("section"); wrap.style.cssText = "flex:1;min-width:250px;border:1px solid #e5e7eb;border-radius:6px;padding:10px";
+    var caption = document.createElement("div"); caption.textContent = title; caption.style.cssText = "font-weight:700;margin-bottom:5px"; wrap.appendChild(caption);
+    rows.forEach(function (row) { wrap.appendChild(labeledRow(row[0], row[1])); });
+    return wrap;
+  }
+  function elapsed(value) {
+    return value === null || value === undefined ? "—" : value < 1000 ? value + " ms" : (value / 1000).toFixed(1) + " s";
+  }
   function buildStagesTable(stages) {
-    var wrap = document.createElement("div");
-    wrap.style.marginTop = "14px";
-
-    var caption = document.createElement("div");
-    caption.textContent = "Stages";
-    caption.style.fontWeight = "600";
-    caption.style.marginBottom = "6px";
-    wrap.appendChild(caption);
-
-    var table = document.createElement("table");
-    table.style.width = "100%";
-    table.style.borderCollapse = "collapse";
-    table.style.fontSize = "12px";
-
-    var thead = document.createElement("thead");
-    var headRow = document.createElement("tr");
-    ["Stage", "Status", "Detail"].forEach(function (text) {
-      var th = document.createElement("th");
-      th.textContent = text;
-      th.style.textAlign = "left";
-      th.style.borderBottom = "1px solid #e5e7eb";
-      th.style.padding = "4px 6px";
-      headRow.appendChild(th);
+    var wrap = document.createElement("section"); wrap.style.marginTop = "14px";
+    var caption = document.createElement("div"); caption.textContent = "Database stage timings"; caption.style.cssText = "font-weight:700;margin-bottom:6px"; wrap.appendChild(caption);
+    var table = document.createElement("table"); table.style.cssText = "width:100%;border-collapse:collapse;font-size:12px";
+    var thead = document.createElement("thead"); var headRow = document.createElement("tr");
+    ["Stage", "Status", "Detail", "Started", "Finished", "Elapsed"].forEach(function (text) {
+      var th = document.createElement("th"); th.textContent = text; th.style.cssText = "text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 6px"; headRow.appendChild(th);
     });
-    thead.appendChild(headRow);
-    table.appendChild(thead);
-
+    thead.appendChild(headRow); table.appendChild(thead);
     var tbody = document.createElement("tbody");
     (stages || []).forEach(function (stage) {
       var tr = document.createElement("tr");
-
-      var nameTd = document.createElement("td");
-      nameTd.textContent = stage.name || "—";
-      nameTd.style.padding = "4px 6px";
-      nameTd.style.borderBottom = "1px solid #f3f4f6";
-      tr.appendChild(nameTd);
-
-      var statusTd = document.createElement("td");
-      statusTd.textContent = stage.status || "—";
-      statusTd.style.padding = "4px 6px";
-      statusTd.style.borderBottom = "1px solid #f3f4f6";
-      statusTd.style.fontWeight = "600";
-      statusTd.style.color = STATUS_COLORS[stage.status] || "#6b7280";
-      tr.appendChild(statusTd);
-
-      var detailTd = document.createElement("td");
-      detailTd.textContent = stage.detail || "";
-      detailTd.style.padding = "4px 6px";
-      detailTd.style.borderBottom = "1px solid #f3f4f6";
-      detailTd.style.wordBreak = "break-word";
-      tr.appendChild(detailTd);
-
+      [stage.name || "—", stage.status || "—", stage.detail || "", stage.started_at || "—", stage.finished_at || "—", elapsed(stage.elapsed_ms)].forEach(function (value, index) {
+        var td = document.createElement("td"); td.textContent = value; td.style.cssText = "padding:4px 6px;border-bottom:1px solid #f3f4f6;word-break:break-word";
+        if (index === 1) { td.style.fontWeight = "600"; td.style.color = STATUS_COLORS[stage.status] || "#6b7280"; }
+        tr.appendChild(td);
+      });
       tbody.appendChild(tr);
     });
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    return wrap;
+    table.appendChild(tbody); wrap.appendChild(table); return wrap;
   }
-
-
   function render(data) {
-    if (!bodyEl) {
-      return;
-    }
+    if (!bodyEl) { return; }
     bodyEl.textContent = "";
-
-    var backend = data.processing_backend || "";
-    var isTemporal = backend === "temporal";
-
-    // The heading (and the data shown below) reflects the backend that is
-    // ACTUALLY processing this document — never hardcoded to "Temporal".
-    // Before this fix every document showed "Temporal workflow info" even
-    // when it ran on celery/kafka/the inline "django" (Process now) path.
-    if (headingEl) {
-      headingEl.textContent = backendLabel(backend) + " processing info";
+    var db = data.db || {}; var temporal = data.temporal || {}; var backend = data.processing_backend || db.backend || "";
+    if (headingEl) { headingEl.textContent = backendLabel(backend) + " processing info"; }
+    (data.warnings || []).forEach(function (warning) {
+      var callout = document.createElement("div"); callout.textContent = warning; callout.style.cssText = "margin:0 0 8px;padding:8px;border-radius:4px;background:#fffbeb;color:#92400e"; bodyEl.appendChild(callout);
+    });
+    var columns = document.createElement("div"); columns.style.cssText = "display:flex;gap:12px;flex-wrap:wrap";
+    columns.appendChild(section("Document database", [
+      ["Status:", db.status], ["Current stage:", db.stage], ["Progress:", db.progress === undefined ? null : db.progress + "%"],
+      ["Chunks:", db.chunk_count], ["Backend:", backendLabel(db.backend)], ["Attempts:", db.attempts],
+      ["Task ID:", db.task_id], ["Last update:", db.updated_at], ["Update age:", db.updated_age_seconds === undefined ? null : db.updated_age_seconds + " s"], ["Error:", db.error]
+    ]));
+    if (backend === "temporal") {
+      columns.appendChild(section("Temporal workflow", [
+        ["Status:", temporal.status], ["Workflow ID:", data.workflow_id], ["Run ID:", temporal.run_id],
+        ["Started:", temporal.started], ["Closed:", temporal.closed], ["Result:", temporal.result], ["Degraded:", temporal.degraded ? "Yes" : "No"]
+      ]));
     }
-
-    if (data.degraded) {
-      var degraded = document.createElement("div");
-      degraded.textContent =
-        "Temporal is unreachable; showing the last known stage data.";
-      degraded.style.marginBottom = "10px";
-      degraded.style.color = "#d97706";
-      bodyEl.appendChild(degraded);
-    }
-
-    bodyEl.appendChild(labeledRow("Backend:", backendLabel(backend)));
-    bodyEl.appendChild(labeledRow("Status:", data.status));
-
-    // Temporal-specific identifiers only make sense for a Temporal-backed
-    // document; celery/kafka/django have no workflow/run id, so omit these
-    // rows entirely rather than showing meaningless "—" placeholders.
-    if (isTemporal) {
-      bodyEl.appendChild(labeledRow("Workflow id:", data.workflow_id));
-      bodyEl.appendChild(labeledRow("Run ID:", data.run_id));
-      bodyEl.appendChild(labeledRow("Started:", data.started));
-      bodyEl.appendChild(labeledRow("Closed:", data.closed));
-      bodyEl.appendChild(labeledRow("Result:", data.result));
+    bodyEl.appendChild(columns);
+    if (backend === "temporal" && data.temporal_url) {
+      var link = document.createElement("a"); link.href = data.temporal_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open workflow"; link.style.cssText = "display:inline-block;margin-top:10px;color:#2563eb;text-decoration:underline"; bodyEl.appendChild(link);
     }
     bodyEl.appendChild(buildStagesTable(data.stages));
-
-    // The Info modal is INFORMATION-ONLY: it shows backend/status/workflow
-    // identifiers and the Stages table, but carries no action controls. The
-    // real per-row Retry/Stop controls live in the changelist Actions column
-    // (document_controls.js), state-gated and popup-free.
-
-    // Resume-caveat note for a FAILED document: resuming only helps transient
-    // failures; a validation error (e.g. "too large") recurs until the
-    // file/limit changes.
-    var isFailed =
-      data.status === "failed" ||
-      data.status === "FAILED" ||
-      (data.stages || []).some(function (s) {
-        return s.status === "failed";
-      });
-    if (isFailed) {
-      var note = document.createElement("div");
-      note.textContent =
-        "Resume helps transient failures (network/embedding). A validation " +
-        "failure such as a file that is too large will recur on resume unless " +
-        "the file or limit changes.";
-      note.style.marginTop = "12px";
-      note.style.fontSize = "11px";
-      note.style.color = "#6b7280";
-      bodyEl.appendChild(note);
-    }
   }
-
   function renderError(message) {
-    if (!bodyEl) {
-      return;
-    }
-    bodyEl.textContent = "";
-    var err = document.createElement("div");
-    err.textContent = message || "Could not load workflow info.";
-    err.style.color = "#dc2626";
-    bodyEl.appendChild(err);
+    if (!bodyEl) { return; }
+    bodyEl.textContent = ""; var err = document.createElement("div"); err.textContent = message || "Could not load workflow info."; err.style.color = "#dc2626"; bodyEl.appendChild(err);
   }
-
   function fetchInfo() {
-    var docId = currentDocId;
-    if (!docId) {
-      return;
-    }
-    fetch(infoUrl(docId), {
-      method: "GET",
-      credentials: "same-origin",
-      headers: { "X-Requested-With": "XMLHttpRequest" },
-    })
-      .then(function (response) {
-        return response.json().then(function (data) {
-          if (!response.ok) {
-            throw new Error(data.detail || "status " + response.status);
-          }
-          return data;
-        });
-      })
-      .then(function (data) {
-
-
-        if (!bodyEl || currentDocId !== docId) {
-          return;
-        }
-        render(data);
-
-        if (!POLLING_STATUSES[data.status]) {
-          stopPolling();
-        }
-      })
-      .catch(function (error) {
-        if (!bodyEl || currentDocId !== docId) {
-          return;
-        }
-        renderError("Could not load workflow info: " + error.message);
-        stopPolling();
-      });
+    var docId = currentDocId; if (!docId) { return; }
+    fetch(infoUrl(docId), { method: "GET", credentials: "same-origin", headers: { "X-Requested-With": "XMLHttpRequest" } })
+      .then(function (response) { return response.json().then(function (data) { if (!response.ok) { throw new Error(data.detail || "status " + response.status); } return data; }); })
+      .then(function (data) { if (!bodyEl || currentDocId !== docId) { return; } render(data); if (!data.polling) { stopPolling(); } })
+      .catch(function (error) { if (!bodyEl || currentDocId !== docId) { return; } renderError("Could not load workflow info: " + error.message); stopPolling(); });
   }
-
   function openModal(docId, trigger) {
-
-    if (overlayEl) {
-      closeModal();
-    }
-    currentDocId = docId;
-    triggerEl = trigger || null;
-    buildShell();
-    document.addEventListener("keydown", onKeydown);
-
-    var loading = document.createElement("div");
-    loading.textContent = "Loading…";
-    loading.style.color = "#6b7280";
-    bodyEl.appendChild(loading);
-
-    fetchInfo();
-
-    stopPolling();
-    pollTimer = window.setInterval(fetchInfo, POLL_MS);
+    if (overlayEl) { closeModal(); }
+    currentDocId = docId; triggerEl = trigger || null; buildShell(); document.addEventListener("keydown", onKeydown);
+    var loading = document.createElement("div"); loading.textContent = "Loading…"; loading.style.color = "#6b7280"; bodyEl.appendChild(loading);
+    fetchInfo(); stopPolling(); pollTimer = window.setInterval(fetchInfo, POLL_MS);
   }
-
-
   document.addEventListener("click", function (event) {
-    var pill = event.target.closest(".info-action");
-    if (!pill) {
-      return;
-    }
-    event.preventDefault();
-    var docId = pill.getAttribute("data-doc-id");
-    if (docId) {
-      openModal(docId, pill);
-    }
+    var pill = event.target.closest(".info-action"); if (!pill) { return; }
+    event.preventDefault(); var docId = pill.getAttribute("data-doc-id"); if (docId) { openModal(docId, pill); }
   });
 })();

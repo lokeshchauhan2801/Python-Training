@@ -195,6 +195,15 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8081")
 
+# Scanned PDFs are rendered one page at a time at 300 DPI. These limits bound
+# OCR memory/CPU while preserving recognition quality for normal documents.
+DOCUMENT_MAX_PDF_BYTES = 25 * 1024 * 1024
+DOCUMENT_MAX_PDF_PAGES = 100
+DOCUMENT_OCR_PDF_DPI = 300
+DOCUMENT_OCR_BATCH_PAGES = 1
+DOCUMENT_OCR_RENDER_TIMEOUT_SECONDS = 120
+DOCUMENT_OCR_PAGE_TIMEOUT_SECONDS = 120
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
