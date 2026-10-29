@@ -177,7 +177,7 @@ def enqueue_document_processing(
         )
         transaction.on_commit(
             lambda: _dispatch_executor.submit(
-                _dispatch_queued_document, str(document_id), backend
+                _dispatch_queued_document, str(document_id), backend, task_id
             )
         )
 
@@ -185,11 +185,25 @@ def enqueue_document_processing(
 
 
 def _dispatch_queued_document(
-    document_id: str, backend: str | None
+    document_id: str, backend: str | None, task_id: str | None = None
 ) -> None:
-    """Dispatch a previously queued document and persist transport failures."""
+    """Dispatch a previously queued document and persist transport failures.
+
+    With ``task_id`` the dispatch only runs while the row is still QUEUED under
+    that task id, so a Stop or a re-enqueue made after the enqueue wins.
+    """
     close_old_connections()
     try:
+        if task_id and not Document.objects.filter(
+            pk=document_id,
+            status=Document.STATUS_QUEUED,
+            processing_task_id=task_id,
+        ).exists():
+            logger.info(
+                "Skip dispatch of %s: stopped or re-queued since enqueue",
+                document_id,
+            )
+            return
         dispatch_document_processing(document_id, backend=backend)
     except Exception as exc:
         logger.exception("Could not dispatch document %s", document_id)
