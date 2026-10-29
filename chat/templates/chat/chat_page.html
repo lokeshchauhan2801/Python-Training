@@ -861,6 +861,74 @@
       background: color-mix(in oklch, var(--color-red-500) 12%, transparent);
     }
 
+    /* Chat file panel (picker / tracker rows under an assistant reply). */
+    .chat-ui-file-panel {
+      border: 1px solid var(--color-base-200);
+      border-radius: var(--border-radius, .375rem);
+      padding: .5rem;
+    }
+
+    html.dark .chat-ui-file-panel {
+      border-color: var(--color-base-700);
+    }
+
+    .chat-ui-file-row + .chat-ui-file-row {
+      margin-top: .375rem;
+    }
+
+    .chat-ui-file-name {
+      min-width: 0;
+    }
+
+    .chat-ui-file-size,
+    .chat-ui-file-note {
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-file-size,
+    html.dark .chat-ui-file-note {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-file-status {
+      margin-left: auto;
+      padding: 0 .5rem;
+      border-radius: 9999px;
+      line-height: 1.25rem;
+      background: var(--color-base-100);
+    }
+
+    html.dark .chat-ui-file-status {
+      background: var(--color-base-800);
+    }
+
+    .chat-ui-file-status--queued,
+    .chat-ui-file-status--processing {
+      color: var(--color-primary-600);
+    }
+
+    .chat-ui-file-status--processed {
+      color: var(--color-green-600, #16a34a);
+    }
+
+    .chat-ui-file-status--failed,
+    .chat-ui-file-error {
+      color: var(--color-red-600);
+    }
+
+    .chat-ui-file-status--stopped {
+      color: var(--color-orange-600, #ea580c);
+    }
+
+    .chat-ui-file-btn {
+      cursor: pointer;
+    }
+
+    .chat-ui-file-btn:disabled {
+      cursor: not-allowed;
+      opacity: .5;
+    }
+
     .chat-ui-composer-toolbar {
       display: flex;
       align-items: center;
@@ -1116,6 +1184,8 @@
       let currentSessionId = null;
       let pendingAttachmentIds = [];
       let pendingAttachments = [];
+      // The most recently rendered file picker; only it is bound to the composer.
+      let activePicker = null;
       let chartSeq = 0;
 
       const CHAT_LAYOUT_BOTTOM_MARGIN = 16;
@@ -1132,6 +1202,10 @@
       function attachUrlFor(id) { return baseUrl + id + "/attach/"; }
       function reprocessUrlFor(id) { return baseUrl + id + "/reprocess/"; }
       function docStatusUrlFor(id) { return baseUrl + id + "/doc-status-json/"; }
+      function filesUrlFor(id) { return baseUrl + id + "/files-json/"; }
+      function fileActionUrlFor(id, entryId, action) {
+        return baseUrl + id + "/files/" + encodeURIComponent(entryId) + "/" + action + "/";
+      }
       function pageUrlFor(id) { return baseUrl + id + "/"; }
 
       function clear(el) {
@@ -1638,6 +1712,322 @@
         timer = setInterval(poll, 3000);
       }
 
+      // Live rows for this chat's files, shared by every file panel on the
+      // page. One poller: every 3 s while a mounted panel shows a row that is
+      // not terminal yet.
+      const fileStore = (function () {
+        let sessionId = null;
+        let rows = {};
+        let order = [];
+        let loaded = false;
+        let panels = [];
+        let timer = null;
+        let soon = null;
+        let inFlight = false;
+        let again = false;
+
+        function stopTimer() {
+          if (timer) { clearTimeout(timer); timer = null; }
+          if (soon) { clearTimeout(soon); soon = null; }
+        }
+
+        function reset(id) {
+          stopTimer();
+          sessionId = id || null;
+          rows = {};
+          order = [];
+          loaded = false;
+          panels = [];
+          inFlight = false;
+          again = false;
+        }
+
+        function mounted() {
+          panels = panels.filter(function (p) { return p.el.isConnected; });
+          return panels;
+        }
+
+        function notify() {
+          mounted().forEach(function (p) { p.update(); });
+        }
+
+        function schedule() {
+          if (timer) { clearTimeout(timer); timer = null; }
+          const pending = mounted().some(function (p) { return p.hasPending(); });
+          if (pending) { timer = setTimeout(refresh, 3000); }
+        }
+
+        function refresh() {
+          if (!sessionId || sessionId !== currentSessionId) { stopTimer(); return; }
+          if (inFlight) { again = true; return; }
+          inFlight = true;
+          const sid = sessionId;
+          fetch(filesUrlFor(sid), {
+            method: "GET",
+            headers: jsonHeaders({}),
+            credentials: "same-origin"
+          })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+              if (sid !== sessionId || !data || !Array.isArray(data.files)) { return; }
+              rows = {};
+              order = [];
+              data.files.forEach(function (f) { rows[f.id] = f; order.push(f.id); });
+              loaded = true;
+              notify();
+            })
+            .catch(function () { /* transient; the poller retries */ })
+            .then(function () {
+              if (sid !== sessionId) { return; }
+              inFlight = false;
+              if (again) { again = false; refresh(); return; }
+              schedule();
+            });
+        }
+
+        function kick() {
+          if (timer) { clearTimeout(timer); timer = null; }
+          refresh();
+        }
+
+        function subscribe(panel) {
+          if (sessionId !== currentSessionId) { reset(currentSessionId); }
+          panels.push(panel);
+          if (loaded) { panel.update(); }
+          // Panels rendered together (a session replay) share one fetch.
+          if (!soon) {
+            soon = setTimeout(function () { soon = null; kick(); }, 0);
+          }
+        }
+
+        function upsert(row) {
+          if (!row || !row.id) { return; }
+          if (!rows[row.id]) { order.push(row.id); }
+          rows[row.id] = row;
+          notify();
+        }
+
+        function list(ids) {
+          const wanted = Array.isArray(ids) ? ids : order;
+          return wanted.map(function (id) { return rows[id]; }).filter(Boolean);
+        }
+
+        return {
+          reset: reset,
+          subscribe: subscribe,
+          upsert: upsert,
+          kick: kick,
+          list: list,
+          isLoaded: function () { return loaded; }
+        };
+      })();
+
+      const PICKER_FALLBACK_NOTE = "Here is the list of files in this chat. Select the file(s) you want to process.";
+
+      function humanSize(n) {
+        if (typeof n !== "number" || !isFinite(n) || n < 0) { return ""; }
+        if (n < 1024) { return n + " B"; }
+        if (n < 1024 * 1024) { return (n / 1024).toFixed(1) + " KB"; }
+        return (n / (1024 * 1024)).toFixed(1) + " MB";
+      }
+
+      function fileActionLabel(action, row) {
+        if (action === "stop") { return "Stop"; }
+        if (action === "resume") { return row.state === "failed" ? "Try again" : "Resume"; }
+        return "";
+      }
+
+      function runFileAction(panel, row, action, btn) {
+        const sid = currentSessionId;
+        if (!sid) { return; }
+        const urlAction = action === "resume" && row.state === "failed" ? "retry" : action;
+        panel.busy[row.id] = true;
+        btn.disabled = true;
+        fetch(fileActionUrlFor(sid, row.id, urlAction), {
+          method: "POST",
+          headers: jsonHeaders({ "X-CSRFToken": getCookie("csrftoken") }),
+          credentials: "same-origin"
+        })
+          .then(function (r) {
+            return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d || {} }; });
+          })
+          .then(function (res) {
+            delete panel.busy[row.id];
+            if ((res.ok || res.status === 409) && res.data.file) {
+              fileStore.upsert(res.data.file);
+            }
+            if (res.ok) {
+              setStatus("");
+            } else {
+              setStatus(res.data.error || "Action failed.");
+            }
+            panel.update();
+            if (sid === currentSessionId) { fileStore.kick(); }
+          })
+          .catch(function () {
+            delete panel.busy[row.id];
+            setStatus("Action failed.");
+            panel.update();
+          });
+      }
+
+      function renderFilePanel(bubble, message) {
+        // Picker / tracker panel for an assistant turn that lists chat files
+        // (metadata.file_panel). Rows are live files-json rows, so a replayed
+        // panel shows today's state.
+        const meta = message.metadata || {};
+        const spec = meta.file_panel;
+        if (!spec || typeof spec !== "object" || !currentSessionId) { return; }
+        const isPicker = spec.mode === "picker";
+        const ids = Array.isArray(spec.entry_ids) ? spec.entry_ids : null;
+
+        const el = document.createElement("div");
+        el.className = "mt-2 chat-ui-file-panel " +
+          (isPicker ? "chat-ui-file-panel--picker" : "chat-ui-file-panel--tracker");
+        const note = (spec.note || (isPicker ? PICKER_FALLBACK_NOTE : "")).trim();
+        // The reply text usually is the note already; do not print it twice.
+        if (note && (message.content || "").indexOf(note) === -1) {
+          const noteEl = document.createElement("div");
+          noteEl.className = "mb-1 text-xs chat-ui-file-note";
+          noteEl.textContent = note;
+          el.appendChild(noteEl);
+        }
+        const listEl = document.createElement("div");
+        listEl.className = "chat-ui-file-list";
+        el.appendChild(listEl);
+
+        let footer = null;
+        let processBtn = null;
+        const panel = {
+          el: el,
+          isPicker: isPicker,
+          checked: {},
+          busy: {},
+          sending: false,
+          checkedIds: function () {
+            return fileStore.list(ids).filter(function (r) {
+              return panel.checked[r.id] && r.selectable;
+            }).map(function (r) { return r.id; });
+          },
+          clearChecks: function () {
+            panel.checked = {};
+            panel.update();
+          },
+          hasPending: function () {
+            if (!fileStore.isLoaded()) { return true; }
+            return fileStore.list(ids).some(function (r) { return r.terminal === false; });
+          },
+          update: function () {
+            clear(listEl);
+            fileStore.list(ids).forEach(function (r) { listEl.appendChild(fileRow(r)); });
+            if (processBtn) {
+              processBtn.disabled = panel.sending || panel.checkedIds().length === 0;
+            }
+          }
+        };
+
+        function fileRow(r) {
+          const wrap = document.createElement("div");
+          wrap.className = "chat-ui-file-row";
+          wrap.setAttribute("data-entry-id", r.id);
+          wrap.setAttribute("data-state", r.state || "");
+          const line = document.createElement("div");
+          line.className = "flex items-center gap-2 text-xs chat-ui-file-line";
+
+          if (isPicker) {
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.className = "chat-ui-file-check";
+            box.disabled = !r.selectable;
+            if (!r.selectable) { delete panel.checked[r.id]; }
+            box.checked = !!panel.checked[r.id];
+            box.setAttribute("aria-label", "Select " + r.title);
+            box.addEventListener("change", function () {
+              if (box.checked) { panel.checked[r.id] = true; } else { delete panel.checked[r.id]; }
+              if (processBtn) {
+                processBtn.disabled = panel.sending || panel.checkedIds().length === 0;
+              }
+            });
+            line.appendChild(box);
+          }
+
+          const name = document.createElement("span");
+          name.className = "truncate chat-ui-file-name";
+          name.textContent = r.title;
+          name.title = r.title;
+          line.appendChild(name);
+
+          const size = humanSize(r.size);
+          if (size) {
+            const sizeEl = document.createElement("span");
+            sizeEl.className = "shrink-0 chat-ui-file-size";
+            sizeEl.textContent = size;
+            line.appendChild(sizeEl);
+          }
+
+          const status = document.createElement("span");
+          status.className = "shrink-0 chat-ui-file-status chat-ui-file-status--" + (r.state || "unknown");
+          status.textContent = r.label || "";
+          line.appendChild(status);
+
+          (Array.isArray(r.actions) ? r.actions : []).forEach(function (action) {
+            const label = fileActionLabel(action, r);
+            if (!label) { return; }
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "shrink-0 border border-base-200 dark:border-base-700 px-2 py-0.5 rounded-default text-xs chat-ui-file-btn chat-ui-file-btn--" + action;
+            btn.setAttribute("data-action", action);
+            btn.textContent = label;
+            btn.disabled = !!panel.busy[r.id];
+            btn.addEventListener("click", function () { runFileAction(panel, r, action, btn); });
+            line.appendChild(btn);
+          });
+          wrap.appendChild(line);
+
+          if (r.state === "failed") {
+            const detail = [r.error, r.hint].filter(function (t) { return !!t; }).join(" — ");
+            if (detail) {
+              const err = document.createElement("div");
+              err.className = "mt-0.5 text-xs chat-ui-file-error";
+              err.textContent = detail;
+              wrap.appendChild(err);
+            }
+          }
+          return wrap;
+        }
+
+        if (isPicker) {
+          footer = document.createElement("div");
+          footer.className = "mt-2 flex justify-end chat-ui-file-footer";
+          processBtn = document.createElement("button");
+          processBtn.type = "button";
+          processBtn.className = "border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-1 rounded-default text-xs text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50 chat-ui-file-process";
+          processBtn.textContent = "Process";
+          processBtn.disabled = true;
+          processBtn.addEventListener("click", function () {
+            const selectedIds = panel.checkedIds();
+            if (!selectedIds.length || !currentSessionId || panel.sending) { return; }
+            panel.sending = true;
+            processBtn.disabled = true;
+            postMessage(currentSessionId, "", {
+              selectedIds: selectedIds,
+              includePending: false,
+              picker: panel
+            }).then(function (ok) {
+              panel.sending = false;
+              panel.update();
+              if (ok) { fileStore.kick(); }
+            });
+          });
+          footer.appendChild(processBtn);
+          el.appendChild(footer);
+          activePicker = panel;
+        }
+
+        bubble.appendChild(el);
+        fileStore.subscribe(panel);
+      }
+
       function renderMessage(message) {
         const isUser = message.role === "user";
         const wrap = document.createElement("div");
@@ -1676,6 +2066,7 @@
           renderRetry(bubble, message);
           renderTemporalLinks(bubble, message);
           renderLiveStatus(bubble, message);
+          renderFilePanel(bubble, message);
         }
 
         wrap.appendChild(bubble);
@@ -1685,6 +2076,9 @@
 
       function renderMessages(messages) {
         clear(messagesEl);
+        // Every file panel is gone with the old messages.
+        fileStore.reset(currentSessionId);
+        activePicker = null;
         if (!messages || !messages.length) {
           const p = document.createElement("p");
           p.className = "text-center text-font-subtle-light text-sm mt-12 dark:text-font-subtle-dark chat-ui-empty";
@@ -1751,6 +2145,8 @@
 
       function loadSession(id, push, quiet) {
         currentSessionId = id;
+        fileStore.reset(id);
+        activePicker = null;
         clearAttachmentsUI();
         setStatus("Loading...");
         setComposerEnabled(true, true);
@@ -2027,7 +2423,16 @@
           .then(function () { attachInput.value = ""; });
       });
 
-      function postMessage(sessionId, question) {
+      function postMessage(sessionId, question, opts) {
+        // opts.selectedIds: files checked in a picker (selected_file_ids).
+        // opts.includePending: false for the picker's Process button, so the
+        // composer's text and attachment chips stay as they are.
+        // opts.picker: the panel whose checkboxes supplied selectedIds.
+        // Resolves to true when the turn was stored.
+        opts = opts || {};
+        const selectedIds = opts.selectedIds || [];
+        const includePending = opts.includePending !== false;
+        const picker = opts.picker || null;
         const body = new URLSearchParams();
         body.append("question", question);
         body.append("model_name", modelSel.value);
@@ -2035,18 +2440,27 @@
 
         const selOpt = modelSel.selectedOptions && modelSel.selectedOptions[0];
         body.append("provider", (selOpt && selOpt.getAttribute("data-provider")) || "");
-        pendingAttachmentIds.forEach(function (id) { body.append("attachment_ids", id); });
+        selectedIds.forEach(function (id) { body.append("selected_file_ids", id); });
+        if (includePending) {
+          pendingAttachmentIds.forEach(function (id) { body.append("attachment_ids", id); });
+        }
 
         if (emptyStateEl && emptyStateEl.parentNode) {
           emptyStateEl.parentNode.removeChild(emptyStateEl);
         }
-        const sentAttachments = pendingAttachments.slice();
-        renderMessage({ role: "user", content: question, citations: [], metadata: {}, attachments: sentAttachments });
-        inputEl.value = "";
-        clearAttachmentsUI();
+        const sentAttachments = includePending ? pendingAttachments.slice() : [];
+        // With an empty question the server writes the user line (for example
+        // "Process: a.csv"), so the stored user message is rendered instead.
+        if (question) {
+          renderMessage({ role: "user", content: question, citations: [], metadata: {}, attachments: sentAttachments });
+        }
+        if (includePending) {
+          inputEl.value = "";
+          clearAttachmentsUI();
+        }
         const placeholder = renderProcessingPlaceholder();
 
-        fetch(sendUrlFor(sessionId), {
+        return fetch(sendUrlFor(sessionId), {
           method: "POST",
           headers: jsonHeaders({
             "X-CSRFToken": getCookie("csrftoken"),
@@ -2060,34 +2474,44 @@
           })
           .then(function (res) {
             removeProcessingPlaceholder(placeholder);
-            if (!res.ok || res.data.error) { setStatus(res.data.error || "Send failed."); return; }
+            if (!res.ok || res.data.error) { setStatus(res.data.error || "Send failed."); return false; }
+            if (!question && res.data.user) { renderMessage(res.data.user); }
+            if (res.data.selection_consumed && picker) { picker.clearChecks(); }
             renderMessage(res.data.assistant);
             setStatus("");
             loadSessions();
+            return true;
           })
           .catch(function () {
             removeProcessingPlaceholder(placeholder);
             setStatus("Send failed.");
+            return false;
           })
-          .then(function () {
-            inputEl.disabled = false;
-            sendBtn.disabled = false;
-            try { inputEl.focus(); } catch (e) {  }
+          .then(function (ok) {
+            if (includePending) {
+              inputEl.disabled = false;
+              sendBtn.disabled = false;
+              try { inputEl.focus(); } catch (e) {  }
+            }
+            return ok;
           });
       }
 
       function sendMessage() {
         const question = inputEl.value.trim();
-        // Allow sending with text OR at least one attached file (a media file
-        // can be sent without a message). Block only when there is neither.
-        if (!question && pendingAttachmentIds.length === 0) { return; }
+        const picker = currentSessionId ? activePicker : null;
+        const selectedIds = picker ? picker.checkedIds() : [];
+        // Allow sending with text, at least one attached file (a media file
+        // can be sent without a message) or files checked in the latest
+        // picker. Block only when there is none of them.
+        if (!question && pendingAttachmentIds.length === 0 && selectedIds.length === 0) { return; }
 
         inputEl.disabled = true;
         sendBtn.disabled = true;
         setStatus("Sending...");
 
         if (currentSessionId) {
-          postMessage(currentSessionId, question);
+          postMessage(currentSessionId, question, { selectedIds: selectedIds, picker: picker });
           return;
         }
 
