@@ -859,6 +859,12 @@ def process_document(document: Document) -> Document:
                 "updated_at",
             ]
         )
+        # The synchronous ("Process now") path does the whole pipeline in one
+        # call and does NOT walk the per-stage DocumentStage rows the way the
+        # async stage pipeline does. Mark every stage completed so the Info
+        # popup reflects the document's true terminal state instead of the
+        # stale "pending" rows left by _reset_for_reprocess.
+        _mark_all_stages_completed(document)
         return document
     except (DocumentValidationError, DocumentIndexError) as exc:
         _mark_failed(document, str(exc), _elapsed_ms(), vector_store, vector_ids)
@@ -1060,6 +1066,22 @@ def reset_all_stages(document: Document) -> None:
         detail="",
         started_at=None,
         finished_at=None,
+        updated_at=timezone.now(),
+    )
+
+
+def _mark_all_stages_completed(document: Document) -> None:
+    """Mark EVERY canonical stage row completed.
+
+    Used by the synchronous ``process_document`` path, which finishes the whole
+    pipeline in one call without walking the per-stage rows. Ensures the stage
+    rows exist first, then flips them all to COMPLETED so the Info popup and any
+    stage-based readers see a consistent terminal state.
+    """
+    _ensure_stages(document)
+    DocumentStage.objects.filter(document=document).update(
+        status=DocumentStage.STATUS_COMPLETED,
+        finished_at=timezone.now(),
         updated_at=timezone.now(),
     )
 

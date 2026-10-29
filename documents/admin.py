@@ -407,7 +407,10 @@ class DocumentAdmin(BaseModelAdmin):
         """Quick link to this document's workflow in the Temporal Web UI.
 
         Only shown for temporal-backed documents; the base URL comes from
-        ``settings.TEMPORAL_UI_URL`` (default http://localhost:8081).
+        ``settings.TEMPORAL_UI_URL`` (default http://localhost:8081). The
+        ``workflow-link`` class + ``data-doc-id`` let document_controls.js
+        remove the link live when a reprocess switches the backend away from
+        Temporal (otherwise the stale link would linger until a page reload).
         """
         from chat.services.kb import temporal_ui_url, workflow_id_for
 
@@ -418,10 +421,12 @@ class DocumentAdmin(BaseModelAdmin):
             return "—"
         return format_html(
             '<a href="{}" target="_blank" rel="noopener noreferrer" '
-            'class="inline-flex items-center gap-1 rounded-default border '
-            'border-base-200 dark:border-base-700 px-2 py-1 text-xs '
-            'hover:bg-base-100 dark:hover:bg-base-800">Open in Temporal</a>',
+            'class="workflow-link inline-flex items-center gap-1 rounded-default '
+            'border border-base-200 dark:border-base-700 px-2 py-1 text-xs '
+            'hover:bg-base-100 dark:hover:bg-base-800" data-doc-id="{}">'
+            'See workflow</a>',
             url,
+            str(obj.pk),
         )
 
     @admin.display(description="Actions")
@@ -653,6 +658,19 @@ class DocumentAdmin(BaseModelAdmin):
             .order_by("order")
             .values("name", "status", "detail")
         )
+        # Reconcile against the document's terminal state. A document that is
+        # READY (processed, with chunks) has, by definition, finished every
+        # stage; if any stage row still reads "pending"/"running" (e.g. the
+        # synchronous path or an older run left it behind), report it as
+        # completed so the Info popup matches reality instead of showing
+        # "pending" for a processed document.
+        if document.status == Document.STATUS_READY and stages:
+            for stage in stages:
+                if stage["status"] in (
+                    DocumentStage.STATUS_PENDING,
+                    DocumentStage.STATUS_RUNNING,
+                ):
+                    stage["status"] = DocumentStage.STATUS_COMPLETED
         if not stages:
 
 
@@ -719,27 +737,11 @@ class DocumentAdmin(BaseModelAdmin):
                 status=400,
             )
 
-        # Deduplicate: a document already processed (ready/processed with chunks)
-        # is NOT reprocessed. Re-embedding the same content wastes work and
-        # creates duplicate vectors.
-        if (
-            document.status == Document.STATUS_READY
-            and (document.chunk_count or 0) > 0
-        ):
-            return JsonResponse(
-                {
-                    "status": document.status,
-                    "status_display": dict(Document.STATUS_CHOICES)[document.status],
-                    "backend": document.processing_backend,
-                    "document_id": str(document.pk),
-                    "title": document.title,
-                    "message": (
-                        "Already processed; skipped (document is embedded with "
-                        f"{document.chunk_count} chunks)."
-                    ),
-                },
-                status=200,
-            )
+        # No reprocess restriction: a document in ANY state (including an
+        # already-processed ready document with chunks) may be reprocessed
+        # through ANY backend. ``_reset_for_reprocess`` hard-deletes the prior
+        # chunks/vectors and re-arms every stage before the re-dispatch, so the
+        # pipeline restarts cleanly without leaving duplicate vectors behind.
 
         # "now" runs synchronously through the Django processing manager
         # (process_document) — NOT celery/kafka/temporal. Other choices keep

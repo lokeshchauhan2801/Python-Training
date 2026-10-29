@@ -149,6 +149,14 @@
         var label = BACKEND_LABELS[doc.processing_backend] || doc.processing_backend || "processing";
         backendCell.textContent = label;
       }
+      // Drop the stale "See workflow" link if the document is no longer
+      // Temporal-backed (e.g. it was reprocessed on another backend).
+      if (doc.processing_backend !== "temporal") {
+        var staleLink = row.querySelector(".workflow-link");
+        if (staleLink) {
+          staleLink.remove();
+        }
+      }
     }
   }
 

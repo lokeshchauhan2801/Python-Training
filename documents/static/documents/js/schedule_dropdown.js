@@ -118,6 +118,17 @@
       return;
     }
     cell.textContent = backendLabel(backend);
+
+    // The "See workflow" link is only meaningful for a Temporal-backed
+    // document. When a reprocess switches the backend to anything else
+    // (celery/kafka/django), drop the now-stale link so it doesn't linger
+    // until a page reload.
+    if (backend !== "temporal") {
+      var staleLink = row.querySelector(".workflow-link");
+      if (staleLink) {
+        staleLink.remove();
+      }
+    }
   }
 
   function disableScheduleButton(docId) {
@@ -184,6 +195,148 @@
     return String(value).replace(/["\\\]]/g, "\\$&");
   }
 
+  // True when the row for docId is in the terminal "ready" (Processed) state,
+  // i.e. it already has embedded chunks. Reprocessing it is allowed but wastes
+  // work, so the caller asks for confirmation first.
+  function isDocumentReady(docId) {
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    if (!toggle) {
+      return false;
+    }
+    var row = toggle.closest("tr");
+    if (!row) {
+      return false;
+    }
+    var badge = row.querySelector(".field-status_badge span[data-status]");
+    return !!badge && badge.getAttribute("data-status") === "ready";
+  }
+
+  // Small confirm popup centered on the main screen. Resolves true if the user
+  // confirms the reprocess, false if they cancel or dismiss. Keyboard-friendly:
+  // Escape cancels, the confirm button is autofocused.
+  function confirmReprocess(docId) {
+    return new Promise(function (resolve) {
+      var titleText = "Reprocess this document?";
+      var toggle = document.querySelector(
+        '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+      );
+      if (toggle) {
+        var row = toggle.closest("tr");
+        var titleCell = row && row.querySelector(".field-title");
+        if (titleCell && titleCell.textContent.trim()) {
+          titleText =
+            'Reprocess "' + titleCell.textContent.trim() + '"?';
+        }
+      }
+
+      var overlay = document.createElement("div");
+      overlay.id = "documents-reprocess-confirm";
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-modal", "true");
+      overlay.setAttribute("aria-labelledby", "documents-reprocess-title");
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.zIndex = "10000";
+      overlay.style.display = "flex";
+      overlay.style.alignItems = "center";
+      overlay.style.justifyContent = "center";
+      overlay.style.background = "rgba(0,0,0,0.45)";
+
+      var dialog = document.createElement("div");
+      dialog.style.maxWidth = "360px";
+      dialog.style.width = "calc(100% - 32px)";
+      dialog.style.background = "#ffffff";
+      dialog.style.color = "#111827";
+      dialog.style.borderRadius = "8px";
+      dialog.style.boxShadow = "0 10px 30px rgba(0,0,0,0.25)";
+      dialog.style.padding = "20px";
+      // Respect dark admin themes.
+      if (document.documentElement.classList.contains("dark")) {
+        dialog.style.background = "#1f2937";
+        dialog.style.color = "#f9fafb";
+      }
+
+      var title = document.createElement("div");
+      title.id = "documents-reprocess-title";
+      title.textContent = titleText;
+      title.style.fontWeight = "600";
+      title.style.fontSize = "15px";
+      title.style.marginBottom = "8px";
+
+      var body = document.createElement("div");
+      body.textContent =
+        "This document is already processed. Reprocessing clears its " +
+        "existing chunks and runs the whole pipeline again.";
+      body.style.fontSize = "13px";
+      body.style.lineHeight = "1.4";
+      body.style.marginBottom = "16px";
+      body.style.opacity = "0.85";
+
+      var actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.justifyContent = "flex-end";
+      actions.style.gap = "8px";
+
+      var cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.style.padding = "6px 14px";
+      cancelBtn.style.fontSize = "13px";
+      cancelBtn.style.borderRadius = "6px";
+      cancelBtn.style.border = "1px solid rgba(148,163,184,0.5)";
+      cancelBtn.style.background = "transparent";
+      cancelBtn.style.color = "inherit";
+      cancelBtn.style.cursor = "pointer";
+
+      var confirmBtn = document.createElement("button");
+      confirmBtn.type = "button";
+      confirmBtn.textContent = "Reprocess";
+      confirmBtn.style.padding = "6px 14px";
+      confirmBtn.style.fontSize = "13px";
+      confirmBtn.style.borderRadius = "6px";
+      confirmBtn.style.border = "1px solid transparent";
+      confirmBtn.style.background = "#7c3aed";
+      confirmBtn.style.color = "#ffffff";
+      confirmBtn.style.cursor = "pointer";
+
+      function cleanup(result) {
+        document.removeEventListener("keydown", onKeydown, true);
+        overlay.remove();
+        resolve(result);
+      }
+      function onKeydown(event) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cleanup(false);
+        }
+      }
+
+      cancelBtn.addEventListener("click", function () {
+        cleanup(false);
+      });
+      confirmBtn.addEventListener("click", function () {
+        cleanup(true);
+      });
+      overlay.addEventListener("click", function (event) {
+        if (event.target === overlay) {
+          cleanup(false);
+        }
+      });
+      document.addEventListener("keydown", onKeydown, true);
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(confirmBtn);
+      dialog.appendChild(title);
+      dialog.appendChild(body);
+      dialog.appendChild(actions);
+      overlay.appendChild(dialog);
+      document.body.appendChild(overlay);
+      confirmBtn.focus();
+    });
+  }
+
   function dispatch(docId, backend, menu) {
     // Store current backend for potential revert on error
     var toggle = document.querySelector(
@@ -225,25 +378,16 @@
         });
       })
       .then(function (data) {
-        // Check if processing was skipped (already-processed document)
-        var isSkipped = data && data.message && data.message.indexOf("Already processed") === 0;
-        
-        if (isSkipped) {
-          // Revert optimistic updates for already-processed documents
-          if (currentBackend) {
-            updateProcessingBackend(docId, currentBackend);
-          }
-          enableScheduleButton(docId);
-        } else {
-          // Normal processing: confirm optimistic updates
-          if (data && data.status_display) {
-            updateRowStatus(docId, data.status_display);
-          }
-          if (data && data.backend) {
-            updateProcessingBackend(docId, data.backend);
-          }
+        // The backend no longer skips already-processed documents (the user
+        // confirms the reprocess up front), so always confirm the optimistic
+        // UI updates with the server's reported status/backend.
+        if (data && data.status_display) {
+          updateRowStatus(docId, data.status_display);
         }
-        
+        if (data && data.backend) {
+          updateProcessingBackend(docId, data.backend);
+        }
+
         showNotice(
           (data && data.message) || "Task queued for processing.",
           false
@@ -296,7 +440,20 @@
       var backend = item.getAttribute("data-backend");
       var parentMenu = item.closest(".schedule-menu");
       if (docId && backend) {
-        dispatch(docId, backend, parentMenu);
+        // Close the menu right away; the confirm popup (if any) takes over.
+        if (parentMenu) {
+          hideMenu(parentMenu);
+        }
+        closeAllMenus();
+        if (isDocumentReady(docId)) {
+          confirmReprocess(docId).then(function (confirmed) {
+            if (confirmed) {
+              dispatch(docId, backend, null);
+            }
+          });
+        } else {
+          dispatch(docId, backend, parentMenu);
+        }
       }
       return;
     }

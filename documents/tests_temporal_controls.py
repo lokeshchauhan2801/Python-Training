@@ -479,3 +479,72 @@ class ChangelistRendersControlsTests(TestCase):
         self.assertIn(str(processing.pk), html)
         # The controls root + script are wired into the page.
         self.assertIn("documents-controls-root", html)
+
+
+@override_settings(MEDIA_ROOT=_MEDIA)
+class ReadyDocumentStageConsistencyTests(TestCase):
+    """A processed (READY) document must never report "pending" stages.
+
+    Regression for the Info popup showing all stages "pending" on a document
+    that is clearly Processed (status=ready, chunks>0). Two guards are covered:
+    the synchronous process_document path marking every stage completed, and
+    the Info view reconciling any leftover pending/running rows for a READY
+    document.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.addClassCleanup(shutil.rmtree, _MEDIA, ignore_errors=True)
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            email="ready@example.com", password="x", is_staff=True, is_superuser=True
+        )
+        self.company = Company.objects.create(
+            owner=self.owner, name="RC", slug="rc"
+        )
+        self.document = Document.objects.create(
+            company=self.company,
+            uploaded_by=self.owner,
+            source=Document.SOURCE_LIBRARY,
+            status=Document.STATUS_READY,
+            processing_backend="celery",
+            processing_stage="ready",
+            processing_progress=100,
+            chunk_count=4,
+            title="resume-letter.pdf",
+            file_type="pdf",
+            file=SimpleUploadedFile("resume-letter.pdf", b"%PDF-1.4 fake"),
+        )
+        # Simulate the state left by _reset_for_reprocess: every stage re-armed
+        # to PENDING even though the document finished processing.
+        document_services._ensure_stages(self.document)
+        DocumentStage.objects.filter(document=self.document).update(
+            status=DocumentStage.STATUS_PENDING
+        )
+
+    def test_mark_all_stages_completed_flips_every_stage(self):
+        document_services._mark_all_stages_completed(self.document)
+        statuses = set(
+            DocumentStage.objects.filter(document=self.document).values_list(
+                "status", flat=True
+            )
+        )
+        self.assertEqual(statuses, {DocumentStage.STATUS_COMPLETED})
+
+    def test_info_view_reports_completed_stages_for_a_ready_document(self):
+        client = Client()
+        client.force_login(self.owner)
+        url = reverse(
+            "admin:documents_document_temporal_info", args=[self.document.pk]
+        )
+        resp = client.get(url, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertEqual(payload["processing_backend"], "celery")
+        self.assertTrue(payload["stages"])
+        reported = {stage["status"] for stage in payload["stages"]}
+        # No stage of a READY document may still read pending/running.
+        self.assertNotIn(DocumentStage.STATUS_PENDING, reported)
+        self.assertNotIn(DocumentStage.STATUS_RUNNING, reported)
