@@ -34,11 +34,10 @@ logger = logging.getLogger(__name__)
 
 class GraphState(TypedDict, total=False):
     message_text: str
-    history_text: str
-    enabled_tools: list[str]
-    selected_tool: str | None
-    route_reason: str
-    result: ToolResult | None
+    history_text: str  # ORIGINAL conversation history (never mutated)
+    pipeline_context: str  # accumulated prior-step output text
+    selected_tool: str | None  # last node's router pick (debug/trace only)
+    route_reason: str  # last node's reason (debug/trace only)
     visited: list[str]
     hops: int
 
@@ -142,7 +141,7 @@ class LangGraphChatService:
 
         history_text = self._history_text(conversation)
 
-        entry_agent, enabled_tools = self._resolve_step_and_tools(company)
+        agent = self._resolve_active_agent(company)
 
 
         try:
@@ -154,8 +153,7 @@ class LangGraphChatService:
                 attachment_ids=attachment_ids,
                 model_name=model_name,
                 history_text=history_text,
-                entry_agent=entry_agent,
-                enabled_tools=enabled_tools,
+                agent=agent,
                 llm=llm,
             )
         except (
@@ -195,8 +193,9 @@ class LangGraphChatService:
                     # the fixed keys below always win.
                     **(getattr(tool_result, "metadata", None) or {}),
                     "tool_used": tool_result.tool_used or "",
-                    "node_slug": result["node_slug"],
+                    "node_slug": result["entry_slug"],
                     "route_reason": result["route_reason"],
+                    "steps": result["steps"],
                     "source": "langgraph",
                     "trace_id": result["trace_id"],
                 },
@@ -223,116 +222,161 @@ class LangGraphChatService:
         attachment_ids,
         model_name,
         history_text,
-        entry_agent,
-        enabled_tools,
+        agent,
         llm,
     ):
-        node_slug = entry_agent.slug
-
+        chain = self._walk_steps(agent)
+        entry_slug = chain[0].slug if chain else ""
 
         outcome = {
             "tool_result": None,
             "tool_used": "",
-            "node_slug": node_slug,
+            "entry_slug": entry_slug,
             "route_reason": "",
             "trace_id": None,
+            "steps": [],
         }
 
-        def _ctx(tool_row):
-            return ToolContext(
-                user=user,
-                company=company,
-                conversation=conversation,
-                message_text=message_text,
-                history_text=history_text,
-                attachment_ids=list(attachment_ids or []),
-                model_name=model_name,
-                tool=tool_row,
-                llm=llm,
-                langfuse=self._langfuse,
-            )
-
-        tool_rows = {t.slug: t for t in entry_agent.tools.all()}
-
-        def _execute(slug):
-            """Run the handler for ``slug`` (or the direct handler) -> ToolResult."""
-            handler_slug = _DIRECT_HANDLER_SLUG if slug == DIRECT else slug
-            handler = get_handler(handler_slug)
-            tool_row = tool_rows.get(handler_slug)
-            if handler is None:
-
-
-                prompt_only = (
-                    tool_row is not None and tool_row.type == "langfuse"
-                )
-                handler = get_handler(
-                    "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
-                )
-            result = handler(_ctx(tool_row))
-
-
-            if not result.tool_used:
-                result.tool_used = handler_slug
-            return result
-
         has_attachment = bool(attachment_ids)
+        _chart_file_target = []
 
-        def _router_body(state):
-            from chat.services.chat_service import ChatService
+        def chart_file_target():
+            """True for a chart request with an attachment or a D7 file target.
 
-            # Deterministic rule (R6): a chart request with a file attached this
-            # turn, or with a D7 file target among the chat's files, must chart
-            # THAT file (never world-knowledge / a previous turn's data). Force
-            # document_search, bypassing the LLM router, so e.g. "create a pie
-            # chart" after a CSV upload never reuses an earlier chart.
-            file_target = False
-            if ChatService._is_chart_request(message_text):
-                target = ChatService._chart_target(conversation, message_text)
-                file_target = target is not None and target.kind == "file"
-            if (
-                (has_attachment or file_target)
-                and ChatService._is_chart_request(message_text)
-                and "document_search" in enabled_tools
-            ):
-                selected = "document_search"
-                reason = "chart request with a file target -> chart that file"
-                trace_id = None
-            else:
-                selected, reason, trace_id = self._route(
-                    message_text=message_text,
-                    history_text=history_text,
-                    enabled_tools=enabled_tools,
-                    entry_agent=entry_agent,
-                    tool_rows=tool_rows,
-                    llm=llm,
-                    has_attachment=has_attachment,
+            Computed once per turn (the chat's file list does not change
+            between steps) and shared by every step's node.
+            """
+            if not _chart_file_target:
+                from chat.services.chat_service import ChatService
+
+                forced = False
+                if ChatService._is_chart_request(message_text):
+                    if has_attachment:
+                        forced = True
+                    else:
+                        target = ChatService._chart_target(
+                            conversation, message_text
+                        )
+                        forced = target is not None and target.kind == "file"
+                _chart_file_target.append(forced)
+            return _chart_file_target[0]
+
+        def _make_node(step):
+            """Build a FULL router-executing node for ``step``.
+
+            The closure captures only the IMMUTABLE step row, the ORIGINAL
+            history, and the per-turn inputs — NOT pipeline_context /
+            effective_history, which are read from ``state`` inside the body at
+            run time (capturing them would bake a stale history into the node).
+            """
+
+            def _node(state):
+                pipeline_context = state.get("pipeline_context", "") or ""
+                # The router sees the handoff via effective_history; the handler
+                # sees it via ctx.pipeline_context (both from the same source).
+                effective_history = history_text
+                pc = pipeline_context.strip()
+                if pc:
+                    effective_history = (
+                        f"{history_text}\n\n"
+                        f"[Pipeline context from previous steps]\n{pc}"
+                    ).strip()
+
+                enabled, tool_rows = self._enabled_for(step)
+
+                def _execute(slug):
+                    """Run the handler for ``slug`` -> ToolResult (keying verbatim)."""
+                    handler_slug = _DIRECT_HANDLER_SLUG if slug == DIRECT else slug
+                    handler = get_handler(handler_slug)
+                    tool_row = tool_rows.get(handler_slug)
+                    if handler is None:
+                        prompt_only = (
+                            tool_row is not None and tool_row.type == "langfuse"
+                        )
+                        handler = get_handler(
+                            "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
+                        )
+                    ctx = ToolContext(
+                        user=user,
+                        company=company,
+                        conversation=conversation,
+                        message_text=message_text,
+                        history_text=effective_history,
+                        attachment_ids=list(attachment_ids or []),
+                        model_name=model_name,
+                        tool=tool_row,
+                        llm=llm,
+                        langfuse=self._langfuse,
+                        pipeline_context=pipeline_context,
+                    )
+                    result = handler(ctx)
+                    if not result.tool_used:
+                        result.tool_used = handler_slug
+                    return result
+
+                # Deterministic rule (R6): a chart request with a file attached
+                # this turn, or with a D7 file target among the chat's files,
+                # charts THAT file (never world-knowledge / a previous turn's
+                # data). Force document_search iff it is in THIS step's enabled
+                # tools, so "create a pie chart" after a CSV upload never reuses
+                # an earlier chart.
+                if (
+                    chart_file_target()
+                    and "document_search" in enabled
+                ):
+                    selected = "document_search"
+                    reason = "chart request with a file target -> chart that file"
+                    trace_id = None
+                else:
+                    selected, reason, trace_id = self._route(
+                        message_text=message_text,
+                        history_text=effective_history,
+                        enabled_tools=enabled,
+                        step=step,
+                        tool_rows=tool_rows,
+                        llm=llm,
+                        has_attachment=has_attachment,
+                    )
+                result = _execute(selected)
+
+                outcome["steps"].append(
+                    {"step": step.slug, "tool": result.tool_used}
                 )
-            result = _execute(selected)
-            outcome["tool_result"] = result
-            outcome["tool_used"] = result.tool_used
-            outcome["route_reason"] = reason
-            outcome["trace_id"] = trace_id
-            return {
-                "selected_tool": selected,
-                "route_reason": reason,
-                "visited": (state.get("visited") or []) + [state["_current"]],
-                "hops": state.get("hops", 0) + 1,
-            }
+                outcome["tool_result"] = result
+                outcome["tool_used"] = result.tool_used
+                outcome["route_reason"] = reason
+                outcome["trace_id"] = trace_id
 
+                addition = (
+                    f"[Step '{step.slug}' used tool '{result.tool_used}']\n"
+                    f"{(result.content or '').strip()}"
+                )
+                new_context = (
+                    f"{pipeline_context}\n\n{addition}".strip()
+                    if pipeline_context
+                    else addition
+                )
+                return {
+                    "pipeline_context": new_context,
+                    "selected_tool": selected,
+                    "route_reason": reason,
+                    "visited": (state.get("visited") or []) + [step.slug],
+                    "hops": state.get("hops", 0) + 1,
+                }
 
-        chain = self._walk_chain(entry_agent)
+            return _node
 
         app = self._build_graph(
             chain=chain,
-            entry_slug=node_slug,
-            router_body=_router_body,
+            entry_slug=entry_slug,
+            make_node=_make_node,
         )
 
         app.invoke(
             {
                 "message_text": message_text,
                 "history_text": history_text,
-                "enabled_tools": list(enabled_tools),
+                "pipeline_context": "",
                 "selected_tool": None,
                 "route_reason": "",
                 "visited": [],
@@ -340,89 +384,125 @@ class LangGraphChatService:
             }
         )
 
-
         if outcome["tool_result"] is None:
-            result = _execute(DIRECT)
+            # Defensive safety net: the orchestrator gate prevents an entry-less
+            # agent reaching here, but if the walk produced no executed step,
+            # answer directly once.
+            result = self._direct_result(
+                user=user,
+                company=company,
+                conversation=conversation,
+                message_text=message_text,
+                history_text=history_text,
+                attachment_ids=attachment_ids,
+                model_name=model_name,
+                llm=llm,
+            )
             outcome["tool_result"] = result
             outcome["tool_used"] = result.tool_used
             outcome["route_reason"] = "no router node executed; answered directly"
         return outcome
 
-    def _walk_chain(self, entry):
-        """Forward-walk the Agent ``next_node`` chain from ``entry``.
+    def _direct_result(
+        self,
+        *,
+        user,
+        company,
+        conversation,
+        message_text,
+        history_text,
+        attachment_ids,
+        model_name,
+        llm,
+    ):
+        """Run the direct handler once (empty-walk safety net)."""
+        handler = get_handler(_DIRECT_HANDLER_SLUG)
+        ctx = ToolContext(
+            user=user,
+            company=company,
+            conversation=conversation,
+            message_text=message_text,
+            history_text=history_text,
+            attachment_ids=list(attachment_ids or []),
+            model_name=model_name,
+            tool=None,
+            llm=llm,
+            langfuse=self._langfuse,
+            pipeline_context="",
+        )
+        result = handler(ctx)
+        if not result.tool_used:
+            result.tool_used = _DIRECT_HANDLER_SLUG
+        return result
 
-        Follows ``next_node_id`` via the DEFAULT manager (``Agent.objects``, NOT
+    def _entry_step(self, agent):
+        """The entry step of ``agent`` (connected_from_start, deterministic)."""
+        from agents.models import Step
+
+        return (
+            Step.objects.filter(agent=agent, connected_from_start=True)
+            .order_by("order", "created_at")
+            .first()
+        )
+
+    def _walk_steps(self, agent):
+        """Forward-walk the Step ``next_step`` chain from the agent's entry step.
+
+        Follows ``next_step_id`` via the DEFAULT manager (``Step.objects``, NOT
         the FK descriptor) so a soft-deleted next hop is hidden and terminates
         the walk at its predecessor. A ``seen`` set + hop cap guarantee
-        termination even if an admin wired a cycle (A->B->A). Returns the ordered
-        list of Agent rows ``[entry, n1, n2, ..., last]``.
+        termination even if an admin wired a cycle (A->B->A) within the agent.
+        Scoped to one agent. Returns ``[]`` when the agent has no entry step.
         """
-        from agents.models import Agent
+        from agents.models import Step
 
+        entry = self._entry_step(agent) if agent is not None else None
         chain = []
+        if entry is None:
+            return chain
         seen = set()
         current = entry
         hops = 0
-        company_id = getattr(entry, "company_id", None)
-        cap = (
-            Agent.objects.filter(company_id=company_id).count() * 2 + 1
-            if company_id is not None
-            else Agent.objects.count() * 2 + 1
-        )
+        cap = Step.objects.filter(agent=agent).count() * 2 + 1
         while current is not None and current.pk not in seen and hops <= cap:
             chain.append(current)
             seen.add(current.pk)
             hops += 1
             if current.connected_to_end:
                 break
-            next_id = current.next_node_id
+            next_id = current.next_step_id
             current = (
-                Agent.objects.filter(pk=next_id).first() if next_id else None
+                Step.objects.filter(pk=next_id).first() if next_id else None
             )
         return chain
 
-    def _build_graph(self, *, chain, entry_slug, router_body):
-        """Compile a ``StateGraph`` from the linear Agent chain.
+    def _build_graph(self, *, chain, entry_slug, make_node):
+        """Compile a ``StateGraph`` from the linear Step chain.
 
-        Each Agent row is a node; edges are START -> entry, agent -> next in the
-        chain, and the final agent -> END (forced for a ``connected_to_end``
-        agent). ``langgraph`` is imported HERE (lazily) so importing this module
-        stays SDK-free. Only the entry runs the router; every other node is a
-        pass-through. The chooser's visited check + ``max_hops`` cap guarantee
-        termination even under an accidental cycle.
+        Each Step row is a node (ALL run the router — no pass-through nodes);
+        edges are START -> entry, step -> next in the chain, and the final step
+        -> END (forced for a ``connected_to_end`` step). ``langgraph`` is
+        imported HERE (lazily) so importing this module stays SDK-free. The
+        chooser's visited check + ``max_hops`` cap guarantee termination even
+        under an accidental cycle.
         """
         from langgraph.graph import END, START, StateGraph
 
-        slugs = [a.slug for a in chain]
+        slugs = [s.slug for s in chain]
         node_count = max(len(slugs), 1)
         max_hops = 2 * node_count + 1
 
         # Linear adjacency from the chain order (deterministic). A
-        # connected_to_end agent forces END regardless of its position.
+        # connected_to_end step forces END regardless of its position.
         next_of = {}
-        for i, agent in enumerate(chain):
+        for i, step in enumerate(chain):
             nxt = slugs[i + 1] if i + 1 < len(slugs) else END
-            next_of[agent.slug] = END if agent.connected_to_end else nxt
+            next_of[step.slug] = END if step.connected_to_end else nxt
 
         builder = StateGraph(GraphState)
 
-        def _make_node(slug):
-            is_router = slug == entry_slug
-
-            def _node(state):
-                state = dict(state)
-                state["_current"] = slug
-                if is_router:
-                    return router_body(state)
-                return {
-                    "visited": (state.get("visited") or []) + [slug],
-                    "hops": state.get("hops", 0) + 1,
-                }
-
-            return _node
-
-        for slug in slugs:
-            builder.add_node(slug, _make_node(slug))
+        for step in chain:
+            builder.add_node(step.slug, make_node(step))
 
         # START -> entry (never route INTO start; entry is a real step).
         entry = entry_slug if entry_slug in slugs else (slugs[0] if slugs else END)
@@ -463,7 +543,7 @@ class LangGraphChatService:
         message_text,
         history_text,
         enabled_tools,
-        entry_agent,
+        step,
         tool_rows,
         llm,
         has_attachment=False,
@@ -541,33 +621,38 @@ class LangGraphChatService:
         return (selected, reason, trace_id)
 
 
-    def _resolve_step_and_tools(self, company):
-        """Return ``(entry_agent, enabled_tools)`` for the company's active flow.
+    def _resolve_active_agent(self, company):
+        """Return the company's active Agent container (or ``None``).
 
-        ``_orchestrator_for`` only routes here when an active entry Agent exists,
-        but this re-resolves defensively. ``enabled_tools`` is the intersection
-        of the entry agent's attached ``is_enabled`` tools with slugs that are
-        registry-resolvable OR ``type == "langfuse"`` (prompt-only). May be empty
-        (the router then forces ``__direct__``).
+        ``_orchestrator_for`` only routes here when an active agent with an entry
+        step exists, but this re-resolves defensively and deterministically.
         """
         from agents.models import Agent
 
-        entry = (
-            Agent.objects.filter(
-                company=company, connected_from_start=True, is_active=True
-            )
+        return (
+            Agent.objects.filter(company=company, is_active=True)
             .order_by("order", "created_at")
             .first()
         )
+
+    def _enabled_for(self, step):
+        """Return ``(enabled, tool_rows)`` for a single step.
+
+        ``enabled`` is the intersection of the step's attached ``is_enabled``
+        tools with slugs that are registry-resolvable OR ``type == "langfuse"``
+        (prompt-only). ``tool_rows`` maps every attached tool's raw slug to its
+        row. ``enabled`` may be empty (the router then forces ``__direct__``).
+        """
         slugs = available_slugs()
         enabled = []
         seen = set()
-        for tool in entry.tools.filter(is_enabled=True):
+        for tool in step.tools.filter(is_enabled=True):
             is_prompt_only = tool.type == "langfuse"
             if (tool.slug in slugs or is_prompt_only) and tool.slug not in seen:
                 enabled.append(tool.slug)
                 seen.add(tool.slug)
-        return entry, enabled
+        tool_rows = {t.slug: t for t in step.tools.all()}
+        return enabled, tool_rows
 
     def _history_text(self, conversation):
         """Build the condensed conversation context, mirroring the RAG path."""

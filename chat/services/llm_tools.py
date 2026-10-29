@@ -45,6 +45,7 @@ class ToolContext:
     tool: object | None = None
     llm: object | None = None
     langfuse: object | None = None
+    pipeline_context: str = ""  # prior steps' accumulated output (multi-step pipeline)
 
 
 @dataclass
@@ -128,6 +129,22 @@ def _with_identity(system_text: str, llm) -> str:
     return f"{line}\n\n{system_text}" if system_text else line
 
 
+def _with_pipeline_context(base_text: str, ctx: "ToolContext") -> str:
+    """Prepend prior-step output to a prompt in the multi-step pipeline.
+
+    Returns ``base_text`` UNCHANGED when ``ctx.pipeline_context`` is empty, so
+    the single-step / RAG / existing-test paths stay byte-for-byte identical.
+    When a prior step produced output, its accumulated text is prepended as a
+    labelled block so this step's handler sees "step 1's output".
+    """
+    pc = (getattr(ctx, "pipeline_context", "") or "").strip()
+    if not pc:
+        return base_text
+    block = f"[Pipeline context from previous steps]\n{pc}"
+    base_text = (base_text or "").strip()
+    return f"{block}\n\n{base_text}" if base_text else block
+
+
 def _wants_chart(message_text: str) -> bool:
     """True when the user's message asks for a chart/graph/plot."""
     from chat.services.chat_service import ChatService
@@ -165,7 +182,9 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     default_name = (
         "tool_web_search" if tool_slug == "web_search" else "tool_general_assistant"
     )
-    pre = _with_identity(_system_prompt(ctx, default_name), ctx.llm)
+    pre = _with_identity(
+        _with_pipeline_context(_system_prompt(ctx, default_name), ctx), ctx.llm
+    )
     prompt = f"{pre.strip()}\n\n{prompt}"
     # No file is attached on this turn. If the user's message does not itself
     # name WHAT to chart (a bare "create a pie chart"), the model must ASK what
@@ -238,7 +257,10 @@ def _file_chart_reply(
         has_file_context=True,
         attachment_sections=sections,
     )
-    pre = _with_identity(_system_prompt(ctx, "tool_document_search"), ctx.llm)
+    pre = _with_identity(
+        _with_pipeline_context(_system_prompt(ctx, "tool_document_search"), ctx),
+        ctx.llm,
+    )
     prompt = f"{pre.strip()}\n\n{prompt}"
     completion = ctx.llm.generate_structured(prompt, ChatCompletion)
     chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
@@ -288,7 +310,10 @@ def _general_assistant(ctx: "ToolContext") -> "ToolResult":
         return _knowledge_chart_reply(ctx, "general_assistant")
 
     messages = _history_messages(ctx.conversation, ctx.message_text)
-    sys = _with_identity(_system_prompt(ctx, "tool_general_assistant"), ctx.llm)
+    sys = _with_identity(
+        _with_pipeline_context(_system_prompt(ctx, "tool_general_assistant"), ctx),
+        ctx.llm,
+    )
     messages.insert(0, {"role": "system", "content": sys})
 
     content = ctx.llm.complete(messages)
@@ -322,7 +347,13 @@ def _web_search(ctx: "ToolContext") -> "ToolResult":
             "answer, and add a one-line note that you could not fetch live web "
             "results and the information may be out of date."
         )
-    messages.insert(0, {"role": "system", "content": _with_identity(sys, ctx.llm)})
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": _with_identity(_with_pipeline_context(sys, ctx), ctx.llm),
+        },
+    )
 
     content = ctx.llm.complete(messages)
     return ToolResult(content=content, tool_used="web_search")
@@ -393,7 +424,10 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
         attachment_sections=attachment_sections,
     )
 
-    pre = _with_identity(_system_prompt(ctx, "tool_document_search"), ctx.llm)
+    pre = _with_identity(
+        _with_pipeline_context(_system_prompt(ctx, "tool_document_search"), ctx),
+        ctx.llm,
+    )
     prompt = f"{pre.strip()}\n\n{prompt}"
     completion = ctx.llm.generate_structured(prompt, ChatCompletion)
     chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
@@ -418,6 +452,8 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     service = ChatService()
     turns = list(ctx.conversation.turns.order_by("created_at"))
     conversation_context = service._build_conversation_context(turns)
+    # In a multi-step pipeline the summary should also cover prior-step output.
+    conversation_context = _with_pipeline_context(conversation_context, ctx)
 
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
     sys = (
@@ -465,7 +501,13 @@ def _prompt_tool(ctx: "ToolContext") -> "ToolResult":
 
     name = (ctx.tool.prompt_name if ctx.tool else "") or ""
     sys = ctx.langfuse.get_prompt(name, fallback="") if (ctx.langfuse and name) else ""
-    messages.insert(0, {"role": "system", "content": _with_identity(sys, ctx.llm)})
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": _with_identity(_with_pipeline_context(sys, ctx), ctx.llm),
+        },
+    )
 
     content = ctx.llm.complete(messages)
 

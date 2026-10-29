@@ -2,110 +2,69 @@
 
 ## Overview
 
-This React + TypeScript frontend provides a visual graph editor for building LangGraph agents. It uses React Flow for the canvas, Tailwind CSS for styling, and integrates with the Django DRF backend.
+This React + TypeScript frontend provides a visual editor for building a company's chat flow. It uses React Flow for the canvas, Tailwind CSS for styling, and integrates with the Django DRF backend.
 
-## Why @langchain/react is Installed but Not Used
+The backend model is a two-level `Agent` container + `Step` nodes, plus a flat `Tool` table (see `agents/models.py`). An `Agent` is a named flow; its ordered `Step` rows are the nodes and each step holds the tools. The canvas renders one React Flow node per `Step` row plus two synthetic START/END anchors, and translates connections/drags into `Step` PATCHes. The dropdown lists `Agent`s; selecting one shows only that agent's steps.
 
-The `@langchain/react` package (v0.1.1) is included as a dependency to signal future streaming integration, but the SDK hooks (`useStream`, `useLangGraph`) are **not currently used** in the implementation.
+## @langchain/react is Installed but Not Used
 
-### Reason: Backend API Mismatch
-
-The `@langchain/react` hooks expect the **LangGraph Platform streaming API** format:
-- Server-Sent Events (SSE) for token-by-token streaming
-- LangGraph Platform-specific endpoint structure (`/threads/{threadId}/runs`)
-- Standardized message formats aligned with LangGraph Cloud
-
-Our Django backend provides a **different API contract**:
-- Form-urlencoded endpoints: `POST /chat/new/`, `POST /chat/{id}/send/`
-- Complete JSON responses (non-streaming): `{assistant: {content, citations, chart_data}}`
-- Designed for the existing RAG + chat architecture
-
-### Current Implementation
-
-`RunModal.tsx` uses direct `fetch()` calls via the `api.ts` client to consume the Django chat endpoints. This approach:
-- ✅ Correctly implements the existing backend contract
-- ✅ Provides full functionality (activate → create session → send message → display response)
-- ✅ Handles error states (400, 502, 503) with user-friendly messages
-- ✅ Displays citations and chart data when present
-- ❌ Does not stream tokens incrementally (backend limitation)
-
-### Future Enhancement Path
-
-To use `@langchain/react` hooks, we would need **one of**:
-
-1. **Backend Migration** (preferred if streaming is required):
-   - Add SSE streaming endpoints at `/api/v1/langgraph/threads/{id}/runs/`
-   - Emit LangGraph Platform-compatible event stream
-   - Migrate `RunModal.tsx` to `useStream()` hook
-   - Benefit: Token-by-token display, interrupt handling, tool call visibility
-
-2. **Custom Transport Adapter**:
-   - Build adapter wrapping form-urlencoded calls → SDK hook interface
-   - High complexity, low value (no streaming benefit)
-   - Not recommended unless SDK integration is a strict requirement
-
-3. **Keep Current Approach** (recommended for now):
-   - Direct fetch() matches backend reality
-   - SDK dependency signals future intent
-   - Users get full functionality without over-engineering
-
-### Decision
-
-The current implementation is **correct and appropriate** for the existing backend. The `@langchain/react` dependency remains installed to enable easy migration when/if the backend adds streaming support.
-
-## Streaming Status
-
-**Finding:** The implementation does not stream tokens incrementally.
-
-**Root Cause:** The Django backend returns complete JSON responses. The `/chat/{id}/send/` endpoint processes the full LLM response before returning.
-
-**Impact:** Users see a loading spinner while the agent runs, then the full response appears at once. This matches the behavior of the previous Svelte implementation.
-
-**Future Work:** If incremental streaming is required, the backend would need to:
-- Implement SSE or chunked transfer encoding
-- Stream LLM tokens as they arrive from the provider
-- Emit partial `content` updates during agent execution
-
-Frontend changes would then be minimal: replace `await api.sendChatMessage()` with an SSE listener or integrate `useStream()` hook.
+The `@langchain/react` package (v0.1.1) is still listed as a dependency but is **not used** by this canvas. There is no Run path in this frontend anymore (the Run modal was removed); running a flow happens from the chat page via the normal chat endpoints. The dependency is inert here and can be dropped if desired.
 
 ## Auto-Save Behavior
 
-**Node position updates:** Auto-save on drag stop (`onNodeDragStop` → `persistPosition` → immediate PATCH `/api/v1/agents/node/{id}/`)
+All changes persist immediately via `Step`/`Agent` PATCHes; there is no explicit Save button.
 
-**Tool toggles:** Auto-save on checkbox change (immediate PATCH `/api/v1/agents/node/{id}/`)
+**Step position:** Auto-save on drag stop (`onNodeDragStop` → `persistPosition` → PATCH `/api/v1/agents/step/{id}/` with `position_x`/`position_y`). The flush also updates local `steps` state so a dragged node never visually resets. START/END anchors are not draggable and never persisted.
 
-**Node/edge creation:** Auto-save on add (immediate POST to `/api/v1/agents/node/` or `/api/v1/agents/edge/`)
+**Tool membership:** Auto-save on checkbox change (PATCH `/api/v1/agents/step/{id}/` with the full `tools` array).
 
-**Node/edge deletion:** Auto-save on delete (immediate DELETE)
+**Chain links (connect/disconnect), scoped to the selected agent:**
+- `START → step`: PATCH step `connected_from_start: true` (delete → `false`)
+- `step → step`: PATCH source step `next_step: <target id>` (delete → `null`)
+- `step → END`: PATCH step `connected_to_end: true, next_step: null` (delete → `false`)
 
-**Save button:** Removed in latest version. All changes persist immediately. The "Activate" button serves as the explicit "ready to run" signal.
+After every link/tool/flag mutation the canvas re-calls `GET /agent/load/?agent=<id>` so it mirrors backend truth.
 
-## Node Types
+**Agent create/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / DELETE `/api/v1/agents/agent/{id}/`. **Step create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
 
-The backend supports five node types (defined in `agents/models.py`):
-- `start`: Entry point (green circle)
-- `step`: Processing step with tool selection (blue rectangle)
-- `end`: Terminal node (red circle)
-- `tool`: Tool invocation node (blue rectangle, same styling as step)
-- `condition`: Branching logic node (blue rectangle, same styling as step)
+**Activate:** POST `/api/v1/agents/agent/{id}/activate/`. `is_active` is READ-ONLY on PATCH and is only ever set through this action.
 
-All five types are exposed via toolbar buttons. The canvas uses React Flow to render and connect them.
+## The Flow Model (Agent container + Step nodes)
+
+The flow is an **Agent container** whose ordered **Step nodes** form a linear chain. There are no `start`/`step`/`end`/`tool`/`condition` node types and no graph/node/edge objects.
+
+- The entry step has `connected_from_start = true`.
+- Each step points to the next via `next_step` (same agent only).
+- The final step has `connected_to_end = true`.
+- Each step carries its own tools (M2M to the flat `Tool` table) — the step holds the tools.
+- Exactly one `Agent` per company is active (`is_active` on the container).
+
+The canvas renders:
+- One React Flow node per `Step` row (styled `.ab-node ab-node-step`).
+- Two **synthetic** anchor nodes `__start__` / `__end__` — client-only visual anchors derived from `connected_from_start` / `connected_to_end`; they are never backend rows and never sent in writes.
+- Derived edges: `START → entry step`, `step → step.next_step`, `final step → END`.
+
+The toolbar has three buttons — `Add Agent` (create a new flow container), `+ Step` (add a step to the selected agent), and `Activate` — plus an agent dropdown to switch which flow the canvas views. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
+
+## Tool Types
+
+`Tool.type` is one of: `general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `langfuse`. For non-`langfuse` tools the `slug` must be a registered handler slug; `langfuse` tools are prompt-only. The sidebar shows each tool's `type` next to its name so langfuse tools are distinguishable.
 
 ## API Client Pattern
 
-`api.ts` provides a typed client with two request helpers:
+`api.ts` provides a typed client with one JSON request helper:
 
-1. **`request<T>(method, path, body?)`** — JSON API (DRF endpoints)
-   - Used for: graphs, nodes, edges, tools CRUD
-   - Content-Type: `application/json`
-   - Response: JSON
+- **`request<T>(method, path, body?)`** — JSON API against `/api/v1/agents`.
+  - `/tool/` and `/tool/{id}/` — Tool CRUD
+  - `/agent/` and `/agent/{id}/` — Agent (container) CRUD
+  - `/step/` and `/step/{id}/` — Step (node) CRUD
+  - `/agent/{id}/activate/` — mark that agent active for the company
+  - `/agent/load/?company=<id>&agent=<id>` — bootstrap payload `{ active_agent_id, agents, selected_agent_id, steps, tools }`
+  - List endpoints handle both `{results:[]}` and `[]`.
 
-2. **`formRequest<T>(url, body)`** — Form-urlencoded (chat endpoints)
-   - Used for: `/chat/new/`, `/chat/{id}/send/`
-   - Content-Type: `application/x-www-form-urlencoded`
-   - Response: JSON
+The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat helper were removed.
 
-**CSRF Token:** Read from URL querystring (`?csrf=...`) and sent as `X-CSRFToken` header on non-GET requests. This matches the Django iframe pattern used by the existing agent-builder view.
+**CSRF Token:** Read from the URL querystring (`?csrf=...`) and sent as the `X-CSRFToken` header on non-GET requests. `company` and `company_name` are also read from the querystring (exposed as `companyId()` / `companyName()`); `company` is stamped on create calls so a multi-company user does not get a 400 "ambiguous". This matches the Django iframe pattern used by the agent-builder view.
 
 ## Build Output
 
@@ -139,12 +98,11 @@ All five types are exposed via toolbar buttons. The canvas uses React Flow to re
 2. `npm run build` — Compiles without errors, outputs to `agents/static/agents/canvas/index.html`
 3. `npm run dev` — Dev server starts, canvas loads at `http://localhost:5173`
 4. Manual E2E test:
-   - Load `/agent-builder/` in Django (with CSRF token)
-   - Add nodes (all five types via toolbar)
-   - Connect edges (drag handles)
-   - Select STEP node → toggle tools in sidebar
-   - Click Activate → graph marked active
-   - Click Run → modal opens → enter prompt → response displays
+   - Load `/agent-builder/` in Django (with `?csrf=...&company=...&company_name=...`)
+   - Click `Add Agent` to create a flow container, then `+ Step` to add steps
+   - Drag from START to a step, step → step, and step → END to wire the chain
+   - Select a step node → rename it and toggle tools / entry/final flags in the sidebar
+   - Click Activate → the selected agent is marked active for the company
 
 **Backend tests:** The Django test suite (`python manage.py test agents`) covers API endpoints. Frontend integration is verified manually.
 
@@ -155,8 +113,7 @@ agent-builder-frontend/
 ├── src/
 │   ├── main.tsx          # Entry point, mounts <App />
 │   ├── App.tsx           # Main canvas component (React Flow + toolbar + sidebar)
-│   ├── RunModal.tsx      # Run dialog (activate → create session → send message)
-│   ├── api.ts            # Typed API client (JSON + form-urlencoded)
+│   ├── api.ts            # Typed API client (Tool + Agent JSON endpoints)
 │   └── styles.css        # Tailwind directives + custom .ab-* classes
 ├── index.html            # Vite entry (references main.tsx)
 ├── package.json          # Dependencies + scripts
@@ -174,10 +131,9 @@ agent-builder-frontend/
 - `agents/templates/agents/agent_builder.html` — Template with iframe + CSRF token
 
 **DRF API (unchanged):**
-- `agents/api/views.py`, `agents/api/serializers.py` — JSON CRUD for graphs, nodes, edges, tools
+- `agents/api/views.py`, `agents/api/serializers.py` — JSON CRUD for tools and agents, plus `/agent/{id}/activate/` and `/agent/load/`
 
-**Chat endpoints (unchanged):**
-- `chat/views.py` — Form-urlencoded `/chat/new/`, `/chat/{id}/send/`
+**Chat endpoints:** not used by this canvas (the Run path was removed; running a flow happens from the chat page).
 
 **URL routing (changed):**
 - `base/urls.py` — Removed `/agent-builder-v2/` route (old Svelte app)
@@ -188,37 +144,32 @@ agent-builder-frontend/
 
 ## Migration from Svelte
 
-The Svelte app (`langgraph-gui-frontend/`) was fully removed. This React implementation replicates all Svelte features:
+An earlier Svelte prototype predated this canvas. The current React implementation targets the two-level Agent container + Step node model:
 
-| Feature | Svelte | React |
-|---------|--------|-------|
-| Graph canvas | Svelte Canvas API | React Flow |
-| Node types | START, STEP, END | START, STEP, END, TOOL, CONDITION |
-| Toolbar | + Start, + Step, + End, Save, Activate, Run | + Start, + Step, + End, + Tool, + Condition, Activate, Run |
-| Auto-save | On drag, on tool toggle | Same |
-| Run modal | Form-urlencoded chat endpoints | Same |
-| Streaming | No | No (backend limitation) |
-| TypeScript | Yes | Yes |
-| Dark theme | Custom CSS | Tailwind + custom CSS |
-| Build output | Vite → `agents/static/agents/svelte-canvas/` | Vite → `agents/static/agents/canvas/` |
-| Django route | `/agent-builder-v2/` | `/agent-builder/` (extended existing) |
-
-The React implementation extends the existing `/agent-builder/` app (previously a simpler canvas) rather than creating a new route. The old Svelte route is deleted.
+| Feature | Current React canvas |
+|---------|----------------------|
+| Canvas | React Flow (reactflow v11) |
+| Model | Two-level `Agent` container + `Step` nodes + flat `Tool` table (no graph/node/edge objects) |
+| Node representation | One React Flow node per `Step` row + synthetic START/END anchors |
+| Toolbar | `Add Agent`, `+ Step`, `Activate`, agent dropdown (no `+ Tool`/`+ Condition`/`Run`) |
+| Auto-save | Position PATCH on drag; `next_step`/flag PATCH on connect/disconnect; tools PATCH on toggle |
+| Run | Removed from this canvas (run from the chat page) |
+| TypeScript | Yes |
+| Dark theme | Tailwind + custom `.ab-*` CSS |
+| Build output | Vite → `agents/static/agents/canvas/` |
+| Django route | `/agent-builder/` |
 
 ## Known Limitations
 
-1. **No streaming token display** — Backend returns complete responses
-2. **@langchain/react hooks not used** — Backend API mismatch (documented above)
-3. **No undo/redo** — All changes persist immediately
-4. **No batch edit mode** — Each change is an individual API call
-5. **No graph versioning UI** — Snapshots exist in backend but not exposed in frontend
+1. **No streaming token display** — there is no run path in this canvas
+2. **@langchain/react dependency unused** — no run/streaming here
+3. **No undo/redo** — all changes persist immediately
+4. **No batch edit mode** — each change is an individual API call
+5. **Single flow per view** — the canvas shows one agent's steps at a time (switchable via the agent dropdown)
 
 ## Future Enhancements
 
-- Migrate to LangGraph Platform streaming API + `useStream()` hook
-- Add undo/redo with client-side state management (Redux, Zustand)
-- Batch edit mode: accumulate changes → flush on Save
-- Graph version history UI (list snapshots, diff viewer, restore)
-- Node configuration panels (CONDITION: branch logic, TOOL: parameters)
-- Multi-graph switcher (currently loads first graph only)
-- Collaborative editing (WebSocket sync, conflict resolution)
+- API routing per agent (the model reserves room for multi-agent routing later)
+- Undo/redo with client-side state management
+- Batch edit mode: accumulate changes → flush once
+- Richer per-agent configuration panels

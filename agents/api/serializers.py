@@ -5,7 +5,7 @@ from rest_framework import serializers
 from basics.api.serializers import AuditReadOnlySerializerMixin
 from chat.api.serializers import RequiredCompanyResolutionMixin
 
-from ..models import Agent, Tool
+from ..models import Agent, Step, Tool
 
 
 class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
@@ -104,18 +104,14 @@ class AgentSerializer(
     AuditReadOnlySerializerMixin,
     serializers.ModelSerializer,
 ):
+    """The flow CONTAINER. Steps live under it (see ``StepSerializer``)."""
+
     class Meta:
         model = Agent
         fields = [
             "id",
             "slug",
             "name",
-            "tools",
-            "connected_from_start",
-            "connected_to_end",
-            "next_node",
-            "position_x",
-            "position_y",
             "order",
             "is_active",
             "company",
@@ -128,6 +124,59 @@ class AgentSerializer(
         ]
         read_only_fields = ["is_active"]
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        company = self._scoped_company(attrs)
+
+        slug = attrs.get("slug") or (self.instance and self.instance.slug)
+        if company is not None and slug:
+            clash = Agent.objects.filter(company=company, slug=slug)
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError(
+                    {"slug": "an agent with this slug already exists for the company"}
+                )
+        return attrs
+
+
+class StepSerializer(
+    _CompanyScopedSerializerMixin,
+    AuditReadOnlySerializerMixin,
+    serializers.ModelSerializer,
+):
+    """One node under an Agent. Holds the tools; chained via ``next_step``."""
+
+    class Meta:
+        model = Step
+        fields = [
+            "id",
+            "agent",
+            "slug",
+            "name",
+            "tools",
+            "connected_from_start",
+            "connected_to_end",
+            "next_step",
+            "position_x",
+            "position_y",
+            "order",
+            "company",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "is_deleted",
+            "deleted_at",
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ``agent`` is required on create, read-only on update (a step does not
+        # move between agents; re-create to move).
+        if self.instance is not None and "agent" in self.fields:
+            self.fields["agent"].read_only = True
+
     def _in_scope_tools(self):
         request = self.context["request"]
         user = request.user
@@ -136,13 +185,19 @@ class AgentSerializer(
             qs = qs.filter(company__owner=user)
         return qs
 
-    def _in_scope_agents(self):
+    def _in_scope_steps(self):
         request = self.context["request"]
         user = request.user
-        qs = Agent.objects.all()
+        qs = Step.objects.all()
         if not user.is_superuser:
             qs = qs.filter(company__owner=user)
         return qs
+
+    def _effective_agent(self, attrs):
+        """The agent the step belongs to (create: payload; update: instance)."""
+        if self.instance is not None:
+            return self.instance.agent
+        return attrs.get("agent")
 
     def validate_tools(self, value):
         in_scope = set(
@@ -157,46 +212,75 @@ class AgentSerializer(
                 )
         return value
 
-    def validate_next_node(self, value):
+    def validate_next_step(self, value):
         if value is None:
             return value
         if self.instance is not None and value.pk == self.instance.pk:
             raise serializers.ValidationError(
-                "an agent cannot point its next_node at itself"
+                "a step cannot point its next_step at itself"
             )
-        if not self._in_scope_agents().filter(pk=value.pk).exists():
+        if not self._in_scope_steps().filter(pk=value.pk).exists():
             raise serializers.ValidationError("not found or not owned")
         return value
 
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        company = self._scoped_company(attrs)
+    def _default_company(self, attrs):
+        """On create default company from the agent (so step.company matches)."""
+        agent = attrs.get("agent")
+        if agent is not None:
+            return agent.company
+        return super()._default_company(attrs)
 
-        next_node = attrs.get("next_node")
-        if (
-            next_node is not None
-            and company is not None
-            and next_node.company_id != getattr(company, "pk", None)
-        ):
+    def validate(self, attrs):
+        # Resolve company BEFORE the mixin defaults it: on create the company
+        # must come from the agent, not the user's single company.
+        if self.instance is None and "company" not in attrs:
+            agent = attrs.get("agent")
+            if agent is not None:
+                attrs["company"] = agent.company
+
+        attrs = super().validate(attrs)
+
+        if self.instance is None and attrs.get("agent") is None:
             raise serializers.ValidationError(
-                {"next_node": "next_node must belong to the agent's company"}
+                {"agent": "an agent is required to create a step"}
             )
 
+        agent = self._effective_agent(attrs)
+        agent_company_id = getattr(agent, "company_id", None) if agent else None
+
+        # step.company must match agent.company.
+        supplied_company = attrs.get("company")
+        if (
+            supplied_company is not None
+            and agent_company_id is not None
+            and getattr(supplied_company, "pk", None) != agent_company_id
+        ):
+            raise serializers.ValidationError(
+                {"company": "step.company must match its agent's company"}
+            )
+
+        next_step = attrs.get("next_step")
+        if next_step is not None and agent is not None:
+            if next_step.agent_id != agent.pk:
+                raise serializers.ValidationError(
+                    {"next_step": "next_step must belong to the same agent"}
+                )
+
         tools = attrs.get("tools")
-        if tools is not None and company is not None:
+        if tools is not None and agent_company_id is not None:
             for tool in tools:
-                if tool.company_id != getattr(company, "pk", None):
+                if tool.company_id != agent_company_id:
                     raise serializers.ValidationError(
                         {"tools": "every tool must belong to the agent's company"}
                     )
 
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        if company is not None and slug:
-            clash = Agent.objects.filter(company=company, slug=slug)
+        if agent is not None and slug:
+            clash = Step.objects.filter(agent=agent, slug=slug)
             if self.instance is not None:
                 clash = clash.exclude(pk=self.instance.pk)
             if clash.exists():
                 raise serializers.ValidationError(
-                    {"slug": "an agent with this slug already exists for the company"}
+                    {"slug": "a step with this slug already exists for the agent"}
                 )
         return attrs

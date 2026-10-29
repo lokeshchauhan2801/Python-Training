@@ -61,7 +61,7 @@ class _FakeLLM:
 
 
 class LangGraphEntryAgentMixin:
-    """An active entry Agent (``connected_from_start=True``) for the company.
+    """An active Agent with one entry Step (``connected_from_start=True``).
 
     With it, ``views._orchestrator_for`` returns the LangGraph service. The
     router is stubbed with ``route_to(slug)`` so no router LLM is called.
@@ -75,21 +75,26 @@ class LangGraphEntryAgentMixin:
     )
 
     def enable_langgraph(self, company=None):
-        from agents.models import Agent, Tool
+        from agents.models import Agent, Step, Tool
 
         company = company or self.company
         agent = Agent.objects.create(
             company=company,
             slug="chat_agent",
+            is_active=True,
+        )
+        step = Step.objects.create(
+            company=company,
+            agent=agent,
+            slug="main",
             connected_from_start=True,
             connected_to_end=True,
-            is_active=True,
         )
         for slug in self.langgraph_tools:
             tool = Tool.objects.create(
                 company=company, slug=slug, name=slug.replace("_", " "), type=slug
             )
-            agent.tools.add(tool)
+            step.tools.add(tool)
         patcher = mock.patch("basics.langfuse.get_langfuse_client", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)

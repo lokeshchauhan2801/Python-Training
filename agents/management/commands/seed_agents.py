@@ -8,7 +8,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from agents.models import Agent, Tool
+from agents.models import Agent, Step, Tool
 from company.models import Company
 
 # (slug, name, type) — slug == type for every built-in (handler-backed) tool:
@@ -27,6 +27,7 @@ _TOOL_SPECS = [
 ]
 
 _AGENT_SLUG = "chat_agent"
+_STEP_SLUG = "main"
 
 
 class Command(BaseCommand):
@@ -87,18 +88,30 @@ class Command(BaseCommand):
             slug=_AGENT_SLUG,
             defaults={
                 "name": "Chat agent",
-                "connected_from_start": True,
-                "connected_to_end": True,
                 "is_active": True,
                 "order": 0,
-                "position_x": 0,
-                "position_y": 0,
             },
         )
         if created:
             self.stdout.write(f"  + Agent '{_AGENT_SLUG}' for {company}")
 
-        agent.tools.add(*tools.values())
+        step, step_created = Step.objects.get_or_create(
+            agent=agent,
+            slug=_STEP_SLUG,
+            defaults={
+                "company": company,
+                "name": "Main step",
+                "connected_from_start": True,
+                "connected_to_end": True,
+                "order": 0,
+                "position_x": 0,
+                "position_y": 0,
+            },
+        )
+        if step_created:
+            self.stdout.write(f"  + Step '{_STEP_SLUG}' for {company}")
+
+        step.tools.add(*tools.values())
 
         # Keep exactly one active flow per company on re-seed.
         if not agent.is_active:
