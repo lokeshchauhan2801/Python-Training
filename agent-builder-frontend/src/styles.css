@@ -254,3 +254,48 @@ body {
   to { transform: rotate(360deg); }
 }
 
+
+/* Create-agent dialog (A1) */
+.ab-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.ab-modal {
+  width: 100%;
+  max-width: 440px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--ab-panel);
+  color: var(--ab-text);
+  border: 1px solid var(--ab-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  padding: 20px;
+}
+
+.ab-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 16px;
+}
+
+.ab-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.ab-tool-picker {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--ab-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}

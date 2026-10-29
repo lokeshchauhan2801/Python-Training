@@ -311,9 +311,9 @@ class PendingSelectionSendTests(TestCase):
         self.assertIn("didn't catch", resp.json()["assistant"]["content"])
 
     def test_seam_fires_before_router_with_active_graph(self):
-        # Seed an active entry Agent so _orchestrator_for would pick the
-        # LangGraph router; the seam must still intercept the follow-up.
-        from agents.models import Agent, Tool
+        # Seed an active Agent with an entry Step so _orchestrator_for would
+        # pick the LangGraph router; the seam must still intercept the follow-up.
+        from agents.models import Agent, Step, Tool
 
         tool = Tool.objects.create(
             company=self.company,
@@ -324,11 +324,16 @@ class PendingSelectionSendTests(TestCase):
         agent = Agent.objects.create(
             company=self.company,
             slug="chat_agent",
-            connected_from_start=True,
-            connected_to_end=True,
             is_active=True,
         )
-        agent.tools.add(tool)
+        step = Step.objects.create(
+            company=self.company,
+            agent=agent,
+            slug="main",
+            connected_from_start=True,
+            connected_to_end=True,
+        )
+        step.tools.add(tool)
         with mock.patch(
             "documents.tasks.dispatch_document_processing"
         ) as mock_dispatch:

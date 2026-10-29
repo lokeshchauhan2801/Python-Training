@@ -1,92 +1,122 @@
-// TypeScript API client for LangGraph agent builder backend
+// TypeScript API client for the agents backend (two-level Agent -> Steps model).
 
 const API_ROOT = "/api/v1/agents";
 
-export interface Position {
-  x: number;
-  y: number;
-}
-
-export interface Graph {
-  id: number;
-  name: string;
-  company: number;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Node {
-  id: string; // ULID string, not integer
-  graph: number;
-  slug: string;
-  kind: "start" | "step" | "end" | "tool" | "condition";
-  label: string;
-  position: Position;
-  tools: string[]; // Array of tool ULID strings
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Edge {
-  id: string; // ULID string, not integer
-  graph: number;
-  source: string;
-  target: string;
-  created_at: string;
-  updated_at: string;
-}
+export type ToolType =
+  | "general_assistant"
+  | "document_search"
+  | "chat_summarise"
+  | "web_search"
+  | "add_to_knowledge_base"
+  | "document_processing_status"
+  | "langfuse";
 
 export interface Tool {
-  id: string; // ULID string, not integer
+  id: string; // ULID string
   slug: string;
   name: string;
+  type: ToolType;
+  description: string;
   is_enabled: boolean;
+  company: string | number | null;
   created_at: string;
   updated_at: string;
+  created_by: string | number | null;
+  updated_by: string | number | null;
+  is_deleted: boolean;
+  deleted_at: string | null;
 }
 
-export interface LoadGraphResponse {
-  graph: Graph;
-  nodes: Node[];
-  edges: Edge[];
+/** A flow CONTAINER. Its ordered Steps are the canvas nodes. */
+export interface Agent {
+  id: string; // ULID string
+  slug: string;
+  name: string;
+  order: number;
+  is_active: boolean; // READ-ONLY: set only via the activate action
+  company: string | number | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | number | null;
+  updated_by: string | number | null;
+  is_deleted: boolean;
+  deleted_at: string | null;
+}
+
+/** One node under an Agent. Holds the tools; chained via next_step. */
+export interface Step {
+  id: string; // ULID string
+  agent: string; // parent Agent ULID string
+  slug: string;
+  name: string;
+  tools: string[]; // array of Tool ULID strings (M2M)
+  connected_from_start: boolean;
+  connected_to_end: boolean;
+  next_step: string | null; // nullable Step ULID string (same agent only)
+  position_x: number;
+  position_y: number;
+  order: number;
+  company: string | number | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | number | null;
+  updated_by: string | number | null;
+  is_deleted: boolean;
+  deleted_at: string | null;
+}
+
+export interface LoadFlowResponse {
+  active_agent_id: string | null;
+  agents: Agent[];
+  selected_agent_id: string | null;
+  steps: Step[];
   tools: Tool[];
 }
 
-export interface ChatSession {
-  id: number;
-  title: string;
-  company_id: number;
+/** A registered handler function the canvas can attach as a tool. */
+export interface AvailableFunction {
+  slug: string;
+  name: string;
+  type: ToolType;
+  description: string;
+  tool_id: string | null; // set when a backing Tool row already exists
 }
 
-export interface SendResponse {
-  assistant: {
-    content: string;
-    citations?: any[];
-    chart_data?: any;
-  };
-}
-
-function csrfToken(): string {
+function queryParam(name: string): string {
   const params = new URLSearchParams(window.location.search);
-  return params.get("csrf") || "";
+  return params.get(name) || "";
+}
+
+/** CSRF token passed by the Django iframe via ?csrf=<token>. */
+function csrfToken(): string {
+  return queryParam("csrf");
+}
+
+/** Active company id passed by the Django iframe via ?company=<id>. */
+export function companyId(): string {
+  return queryParam("company");
+}
+
+/** Active company name passed by the Django iframe via ?company_name=<name>. */
+export function companyName(): string {
+  return queryParam("company_name");
 }
 
 async function request<T>(method: string, path: string, body?: any): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const opts: RequestInit = { method, headers, credentials: "same-origin" };
-  
+
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  
+
   if (method !== "GET" && method !== "HEAD") {
     headers["X-CSRFToken"] = csrfToken();
   }
-  
+
   const res = await fetch(`${API_ROOT}${path}`, opts);
-  
+
   if (!res.ok) {
     let detail = "";
     try {
@@ -98,66 +128,57 @@ async function request<T>(method: string, path: string, body?: any): Promise<T> 
     err.status = res.status;
     throw err;
   }
-  
+
   if (res.status === 204) return null as T;
   return res.json();
 }
 
-async function formRequest<T>(url: string, body: Record<string, string>): Promise<T> {
-  const formData = new URLSearchParams();
-  Object.entries(body).forEach(([key, value]) => formData.append(key, value));
-  
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-CSRFToken": csrfToken(),
-    },
-    credentials: "same-origin",
-    body: formData,
-  });
-  
-  if (!res.ok) {
-    let detail = "";
-    try {
-      const json = await res.json();
-      detail = json.detail || JSON.stringify(json);
-    } catch (_e) {
-      detail = res.statusText;
-    }
-    const err: any = new Error(`POST ${url} failed (${res.status}): ${detail}`);
-    err.status = res.status;
-    throw err;
-  }
-  
-  return res.json();
+/** DRF list endpoints may return a plain array or a paginated {results:[]}. */
+function asList<T>(payload: T[] | { results: T[] }): T[] {
+  return Array.isArray(payload) ? payload : payload?.results || [];
 }
 
 export const api = {
-  // Graph operations
-  listGraphs: () => request<{ results: Graph[] }>("GET", "/graph/"),
-  createGraph: (data: { name: string }) => request<Graph>("POST", "/graph/", data),
-  loadGraph: (id: number) => request<LoadGraphResponse>("GET", `/graph/${id}/load/`),
-  activateGraph: (id: number) => request<Graph>("POST", `/graph/${id}/activate/`, {}),
-
-  // Node operations
-  createNode: (data: Partial<Node> & { graph: number }) => request<Node>("POST", "/node/", data),
-  updateNode: (id: string | number, data: Partial<Node>) => request<Node>("PATCH", `/node/${id}/`, data),
-  deleteNode: (id: string | number) => request<void>("DELETE", `/node/${id}/`),
-
-  // Edge operations
-  createEdge: (data: { graph: number; source: string; target: string }) => 
-    request<Edge>("POST", "/edge/", data),
-  deleteEdge: (id: string | number) => request<void>("DELETE", `/edge/${id}/`),
-
   // Tool operations
-  listTools: () => request<Tool[]>("GET", "/tool/"),
+  listTools: async (): Promise<Tool[]> =>
+    asList(await request<Tool[] | { results: Tool[] }>("GET", "/tool/")),
   createTool: (data: Partial<Tool>) => request<Tool>("POST", "/tool/", data),
-  updateTool: (id: string | number, data: Partial<Tool>) => request<Tool>("PATCH", `/tool/${id}/`, data),
+  updateTool: (id: string, data: Partial<Tool>) =>
+    request<Tool>("PATCH", `/tool/${id}/`, data),
+  deleteTool: (id: string) => request<void>("DELETE", `/tool/${id}/`),
 
-  // Chat operations (form-urlencoded, not JSON)
-  createChatSession: (companyId: number) => 
-    formRequest<ChatSession>("/chat/new/", { company: String(companyId) }),
-  sendChatMessage: (sessionId: number, question: string) => 
-    formRequest<SendResponse>(`/chat/${sessionId}/send/`, { question }),
+  // Tools-from-functions: list the registered handler functions and
+  // create/attach a backing Tool row to a STEP from one.
+  availableFunctions: (company?: string) => {
+    const qs = company ? `?company=${encodeURIComponent(company)}` : "";
+    return request<AvailableFunction[]>("GET", `/tool/available/${qs}`);
+  },
+  attachFunction: (data: { slug: string; step?: string; company?: string }) =>
+    request<Tool>("POST", "/tool/attach/", data),
+
+  // Agent (container) operations
+  listAgents: async (): Promise<Agent[]> =>
+    asList(await request<Agent[] | { results: Agent[] }>("GET", "/agent/")),
+  createAgent: (data: Partial<Agent>) => request<Agent>("POST", "/agent/", data),
+  updateAgent: (id: string, data: Partial<Agent>) =>
+    request<Agent>("PATCH", `/agent/${id}/`, data),
+  deleteAgent: (id: string) => request<void>("DELETE", `/agent/${id}/`),
+  activateAgent: (id: string) => request<Agent>("POST", `/agent/${id}/activate/`, {}),
+
+  // Step (node) operations
+  listSteps: async (): Promise<Step[]> =>
+    asList(await request<Step[] | { results: Step[] }>("GET", "/step/")),
+  createStep: (data: Partial<Step>) => request<Step>("POST", "/step/", data),
+  updateStep: (id: string, data: Partial<Step>) =>
+    request<Step>("PATCH", `/step/${id}/`, data),
+  deleteStep: (id: string) => request<void>("DELETE", `/step/${id}/`),
+
+  // Flow bootstrap: all the company's agents + a selected agent's steps + tools.
+  loadFlow: (company?: string, agent?: string) => {
+    const params = new URLSearchParams();
+    if (company) params.set("company", company);
+    if (agent) params.set("agent", agent);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return request<LoadFlowResponse>("GET", `/agent/load/${qs}`);
+  },
 };

@@ -37,14 +37,13 @@ def _orchestrator_for(company, llm_client=None):
         return _chat_service()
 
     try:
-        from agents.models import Agent
+        from agents.models import Agent, Step
 
-        has_flow = Agent.objects.filter(
-            company=company,
-            connected_from_start=True,
-            is_active=True,
+        active = Agent.objects.filter(company=company, is_active=True).first()
+        has_entry = bool(active) and Step.objects.filter(
+            agent=active, connected_from_start=True
         ).exists()
-        if not has_flow:
+        if not has_entry:
             return _rag_service()
 
         from chat.services.langgraph_service import LangGraphChatService
