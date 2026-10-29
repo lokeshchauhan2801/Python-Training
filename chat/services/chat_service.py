@@ -19,7 +19,7 @@ from documents.models import Document, DocumentChunk
 
 from chat.models import Conversation, ConversationSession
 from chat.retitle import retitle_if_default
-from chat.services import session_files
+from chat.services import file_matching, session_files
 from chat.services.session_files import FileUnavailable
 
 logger = logging.getLogger(__name__)
@@ -532,17 +532,48 @@ class ChatService:
         trimmed = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
         return trimmed or "Here is the chart you requested."
 
+    @classmethod
+    def _chart_target(cls, conversation, question):
+        """The D7 chart target (``file_matching.ChartTarget``), or None.
+
+        None when there is no conversation or ``question`` is not a chart
+        request. Pure over the session context, so ``views.send`` step 6, the
+        LangGraph router, the tools and the readers all agree.
+        """
+        if conversation is None or not cls._is_chart_request(question or ""):
+            return None
+        return file_matching.select_chart_file(
+            session_files.list_files(conversation), question
+        )
+
+    @staticmethod
+    def _with_source_line(content, title):
+        """Append the H.3 source line unless the reply already names the file."""
+        if not title or title in content:
+            return content
+        return f"{content}\n\nChart built from “{title}”."
+
+    @staticmethod
+    def _unreadable_chart_reply(title):
+        return f"I couldn't read any usable data from “{title}” to build a chart."
+
     def _chat_csv_documents(self, conversation, attachment_ids=None, question=None):
         """Readable CSV files of this session, as ``SessionFile`` objects.
 
         A chat CSV is answered from the file directly (processed or not), so
-        chart requests read its bytes. ``attachment_ids`` (when given)
-        restricts to THIS turn's attachments — used by the LangGraph path,
-        where the current turn is not stored yet, so the correct file is the
-        one just uploaded. Otherwise every readable session CSV, newest first.
+        chart requests read its bytes. For a chart request only the D7 target
+        is used: ``[target]`` when it is a readable CSV, else ``[]``.
+        Otherwise ``attachment_ids`` (when given) restricts to THIS turn's
+        attachments — used by the LangGraph path, where the current turn is
+        not stored yet, so the correct file is the one just uploaded. Else
+        every readable session CSV, newest first.
         """
         if conversation is None:
             return []
+        target = self._chart_target(conversation, question)
+        if target is not None:
+            chosen = target.file if target.kind == "file" else None
+            return [chosen] if chosen and chosen.is_csv and chosen.readable else []
         files = [
             f for f in session_files.list_files(conversation)
             if f.is_csv and f.readable
@@ -580,7 +611,15 @@ class ChatService:
         def _eligible(candidates):
             return [f for f in candidates if not f.is_csv and f.readable]
 
-        if attachment_ids:
+        # A chart request reads only its D7 target (a CSV included), or nothing.
+        target = self._chart_target(conversation, question)
+        if target is not None:
+            chosen = (
+                [target.file]
+                if target.kind == "file" and target.file.readable
+                else []
+            )
+        elif attachment_ids:
             chosen = _eligible(
                 by_id[i]
                 for i in dict.fromkeys(str(i) for i in attachment_ids)
@@ -632,7 +671,7 @@ class ChatService:
         )
 
         csv_files = self._chat_csv_documents(
-            conversation, attachment_ids=attachment_ids
+            conversation, attachment_ids=attachment_ids, question=question
         )
         for csv_file in csv_files:
             try:
@@ -957,12 +996,23 @@ class ChatService:
             list(conversation.turns.order_by("created_at")) if conversation else []
         )
         history = self._build_conversation_context(all_turns)
+        # A chart request with a D7 file target charts only that file (F.4).
+        chart_target = self._chart_target(conversation, message_text)
+        chart_file = (
+            chart_target.file
+            if chart_target is not None and chart_target.kind == "file"
+            else None
+        )
         try:
-            chunks = self._find_relevant_chunks(
-                user,
-                message_text,
-                conversation,
-                company,
+            chunks = (
+                []
+                if chart_file is not None
+                else self._find_relevant_chunks(
+                    user,
+                    message_text,
+                    conversation,
+                    company,
+                )
             )
 
 
@@ -975,6 +1025,7 @@ class ChatService:
                 history,
                 message_text,
                 chunks,
+                has_file_context=True if chart_file is not None else None,
                 attachment_sections=attachment_sections,
             )
             # Prepend the REAL provider/model identity so "which model are you?"
@@ -984,7 +1035,16 @@ class ChatService:
             completion = None
             provider_error = None
             try:
-                completion = self._llm.generate_structured(prompt, ChatCompletion)
+                if chart_file is not None and not attachment_sections:
+                    # Nothing readable in the target: no LLM call. The CSV
+                    # override below still replaces this when it can chart.
+                    completion = ChatCompletion(
+                        response=self._unreadable_chart_reply(chart_file.title)
+                    )
+                else:
+                    completion = self._llm.generate_structured(
+                        prompt, ChatCompletion
+                    )
 
 
                 sanitized = self._strip_chart_json_blocks(completion.response)
@@ -1033,6 +1093,8 @@ class ChatService:
                 caption = self._chart_caption_only(
                     completion.response, message_text
                 )
+                if chart_file is not None:
+                    caption = self._with_source_line(caption, chart_file.title)
                 if caption != completion.response:
                     completion = completion.model_copy(
                         update={"response": caption}

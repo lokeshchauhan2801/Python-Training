@@ -146,6 +146,12 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     """
     from chat.services.chat_service import ChatCompletion, ChatService
 
+    # A chat file the request targets (D7) is charted from that file, even
+    # when the router picked a general-knowledge tool (F.4).
+    target = ChatService._chart_target(ctx.conversation, ctx.message_text)
+    if target is not None and target.kind == "file":
+        return _file_chart_reply(ctx, target, tool_slug=tool_slug)
+
     service = ChatService()
     prompt, _ = service._build_prompt(
         ctx.history_text,
@@ -190,6 +196,63 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
             if chart_data is not None
             else "I could not produce a chart for that request."
         )
+    return ToolResult(content=content, chart_data=chart_data, tool_used=tool_slug)
+
+
+def _file_chart_reply(
+    ctx: "ToolContext", target, tool_slug: str = "document_search"
+) -> "ToolResult":
+    """Chart exactly the D7 ``target`` chat file (F.4, R7).
+
+    A CSV gets the deterministic CSV chart. Otherwise the LLM charts only that
+    file's text (no library chunks, ``has_file_context=True``). A file with no
+    readable data gets a fixed reply and no LLM call. An LLM chart names its
+    source file (H.3).
+    """
+    from chat.services.chat_service import ChatCompletion, ChatService
+
+    service = ChatService()
+    title = target.file.title
+    local = service._build_csv_distribution_chart(
+        ctx.conversation, ctx.message_text
+    )
+    if local is not None:
+        response_text, chart = local
+        return ToolResult(
+            content=response_text,
+            chart_data=chart.model_dump(mode="json"),
+            tool_used=tool_slug,
+        )
+
+    sections = service._chat_attachment_texts(
+        ctx.conversation, question=ctx.message_text
+    )
+    if not sections:
+        return ToolResult(
+            content=ChatService._unreadable_chart_reply(title), tool_used=tool_slug
+        )
+    prompt, _ = service._build_prompt(
+        ctx.history_text,
+        ctx.message_text,
+        [],
+        has_file_context=True,
+        attachment_sections=sections,
+    )
+    pre = _with_identity(_system_prompt(ctx, "tool_document_search"), ctx.llm)
+    prompt = f"{pre.strip()}\n\n{prompt}"
+    completion = ctx.llm.generate_structured(prompt, ChatCompletion)
+    chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
+    content = ChatService._strip_chart_json_blocks(completion.response).strip()
+    if chart_data is not None:
+        content = _chart_caption_only(content, ctx.message_text)
+    if not content:
+        content = (
+            "Here is the chart you requested."
+            if chart_data is not None
+            else "I could not produce a chart for that request."
+        )
+    if chart_data is not None:
+        content = ChatService._with_source_line(content, title)
     return ToolResult(content=content, chart_data=chart_data, tool_used=tool_slug)
 
 
@@ -288,6 +351,10 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     # the file's real values by the local builder, not the LLM. This is the
     # reliable path for "create a pie chart" on a CSV like county_uk.csv.
     if service._is_chart_request(ctx.message_text):
+        # A chart request with a D7 file target charts only that file.
+        target = ChatService._chart_target(ctx.conversation, ctx.message_text)
+        if target is not None and target.kind == "file":
+            return _file_chart_reply(ctx, target)
         # With a file attached this turn, ground on exactly that file
         # (current-turn-wins). Without one, pass no attachment_ids so the
         # session-scoped CSV fallback in _chat_csv_documents reaches an earlier

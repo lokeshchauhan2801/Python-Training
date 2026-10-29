@@ -280,20 +280,22 @@ class LangGraphChatService:
         def _router_body(state):
             from chat.services.chat_service import ChatService
 
-            # Deterministic rule: a chart request WITH a file attached this turn
-            # must chart THAT file (never world-knowledge / a previous turn's
-            # data). Force document_search, bypassing the LLM router, so e.g.
-            # "create a pie chart" + attached CSV never reuses an earlier chart.
+            # Deterministic rule (R6): a chart request with a file attached this
+            # turn, or with a D7 file target among the chat's files, must chart
+            # THAT file (never world-knowledge / a previous turn's data). Force
+            # document_search, bypassing the LLM router, so e.g. "create a pie
+            # chart" after a CSV upload never reuses an earlier chart.
+            file_target = False
+            if ChatService._is_chart_request(message_text):
+                target = ChatService._chart_target(conversation, message_text)
+                file_target = target is not None and target.kind == "file"
             if (
-                has_attachment
+                (has_attachment or file_target)
                 and ChatService._is_chart_request(message_text)
                 and "document_search" in enabled_tools
             ):
                 selected = "document_search"
-                reason = (
-                    "file attached this turn + chart request -> chart the "
-                    "attached file"
-                )
+                reason = "chart request with a file target -> chart that file"
                 trace_id = None
             else:
                 selected, reason, trace_id = self._route(

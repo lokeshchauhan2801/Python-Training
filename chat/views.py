@@ -332,7 +332,7 @@ def new_session(request):
     )
 
 
-from chat.services import file_commands
+from chat.services import file_commands, file_matching
 from chat.services import kb as _kb
 from documents import controls
 from documents.models import Document
@@ -425,8 +425,32 @@ def _command_turn(
     return _turn_response(request, session, turn, selection_consumed=consumed)
 
 
+def _chart_target_reply(request, session, question, attachment_ids):
+    """``send`` step 6: an ambiguous / not-found chart target, or None.
+
+    The reply is deterministic (no LLM, no file panel, no state), so the next
+    message routes normally (D8). A ``file`` or ``no_files`` target returns
+    None and the orchestrator charts it.
+    """
+    target = ChatService._chart_target(session, question)
+    if target is None or target.kind not in ("ambiguous", "not_found"):
+        return None
+    turn = _chat_service().create_turn(
+        session,
+        user=session.user,
+        question=question,
+        response=file_matching.chart_target_reply(
+            target, session_files.list_files(session)
+        ),
+        model_name="knowledge_base",
+        attachment_ids=attachment_ids,
+        actor=request.user,
+    )
+    return _turn_response(request, session, turn)
+
+
 def _file_command_reply(request, session, question, attachment_ids, selected):
-    """``send`` steps 2–5 (design F.1): a file-command turn, or None.
+    """``send`` steps 2–6 (design F.1): a file-command turn, or None.
 
     None means the message is not a file command for this session and goes to
     the orchestrator. Tests of the LangGraph tool path patch this wrapper.
@@ -458,7 +482,7 @@ def _file_command_reply(request, session, question, attachment_ids, selected):
     # 5. A STOP / RESUME / STATUS / PROCESS / LIST command for this session.
     kind = file_commands.effective_kind(cmd, session)
     if kind is None:
-        return None
+        return _chart_target_reply(request, session, question, attachment_ids)
     # STOP and LIST ignore the selection: in-flight rows have no checkbox (V12).
     entry_ids = selected if selected and kind in (Kind.RESUME, Kind.STATUS) else None
     return _command_turn(
