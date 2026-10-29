@@ -26,6 +26,11 @@ urlpatterns = [
     ),
     path("<str:session_id>/files-json/", views.files_json, name="files_json"),
     path(
+        "<str:session_id>/panel-process/",
+        views.panel_process,
+        name="panel_process",
+    ),
+    path(
         "<str:session_id>/files/<str:entry_id>/<str:action>/",
         views.file_action,
         name="file_action",

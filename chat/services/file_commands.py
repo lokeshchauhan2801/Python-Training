@@ -354,7 +354,7 @@ def _status_line(f) -> str:
         text += ("" if text.endswith((".", "!", "?")) else ".") + " "
         text += session_files.FAILED_HINT
     elif state == "processed":
-        text = "processed"
+        text = "completed"
     else:
         text = "removed from Documents"
     return f"- {f.title}: {text}"

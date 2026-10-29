@@ -22,7 +22,7 @@ from documents import controls, tasks
 from documents.models import Document
 
 from .file_test_support import attach_entry, fake_enqueue
-from .models import ConversationSession
+from .models import Conversation, ConversationSession
 from .services import ChatService, file_commands, session_files
 from .services.file_commands import PICKER_NOTE
 
@@ -724,6 +724,35 @@ class EndpointTests(_Base):
             reverse("chat:file_action", args=[session.pk, entry["id"], action])
         )
 
+    def panel_process(self, *entries, session=None):
+        session = session or self.session
+        return self.client.post(
+            reverse("chat:panel_process", args=[session.pk]),
+            {"entry_ids": [entry["id"] for entry in entries]},
+        )
+
+    def test_panel_process_returns_rows_without_a_conversation(self):
+        entry = self.attach("a.csv")
+        before = Conversation.objects.filter(session=self.session).count()
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.panel_process(entry)
+        self.assertEqual(resp.status_code, 202, resp.content)
+        self.assertEqual(Conversation.objects.filter(session=self.session).count(), before)
+        rows = resp.json()["files"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], entry["id"])
+        self.assertEqual(rows[0]["state"], "queued")
+        self.assertEqual(rows[0]["label"], "Queued")
+
+    def test_completed_is_the_live_processed_label_and_status_wording(self):
+        entry = self.attach("a.csv")
+        self.process(entry)
+        self.set_doc(entry, status=Document.STATUS_READY)
+        self.assertEqual(self.rows()["a.csv"]["label"], "Completed")
+        msg = self.assistant(self.send("status"))
+        self.assertIn("- a.csv: completed", msg["content"])
+        self.assertNotIn("Already processed", msg["content"])
+
     def test_files_json(self):
         self.attach("a.csv")
         resp = self.client.get(reverse("chat:files_json", args=[self.session.pk]))
@@ -807,7 +836,9 @@ class EndpointTests(_Base):
     def test_hygiene(self):
         entry = self.attach("a.csv")
         file_url = reverse("chat:file_action", args=[self.session.pk, entry["id"], "stop"])
+        panel_url = reverse("chat:panel_process", args=[self.session.pk])
         self.assertEqual(self.client.get(file_url).status_code, 405)
+        self.assertEqual(self.client.get(panel_url).status_code, 405)
         self.assertEqual(self.client.get(reverse("chat:send", args=[self.session.pk])).status_code, 405)
         self.assertEqual(
             self.client.post(reverse("chat:files_json", args=[self.session.pk])).status_code, 405
@@ -816,6 +847,7 @@ class EndpointTests(_Base):
         strict = Client(enforce_csrf_checks=True)
         strict.force_login(self.user)
         self.assertEqual(strict.post(file_url).status_code, 403)
+        self.assertEqual(strict.post(panel_url, {"entry_ids": [entry["id"]]}).status_code, 403)
         self.assertEqual(
             strict.post(reverse("chat:send", args=[self.session.pk]), {"question": "status"}).status_code,
             403,

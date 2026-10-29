@@ -476,7 +476,7 @@ def _label(state, stage, progress) -> str:
     if state == "failed":
         return f"Failed at {stage}" if stage else "Failed"
     if state == "processed":
-        return "Already processed"
+        return "Completed"
     return "Removed"
 
 

@@ -685,6 +685,34 @@ def files_json(request, session_id):
     )
 
 
+@login_required
+@require_http_methods(["POST"])
+def panel_process(request, session_id):
+    """Process picker selections without creating a chat conversation turn."""
+    session = _resolve_session(request, session_id)
+    entry_ids = list(dict.fromkeys(request.POST.getlist("entry_ids")))
+    if not entry_ids:
+        return JsonResponse({"error": "Select at least one file to process."}, status=400)
+    try:
+        session_files.files_by_ids(session, entry_ids)
+    except session_files.TooManyIds:
+        return JsonResponse({"error": "Too many files in one request."}, status=400)
+    except session_files.UnknownEntry:
+        return JsonResponse({"error": "Some selected files are not in this chat."}, status=400)
+
+    try:
+        file_commands.process_entries(session, entry_ids, request.user)
+    except Exception:  # noqa: BLE001 - keep the picker mounted for retry
+        logger.exception("Could not process panel files in session %s", session.pk)
+        return JsonResponse({"error": file_commands.START_FAILED}, status=502)
+
+    rows = [
+        session_files.file_row(file)
+        for file in session_files.files_by_ids(session, entry_ids)
+    ]
+    return JsonResponse({"files": rows}, status=202)
+
+
 _FILE_ACTIONS = {"stop": "stop", "resume": "resume", "retry": "resume"}
 
 

@@ -1203,6 +1203,7 @@
       function reprocessUrlFor(id) { return baseUrl + id + "/reprocess/"; }
       function docStatusUrlFor(id) { return baseUrl + id + "/doc-status-json/"; }
       function filesUrlFor(id) { return baseUrl + id + "/files-json/"; }
+      function panelProcessUrlFor(id) { return baseUrl + id + "/panel-process/"; }
       function fileActionUrlFor(id, entryId, action) {
         return baseUrl + id + "/files/" + encodeURIComponent(entryId) + "/" + action + "/";
       }
@@ -1878,7 +1879,7 @@
         const meta = message.metadata || {};
         const spec = meta.file_panel;
         if (!spec || typeof spec !== "object" || !currentSessionId) { return; }
-        const isPicker = spec.mode === "picker";
+        let isPicker = spec.mode === "picker";
         const ids = Array.isArray(spec.entry_ids) ? spec.entry_ids : null;
 
         const el = document.createElement("div");
@@ -1923,6 +1924,17 @@
             if (processBtn) {
               processBtn.disabled = panel.sending || panel.checkedIds().length === 0;
             }
+          },
+          becomeTracker: function () {
+            isPicker = false;
+            panel.checked = {};
+            el.classList.remove("chat-ui-file-panel--picker");
+            el.classList.add("chat-ui-file-panel--tracker");
+            if (footer && footer.parentNode) { footer.parentNode.removeChild(footer); }
+            footer = null;
+            processBtn = null;
+            if (activePicker === panel) { activePicker = null; }
+            panel.update();
           }
         };
 
@@ -1967,7 +1979,9 @@
 
           const status = document.createElement("span");
           status.className = "shrink-0 chat-ui-file-status chat-ui-file-status--" + (r.state || "unknown");
-          status.textContent = r.label || "";
+          status.textContent = isPicker && r.state === "processed"
+            ? "Already processed"
+            : (r.label || "");
           line.appendChild(status);
 
           (Array.isArray(r.actions) ? r.actions : []).forEach(function (action) {
@@ -2007,17 +2021,40 @@
           processBtn.addEventListener("click", function () {
             const selectedIds = panel.checkedIds();
             if (!selectedIds.length || !currentSessionId || panel.sending) { return; }
+            const sid = currentSessionId;
             panel.sending = true;
             processBtn.disabled = true;
-            postMessage(currentSessionId, "", {
-              selectedIds: selectedIds,
-              includePending: false,
-              picker: panel
-            }).then(function (ok) {
-              panel.sending = false;
-              panel.update();
-              if (ok) { fileStore.kick(); }
-            });
+            const body = new URLSearchParams();
+            selectedIds.forEach(function (id) { body.append("entry_ids", id); });
+            fetch(panelProcessUrlFor(sid), {
+              method: "POST",
+              headers: jsonHeaders({
+                "X-CSRFToken": getCookie("csrftoken"),
+                "Content-Type": "application/x-www-form-urlencoded"
+              }),
+              credentials: "same-origin",
+              body: body.toString()
+            })
+              .then(function (r) {
+                return r.json().then(function (d) { return { ok: r.ok, data: d || {} }; });
+              })
+              .then(function (res) {
+                panel.sending = false;
+                if (!res.ok || !Array.isArray(res.data.files)) {
+                  setStatus(res.data.error || "Could not process files.");
+                  panel.update();
+                  return;
+                }
+                res.data.files.forEach(function (row) { fileStore.upsert(row); });
+                panel.becomeTracker();
+                setStatus("");
+                if (sid === currentSessionId) { fileStore.kick(); }
+              })
+              .catch(function () {
+                panel.sending = false;
+                setStatus("Could not process files.");
+                panel.update();
+              });
           });
           footer.appendChild(processBtn);
           el.appendChild(footer);

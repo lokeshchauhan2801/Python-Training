@@ -1055,6 +1055,16 @@ class ChatUIViewTests(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+    def test_chat_page_panel_process_updates_the_picker_in_place(self):
+        self.client.force_login(self.alice)
+        body = self.client.get(reverse("chat:home")).content.decode()
+        self.assertIn("panelProcessUrlFor", body)
+        self.assertIn("fetch(panelProcessUrlFor(sid)", body)
+        self.assertIn("panel.becomeTracker()", body)
+        self.assertIn('isPicker && r.state === "processed"', body)
+        self.assertIn('"Already processed"', body)
+        self.assertNotIn('postMessage(currentSessionId, "", {\n              selectedIds: selectedIds', body)
+
     @override_settings(MEDIA_ROOT=_MEDIA)
     def test_attach_creates_unprocessed_entry(self):
         self.client.force_login(self.alice)
