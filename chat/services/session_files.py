@@ -323,8 +323,15 @@ class SessionFile:
         return derive_state(self.entry, self.document)
 
     @property
+    def source_available(self) -> bool:
+        try:
+            return default_storage.exists(self._checked_key())
+        except (FileUnavailable, OSError):
+            return False
+
+    @property
     def readable(self) -> bool:
-        return self.state != "removed"
+        return self.state != "removed" or self.source_available
 
     def _checked_key(self) -> str:
         key = self.entry.get("storage_key")
@@ -338,8 +345,8 @@ class SessionFile:
         return key
 
     def open(self) -> IO[bytes]:
-        if self.document_id:
-            if self.document is None or not self.document.file:
+        if self.document_id and self.document is not None:
+            if not self.document.file:
                 raise FileUnavailable(self.id)
             try:
                 return self.document.file.open("rb")
@@ -353,9 +360,7 @@ class SessionFile:
 
     def as_extractable(self) -> Document:
         """A Document ``extract_document_text`` can read; never saved."""
-        if self.document_id:
-            if self.document is None:
-                raise FileUnavailable(self.id)
+        if self.document_id and self.document is not None:
             return self.document
         return Document(
             company_id=self.company_id,
@@ -502,6 +507,7 @@ def file_row(session_file: SessionFile) -> dict:
         actions = ["resume"]
     else:
         actions = []
+    recoverable = state == "removed" and session_file.source_available
     return {
         "id": session_file.id,
         "title": session_file.title,
@@ -509,12 +515,16 @@ def file_row(session_file: SessionFile) -> dict:
         "size": entry.get("size") or 0,
         "attached_at": entry.get("attached_at"),
         "state": state,
-        "label": _label(state, stage, progress),
+        "label": (
+            "Removed — available to process again"
+            if recoverable
+            else _label(state, stage, progress)
+        ),
         "stage": stage,
         "progress": progress,
         "error": error,
         "hint": hint,
-        "selectable": state in _SELECTABLE,
+        "selectable": state in _SELECTABLE or recoverable,
         "actions": actions,
         "terminal": state not in _IN_FLIGHT,
         "document_id": session_file.document_id,
@@ -573,7 +583,7 @@ def has_eligible(session, kind) -> bool:
 
 
 def unsettled_keys(session) -> list[str]:
-    """Storage keys of entries never processed, read under a row lock.
+    """Storage keys of entries in this session, read under a row lock.
 
     Call inside the caller's ``transaction.atomic()`` block, right before the
     hard delete, so an attach that committed meanwhile is included.
@@ -589,7 +599,7 @@ def unsettled_keys(session) -> list[str]:
     keys = []
     for entry in FilesState.from_context(row.context).all_entries():
         key = entry.get("storage_key")
-        if entry.get("document_id") or not _key_is_safe(key, row.pk):
+        if not _key_is_safe(key, row.pk):
             continue
         keys.append(key)
     return keys
