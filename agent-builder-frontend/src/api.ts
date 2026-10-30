@@ -33,7 +33,6 @@ export interface Agent {
   slug: string;
   name: string;
   order: number;
-  is_active: boolean; // READ-ONLY: set only via the activate action
   company: string | number | null;
   created_at: string;
   updated_at: string;
@@ -66,7 +65,6 @@ export interface Step {
 }
 
 export interface LoadFlowResponse {
-  active_agent_id: string | null;
   agents: Agent[];
   selected_agent_id: string | null;
   steps: Step[];
@@ -163,7 +161,6 @@ export const api = {
   updateAgent: (id: string, data: Partial<Agent>) =>
     request<Agent>("PATCH", `/agent/${id}/`, data),
   deleteAgent: (id: string) => request<void>("DELETE", `/agent/${id}/`),
-  activateAgent: (id: string) => request<Agent>("POST", `/agent/${id}/activate/`, {}),
 
   // Step (node) operations
   listSteps: async (): Promise<Step[]> =>

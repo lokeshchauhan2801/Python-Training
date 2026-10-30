@@ -24,6 +24,14 @@ class ConversationSession(BaseModel, SoftDeleteModel):
     context = models.JSONField(default=dict, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
     summary = models.TextField(blank=True)
+    selected_agent = models.ForeignKey(
+        "agents.Agent",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="selected_by_sessions",
+        db_index=True,
+    )
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
@@ -37,6 +45,25 @@ class ConversationSession(BaseModel, SoftDeleteModel):
 
     def __str__(self) -> str:
         return self.title or str(self.session_id)
+
+    def _validate_selected_agent_company(self):
+        """A selected Agent must belong to the same company as the session."""
+        if (
+            self.selected_agent_id is not None
+            and self.company_id is not None
+            and self.selected_agent.company_id != self.company_id
+        ):
+            raise ValidationError(
+                {"selected_agent": "selected_agent must belong to session.company."}
+            )
+
+    def clean(self):
+        super().clean()
+        self._validate_selected_agent_company()
+
+    def save(self, *args, **kwargs):
+        self._validate_selected_agent_company()
+        super().save(*args, **kwargs)
 
 
 class Conversation(BaseModel, SoftDeleteModel):

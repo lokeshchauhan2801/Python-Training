@@ -46,6 +46,9 @@ class ToolContext:
     llm: object | None = None
     langfuse: object | None = None
     pipeline_context: str = ""  # prior steps' accumulated output (multi-step pipeline)
+    # Composer picker selection (already validated SessionFile entry ULIDs) for
+    # an ACTION_PROCESS request; empty for every other intent.
+    selected_entry_ids: list = field(default_factory=list)
 
 
 @dataclass
@@ -595,7 +598,7 @@ def _file_command_tool(ctx, *, allowed, default, tool_used) -> "ToolResult":
         kind=kind,
         message=ctx.message_text,
         attachment_ids=list(ctx.attachment_ids or []),
-        entry_ids=None,
+        entry_ids=ctx.selected_entry_ids or None,
         actor=ctx.user,
     )
     return ToolResult(

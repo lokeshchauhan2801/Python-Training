@@ -113,7 +113,6 @@ class AgentSerializer(
             "slug",
             "name",
             "order",
-            "is_active",
             "company",
             "created_at",
             "updated_at",
@@ -122,7 +121,7 @@ class AgentSerializer(
             "is_deleted",
             "deleted_at",
         ]
-        read_only_fields = ["is_active"]
+        read_only_fields = []
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

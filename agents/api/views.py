@@ -52,42 +52,6 @@ def _function_catalog():
     return catalog
 
 
-def _entry_step(agent):
-    """The entry step of ``agent`` (connected_from_start, deterministic)."""
-    return (
-        Step.objects.filter(agent=agent, connected_from_start=True)
-        .order_by("order", "created_at")
-        .first()
-    )
-
-
-def _walk_steps(agent):
-    """Forward-walk the ``next_step`` chain from the agent's entry step.
-
-    Mirrors ``LangGraphChatService._walk_steps``: follows ``next_step_id`` via
-    the default manager (so soft-deleted hops terminate the walk), guards cycles
-    with a ``seen`` set and a hop cap, scoped to one agent. Returns the ordered
-    list of Step rows (``[]`` when the agent has no entry step).
-    """
-    entry = _entry_step(agent)
-    chain = []
-    if entry is None:
-        return chain
-    seen = set()
-    current = entry
-    hops = 0
-    cap = Step.objects.filter(agent=agent).count() * 2 + 1
-    while current is not None and current.pk not in seen and hops <= cap:
-        chain.append(current)
-        seen.add(current.pk)
-        hops += 1
-        if current.connected_to_end:
-            break
-        next_id = current.next_step_id
-        current = Step.objects.filter(pk=next_id).first() if next_id else None
-    return chain
-
-
 class ToolViewSet(ScopedModelViewSet):
     queryset = Tool.objects.all()
     serializer_class = ToolSerializer
@@ -187,30 +151,6 @@ class AgentViewSet(ScopedModelViewSet):
     queryset = Agent.objects.all()
     serializer_class = AgentSerializer
 
-    @action(detail=True, methods=["post"])
-    def activate(self, request, pk=None):
-        """Make the target agent the single active flow for its company.
-
-        ``is_active`` lives on the Agent container, so activation targets the
-        agent directly (no entry resolution). Clears any other active agent for
-        the company and marks the target active inside one transaction. A
-        half-built agent (no entry step) MAY be activated; it degrades to RAG at
-        runtime via the orchestrator gate.
-        """
-        target = self.get_object()
-        with transaction.atomic():
-            Agent.objects.filter(company=target.company).exclude(
-                pk=target.pk
-            ).update(is_active=False)
-            target.is_active = True
-            target.save(
-                actor=request.user,
-                update_fields=["is_active", "updated_at", "updated_by"],
-            )
-        return Response(
-            self.get_serializer(target).data, status=status.HTTP_200_OK
-        )
-
     @action(detail=False, methods=["get"])
     def load(self, request):
         """Return the canvas payload: all the company's agents + a selected
@@ -218,12 +158,14 @@ class AgentViewSet(ScopedModelViewSet):
 
         - ``agents`` = every agent for the company (dropdown).
         - ``selected_agent_id`` = the ``?agent=`` selector if in scope, else the
-          active agent, else the first agent, else null (NEVER 404 on a stale or
-          foreign id).
+          first agent ordered by ``order, created_at``, else null (NEVER 404 on
+          a stale or foreign id).
         - ``steps`` = ALL of the selected agent's steps (incl. orphans, so a
           freshly created step is visible immediately).
-        - ``active_agent_id`` = the company's active Agent (for the dropdown
-          marker / Activate button).
+
+        There is no activation: multiple live Agents coexist and none is
+        implicitly active. The builder selects an Agent to edit without
+        activating it, so the payload carries no ``active_agent_id``.
         """
         context = self.get_serializer_context()
         serializer = AgentSerializer(context=context)
@@ -244,7 +186,6 @@ class AgentViewSet(ScopedModelViewSet):
         all_agents = list(
             Agent.objects.filter(company=company).order_by("order", "created_at")
         )
-        active = next((a for a in all_agents if a.is_active), None)
 
         # Resolve the selected agent, falling back silently (never 404).
         agent_id = request.query_params.get("agent") or request.data.get("agent")
@@ -252,7 +193,7 @@ class AgentViewSet(ScopedModelViewSet):
         if agent_id:
             selected = self.get_queryset().filter(pk=agent_id).first()
         if selected is None:
-            selected = active or (all_agents[0] if all_agents else None)
+            selected = all_agents[0] if all_agents else None
 
         steps_data = []
         if selected is not None:
@@ -265,7 +206,6 @@ class AgentViewSet(ScopedModelViewSet):
 
         return Response(
             {
-                "active_agent_id": str(active.pk) if active else None,
                 "agents": AgentSerializer(
                     all_agents, many=True, context=context
                 ).data,

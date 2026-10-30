@@ -32,8 +32,8 @@ _STEP_SLUG = "main"
 
 class Command(BaseCommand):
     help = (
-        "Idempotently seed the built-in tools and a default active single-agent "
-        "flow (chat_agent) per company."
+        "Idempotently seed the built-in tools and an optional example "
+        "single-agent flow (chat_agent) per company."
     )
 
     def add_arguments(self, parser):
@@ -88,7 +88,6 @@ class Command(BaseCommand):
             slug=_AGENT_SLUG,
             defaults={
                 "name": "Chat agent",
-                "is_active": True,
                 "order": 0,
             },
         )
@@ -112,13 +111,5 @@ class Command(BaseCommand):
             self.stdout.write(f"  + Step '{_STEP_SLUG}' for {company}")
 
         step.tools.add(*tools.values())
-
-        # Keep exactly one active flow per company on re-seed.
-        if not agent.is_active:
-            agent.is_active = True
-            agent.save(update_fields=["is_active"])
-        Agent.objects.filter(company=company, is_active=True).exclude(
-            pk=agent.pk
-        ).update(is_active=False)
 
         self.stdout.write(self.style.SUCCESS(f"Seeded agents for {company}."))

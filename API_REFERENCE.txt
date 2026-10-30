@@ -232,92 +232,116 @@ Notes on scoping:
 ================================================================================
  6) AGENTS API      base: /api/v1/agents/
 ================================================================================
- Four DRF ModelViewSets (trailing slash required). Company-owner scoped.
- These back the agent-builder canvas.
+ Three DRF ModelViewSets (SimpleRouter, trailing slash required):
+ tool/, agent/, step/. Company-owner scoped (superusers see all; out-of-scope
+ IDs give 404). Soft-deleted rows are excluded. These back the agent-builder
+ canvas.
 
- --- 6A) GRAPH  /api/v1/agents/graph/ ---
-6.1  GET    /api/v1/agents/graph/                 List graphs.
-6.2  POST   /api/v1/agents/graph/
+ Flow model: an Agent is a flow CONTAINER; its ordered Steps form a linear chain
+ (entry Step has connected_from_start=true, each Step points at next_step, the
+ final Step has connected_to_end=true). Each Step holds its own Tools.
+ A company can have many Agents side by side. None of them is a company-wide
+ "current" Agent and no endpoint marks one as current: the builder picks an
+ Agent to edit, and each Chat session picks its own Agent
+ (see 7.13 / 7.14).
+
+ Read-only audit fields on every resource:
+   id, created_at, updated_at, created_by, updated_by, is_deleted, deleted_at
+ `company` is writable on create only (optional if you own exactly one company)
+ and read-only on update.
+
+ --- 6A) AGENT  /api/v1/agents/agent/ ---
+ Fields: id, slug, name, order, company (+ audit fields above).
+6.1  GET    /api/v1/agents/agent/                 List agents.
+6.2  POST   /api/v1/agents/agent/
        Body (JSON):
          {
-           "name": "My agent graph",
-           "description": "",            // optional
-           "is_active": false,           // optional
+           "slug": "research",           // unique per company
+           "name": "Research",
+           "order": 0,                   // optional (default 0)
            "company": "<company_id>"     // optional if you own one company
          }
-6.3  GET    /api/v1/agents/graph/{id}/            Retrieve.
-6.4  PUT    /api/v1/agents/graph/{id}/            Full update.
-6.5  PATCH  /api/v1/agents/graph/{id}/            Partial update.
-6.6  DELETE /api/v1/agents/graph/{id}/            Delete.
-6.7  GET    /api/v1/agents/graph/{id}/load/
-       Aggregated canvas payload: { graph, nodes, edges, tools }.
-6.8  POST   /api/v1/agents/graph/{id}/activate/
-       Make this the single active graph for its company. Body: none.
-       400 if the graph lacks a START node and at least one STEP node.
-
- --- 6B) NODE  /api/v1/agents/node/ ---
-6.9  GET    /api/v1/agents/node/                  List nodes.
-6.10 POST   /api/v1/agents/node/
-       Body (JSON):
+       400 {"slug": [...]} if the slug already exists for the company.
+6.3  GET    /api/v1/agents/agent/{id}/            Retrieve.
+6.4  PUT    /api/v1/agents/agent/{id}/            Full update.
+6.5  PATCH  /api/v1/agents/agent/{id}/            Partial update.
+6.6  DELETE /api/v1/agents/agent/{id}/            Delete.
+6.7  GET    /api/v1/agents/agent/load/?company=<company_id>&agent=<agent_id>
+       Canvas bootstrap payload. Both query params are optional (`company` is
+       required only if you own several companies).
+       Returns:
          {
-           "graph": "<graph_id>",
-           "slug": "router",
-           "kind": "step",               // start | step | end
-           "label": "Router",            // optional
-           "tools": ["<tool_id>", ...],  // optional
-           "prompt_name": "agent_router",// optional
-           "position": {"x": 100, "y": 60}, // optional object
-           "config": {}                  // optional object
+           "agents": [ <Agent>, ... ],   // every agent of the company,
+                                         // ordered by order, created_at
+           "selected_agent_id": "<id>" | null,
+           "steps":  [ <Step>, ... ],    // ALL steps of the selected agent
+           "tools":  [ <Tool>, ... ]     // the company's tools, by slug
          }
-       (company is taken from the graph automatically.)
-6.11 GET    /api/v1/agents/node/{id}/             Retrieve.
-6.12 PUT    /api/v1/agents/node/{id}/             Full update.
-6.13 PATCH  /api/v1/agents/node/{id}/             Partial update.
-6.14 DELETE /api/v1/agents/node/{id}/             Delete.
+       selected_agent_id = the in-scope `agent` param, else the first agent by
+       (order, created_at), else null. A stale/foreign `agent` id never 404s;
+       it silently falls back.
 
- --- 6C) EDGE  /api/v1/agents/edge/ ---
-6.15 GET    /api/v1/agents/edge/                  List edges.
-6.16 POST   /api/v1/agents/edge/
+ --- 6B) STEP  /api/v1/agents/step/ ---
+ Fields: id, agent, slug, name, tools, connected_from_start, connected_to_end,
+         next_step, position_x, position_y, order, company (+ audit fields).
+6.8  GET    /api/v1/agents/step/                  List steps.
+6.9  POST   /api/v1/agents/step/
        Body (JSON):
          {
-           "graph": "<graph_id>",
-           "source": "<node_id>",
-           "target": "<node_id>",        // must differ from source, same graph
-           "condition": ""               // optional
+           "agent": "<agent_id>",        // required on create; read-only after
+           "slug": "router",             // unique per agent
+           "name": "Router",
+           "tools": ["<tool_id>", ...],  // optional; same company as the agent
+           "connected_from_start": false,// optional
+           "connected_to_end": false,    // optional
+           "next_step": "<step_id>",     // optional; same agent, not itself
+           "position_x": 100,            // optional (canvas position)
+           "position_y": 60,             // optional
+           "order": 0                    // optional
          }
-6.17 GET    /api/v1/agents/edge/{id}/             Retrieve.
-6.18 PUT    /api/v1/agents/edge/{id}/             Full update.
-6.19 PATCH  /api/v1/agents/edge/{id}/             Partial update.
-6.20 DELETE /api/v1/agents/edge/{id}/             Delete.
+       (company is taken from the agent automatically.)
+6.10 GET    /api/v1/agents/step/{id}/             Retrieve.
+6.11 PUT    /api/v1/agents/step/{id}/             Full update.
+6.12 PATCH  /api/v1/agents/step/{id}/             Partial update (e.g. link
+                                                  wiring, tools, position).
+6.13 DELETE /api/v1/agents/step/{id}/             Delete.
 
- --- 6D) TOOL  /api/v1/agents/tool/ ---
-6.21 GET    /api/v1/agents/tool/                  List tools.
-6.22 POST   /api/v1/agents/tool/
+ --- 6C) TOOL  /api/v1/agents/tool/ ---
+ Fields: id, slug, name, type, description, is_enabled, company (+ audit).
+6.14 GET    /api/v1/agents/tool/                  List tools.
+6.15 POST   /api/v1/agents/tool/
        Body (JSON):
          {
-           "slug": "document_search",    // must be a known handler slug unless
-                                         // config.kind == "prompt_only"
+           "slug": "document_search",    // must be a registered handler slug
+                                         // unless type == "langfuse"
            "name": "Document search",
+           "type": "document_search",    // see types below
            "description": "",            // optional
            "is_enabled": true,           // optional
-           "prompt_name": "tool_document_search", // optional
-           "config": {},                 // optional object
            "company": "<company_id>"     // optional if you own one company
          }
-       Known built-in tool slugs: general_assistant, document_search,
-       chat_summarise, web_search, add_to_knowledge_base,
-       document_processing_status.
-6.23 GET    /api/v1/agents/tool/{id}/             Retrieve.
-6.24 PUT    /api/v1/agents/tool/{id}/             Full update.
-6.25 PATCH  /api/v1/agents/tool/{id}/             Partial update.
-6.26 DELETE /api/v1/agents/tool/{id}/             Delete.
-6.27 POST   /api/v1/agents/tool/sync_langfuse/
-       Upsert prompt-only tools from posted Langfuse prompt names.
+       Tool types: general_assistant, document_search, chat_summarise,
+       web_search, add_to_knowledge_base, document_processing_status,
+       langfuse (prompt-only; slug is the Langfuse prompt name).
+6.16 GET    /api/v1/agents/tool/{id}/             Retrieve.
+6.17 PUT    /api/v1/agents/tool/{id}/             Full update.
+6.18 PATCH  /api/v1/agents/tool/{id}/             Partial update.
+6.19 DELETE /api/v1/agents/tool/{id}/             Delete.
+6.20 GET    /api/v1/agents/tool/available/?company=<company_id>
+       List the registered handler functions the canvas can attach as tools.
+       Returns: [ { slug, name, type, description, tool_id }, ... ]
+       (tool_id is the existing Tool row id for the company, or null.)
+6.21 POST   /api/v1/agents/tool/attach/
+       Create a Tool row from a handler slug (idempotent per company+slug) and
+       optionally attach it to a step.
        Body (JSON):
          {
-           "prompt_names": ["my_prompt_a", "my_prompt_b"],
+           "slug": "document_search",    // required; an attachable handler
+           "step": "<step_id>",          // optional
            "company": "<company_id>"     // optional if you own one company
          }
+       Returns the Tool (200). 400 {"detail": ...} if slug is missing/unknown
+       or the step is not in the company.
 
 
 ================================================================================
@@ -338,7 +362,12 @@ Notes on scoping:
 7.6  POST /chat/new/
          Create a session. Body (x-www-form-urlencoded):
            company=<company_id>          // optional
+           agent_id=<agent_id>           // optional; same rules as 7.14.
+                                         // Omitted -> no Agent (Normal RAG).
+         The session payload includes selected_agent_id.
 7.7  GET  /chat/{session_id}/messages-json/          List messages in a session.
+         Includes selected_agent_id (null if none, or if the stored Agent was
+         deleted or belongs to another company).
 7.8  POST /chat/{session_id}/send/
          Send one chat turn. Body (x-www-form-urlencoded or form-data):
            question=<text>                           // optional if a file is attached
@@ -366,6 +395,28 @@ Notes on scoping:
          Returns: { documents: [ {id, workflow_id, temporal_url, title, status,
                     status_display, stage, progress, backend, error, terminal} ],
                     all_done }
+7.13 GET  /chat/agents-json/?company=<company_id>
+         List the Agents selectable for Chat in a company.
+         `company` is optional only if your active company is one you may use;
+         otherwise 400 {"error": "Select a company first."}. An unknown or
+         unauthorized company id gives 404.
+         Returns (ordered by order, then oldest created_at first):
+           { "agents": [ {"id": "<agent_id>", "name": "Research",
+                          "slug": "research"}, ... ] }
+7.14 POST /chat/{session_id}/selected-agent/
+         Set or clear the Agent this session runs with. Body as JSON or form:
+           {"agent_id": "<agent_id>"}   // select an Agent
+           {"agent_id": null}           // clear (Normal RAG); empty form value
+                                        // also clears
+         `agent_id` is required. Out-of-scope session -> 404.
+         Returns 200:
+           { "id": "<session_id>", "company_id": "<company_id>",
+             "selected_agent_id": "<agent_id>" | null }
+         400 {"error": "Agent not found or unavailable for this company."}
+         for a wrong type, blank string, malformed ULID, unknown/soft-deleted
+         Agent, or an Agent from another company (format errors may instead
+         say "agent_id must be a ULID or null"). The session is not changed on
+         error. /send/ takes no agent id; it uses the session's stored Agent.
 
 
 ================================================================================
