@@ -11,13 +11,10 @@
 """
 from __future__ import annotations
 
-import functools
 import logging
 import os
 import re
 from dataclasses import dataclass, field
-
-from django.db import transaction
 
 from chat.services import kb, session_files
 from chat.services.chat_service import ChatService
@@ -247,8 +244,20 @@ def _has_started_file(session) -> bool:
     return any(entry.get("document_id") for entry in state.all_entries())
 
 
-def effective_kind(cmd: Command, session) -> str | None:
-    """The command kind to run on this session, or None to route as chat."""
+def effective_kind_from_files(cmd: Command, session, files) -> str | None:
+    """The command kind to run, decided against the passed-in ``files``.
+
+    This is the READ-ONLY core of :func:`effective_kind`. It carries the exact
+    STOP/RESUME eligibility and name-target logic but operates on the already
+    listed ``files`` sequence instead of fetching session state, so it NEVER
+    calls :func:`session_files.reconcile`, :func:`session_files.locked_files`,
+    :func:`session_files.has_eligible`, or any ``save()``. The STATUS-weak
+    branch still reads only the session ``context`` (no writes) via
+    :func:`_has_started_file`.
+
+    The capability preflight uses this directly so it can run against a stale
+    processed/unprocessed list without mutating it.
+    """
     if cmd.kind == Kind.NONE:
         return None
     if cmd.kind == Kind.STATUS:
@@ -258,16 +267,33 @@ def effective_kind(cmd: Command, session) -> str | None:
     if cmd.kind in (Kind.PROCESS, Kind.LIST):
         return cmd.kind
     # STOP / RESUME
-    files = session_files.reconcile(session)
     if cmd.needs_name:
         if cmd.loose_tokens and all(prefix_hits(t, files) for t in cmd.loose_tokens):
             return cmd.kind
         return None
     if cmd.bare:
-        return cmd.kind if session_files.has_eligible(session, cmd.kind) else None
+        wanted = session_files._ELIGIBLE.get(cmd.kind, set())
+        return cmd.kind if any(f.state in wanted for f in files) else None
     if not cmd.strong and any(not prefix_hits(t, files) for t in cmd.loose_tokens):
         return None
     return cmd.kind
+
+
+def effective_kind(cmd: Command, session) -> str | None:
+    """The command kind to run on this session, or None to route as chat.
+
+    Normal-path wrapper: for STOP/RESUME it reconciles the session first (the
+    real execution boundary), then delegates the decision to
+    :func:`effective_kind_from_files` so the eligibility logic lives in exactly
+    one place. Behaviour is byte-for-byte unchanged from before the split.
+    """
+    if cmd.kind in (Kind.STOP, Kind.RESUME):
+        files = session_files.reconcile(session)
+    else:
+        # STATUS/PROCESS/LIST/NONE never consult the files sequence; avoid the
+        # extra query/reconcile the old code also skipped for these kinds.
+        files = ()
+    return effective_kind_from_files(cmd, session, files)
 
 
 # --------------------------------------------------------------------------
@@ -603,11 +629,6 @@ class Outcome:
         }.get(self.result, f"{name} is no longer in this chat.")
 
 
-def _delete_unsettled(key) -> None:
-    """``on_commit`` callback: drop the unsettled copy once the Document exists."""
-    session_files.purge_unsettled([key])
-
-
 def _delete_precopies(names) -> None:
     storage = Document._meta.get_field("file").storage
     for name in names:
@@ -618,14 +639,14 @@ def _delete_precopies(names) -> None:
 
 
 def _precopy(session, ids) -> dict:
-    """Phase 0, no lock: copy each unstarted entry's bytes under documents/."""
+    """Phase 0, no lock: copy unstarted or recoverable entries under documents/."""
     file_field = Document._meta.get_field("file")
     by_id = {f.id: f for f in session_files.list_files(session)}
     precopies = {}
     try:
         for entry_id in ids:
             f = by_id.get(entry_id)
-            if f is None or f.document_id:
+            if f is None or (f.document_id and f.state != "removed"):
                 continue
             key = str(f.entry.get("storage_key") or "")
             name = file_field.generate_filename(None, os.path.basename(key))
@@ -661,12 +682,10 @@ def _process_one(session, state, entry_id, actor, allowed, precopies, used) -> O
     current = session_files.derive_state(entry, document)
     if current in _IN_FLIGHT:
         return Outcome(entry_id, title, "processing", doc_id)
-    if current == "removed":
-        return Outcome(entry_id, title, "removed")
     if allowed is not None and current not in allowed:
         return Outcome(entry_id, title, "not_allowed", doc_id)
     try:
-        if current == "not_started" and document is None:
+        if current in {"not_started", "removed"} and document is None:
             final = precopies.get(entry_id)
             if final is None:
                 logger.warning("Chat file %s has no bytes to process", entry_id)
@@ -686,9 +705,8 @@ def _process_one(session, state, entry_id, actor, allowed, precopies, used) -> O
             document.save(actor=actor)
             used.add(entry_id)
             state.set_document(entry_id, document.pk)
-            transaction.on_commit(
-                functools.partial(_delete_unsettled, entry.get("storage_key"))
-            )
+            if current == "removed":
+                state.move_to_unprocessed(entry_id)
             controls.start_document(document)
             return Outcome(entry_id, title, "queued", str(document.pk))
         if current == "not_started":  # a legacy UPLOADED row
@@ -708,9 +726,10 @@ def _process_one(session, state, entry_id, actor, allowed, precopies, used) -> O
 def process_entries(session, entry_ids, actor, allowed=None) -> list[Outcome]:
     """Create / start / resume / reprocess the Documents behind ``entry_ids``.
 
-    Phase 0 copies unstarted files under ``documents/`` without a lock; phase 1
-    acts inside ``locked_files`` so a second request sees ``queued`` and skips.
-    The Temporal call itself runs on commit (``enqueue_document_processing``).
+    Phase 0 copies unstarted or recoverable files under ``documents/`` without a
+    lock; phase 1 acts inside ``locked_files`` so a second request sees
+    ``queued`` and skips. The Temporal call itself runs on commit
+    (``enqueue_document_processing``).
     """
     ids = list(dict.fromkeys(str(i) for i in (entry_ids or [])))
     if not ids:

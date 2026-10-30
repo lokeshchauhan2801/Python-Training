@@ -10,9 +10,15 @@ urlpatterns = [
     path("companies-json/", views.companies_json, name="companies_json"),
     path("models-json/", views.models_json, name="models_json"),
     path("sessions-json/", views.sessions_json, name="sessions_json"),
+    path("agents-json/", views.agents_json, name="agents_json"),
     path("new/", views.new_session, name="new_session"),
     path("<str:session_id>/messages-json/", views.messages_json, name="messages_json"),
     path("<str:session_id>/send/", views.send, name="send"),
+    path(
+        "<str:session_id>/selected-agent/",
+        views.selected_agent,
+        name="selected_agent",
+    ),
     path("<str:session_id>/attach/", views.attach, name="attach"),
     path(
         "<str:session_id>/reprocess/",

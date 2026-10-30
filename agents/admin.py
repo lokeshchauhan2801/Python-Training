@@ -34,13 +34,11 @@ class AgentAdmin(BaseModelAdmin):
         "id_short",
         "slug",
         "name",
-        "is_active",
         "order",
         "company",
         "created_at",
     )
     list_filter = (
-        "is_active",
         "company",
         "is_deleted",
         "created_at",

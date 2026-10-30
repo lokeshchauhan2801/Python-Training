@@ -27,7 +27,7 @@ After every link/tool/flag mutation the canvas re-calls `GET /agent/load/?agent=
 
 **Agent create/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / DELETE `/api/v1/agents/agent/{id}/`. **Step create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
 
-**Activate:** POST `/api/v1/agents/agent/{id}/activate/`. `is_active` is READ-ONLY on PATCH and is only ever set through this action.
+**Agent selection:** Agents are independent flow containers — there is no company-wide "current" Agent and no state endpoint to flip one on. Choosing an Agent in the dropdown only changes which flow the canvas edits (it re-calls `GET /agent/load/?agent=<id>`); it never changes how Chat behaves. Chat sessions pick an Agent per session through the Chat UI's own selector.
 
 ## The Flow Model (Agent container + Step nodes)
 
@@ -37,14 +37,14 @@ The flow is an **Agent container** whose ordered **Step nodes** form a linear ch
 - Each step points to the next via `next_step` (same agent only).
 - The final step has `connected_to_end = true`.
 - Each step carries its own tools (M2M to the flat `Tool` table) — the step holds the tools.
-- Exactly one `Agent` per company is active (`is_active` on the container).
+- A company can hold many live `Agent` containers side by side; none is implicitly the default. Each is independently selectable (in the builder for editing, and per Chat session for execution).
 
 The canvas renders:
 - One React Flow node per `Step` row (styled `.ab-node ab-node-step`).
 - Two **synthetic** anchor nodes `__start__` / `__end__` — client-only visual anchors derived from `connected_from_start` / `connected_to_end`; they are never backend rows and never sent in writes.
 - Derived edges: `START → entry step`, `step → step.next_step`, `final step → END`.
 
-The toolbar has three buttons — `Add Agent` (create a new flow container), `+ Step` (add a step to the selected agent), and `Activate` — plus an agent dropdown to switch which flow the canvas views. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
+The toolbar has two buttons — `Add Agent` (create a new flow container) and `+ Step` (add a step to the selected agent) — plus an agent dropdown to switch which flow the canvas views. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
 
 ## Tool Types
 
@@ -58,8 +58,7 @@ The toolbar has three buttons — `Add Agent` (create a new flow container), `+ 
   - `/tool/` and `/tool/{id}/` — Tool CRUD
   - `/agent/` and `/agent/{id}/` — Agent (container) CRUD
   - `/step/` and `/step/{id}/` — Step (node) CRUD
-  - `/agent/{id}/activate/` — mark that agent active for the company
-  - `/agent/load/?company=<id>&agent=<id>` — bootstrap payload `{ active_agent_id, agents, selected_agent_id, steps, tools }`
+  - `/agent/load/?company=<id>&agent=<id>` — bootstrap payload `{ agents, selected_agent_id, steps, tools }` (`selected_agent_id` is the in-scope `?agent=`, else the first Agent by `order, created_at`, else `null`; `steps` are the selected Agent's Steps only)
   - List endpoints handle both `{results:[]}` and `[]`.
 
 The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat helper were removed.
@@ -102,7 +101,7 @@ The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat hel
    - Click `Add Agent` to create a flow container, then `+ Step` to add steps
    - Drag from START to a step, step → step, and step → END to wire the chain
    - Select a step node → rename it and toggle tools / entry/final flags in the sidebar
-   - Click Activate → the selected agent is marked active for the company
+   - Switch Agents in the dropdown → the canvas shows only that Agent's Steps (no Agent is "made current" by this)
 
 **Backend tests:** The Django test suite (`python manage.py test agents`) covers API endpoints. Frontend integration is verified manually.
 
@@ -131,7 +130,7 @@ agent-builder-frontend/
 - `agents/templates/agents/agent_builder.html` — Template with iframe + CSRF token
 
 **DRF API (unchanged):**
-- `agents/api/views.py`, `agents/api/serializers.py` — JSON CRUD for tools and agents, plus `/agent/{id}/activate/` and `/agent/load/`
+- `agents/api/views.py`, `agents/api/serializers.py` — JSON CRUD for tools and agents, plus `/agent/load/`
 
 **Chat endpoints:** not used by this canvas (the Run path was removed; running a flow happens from the chat page).
 

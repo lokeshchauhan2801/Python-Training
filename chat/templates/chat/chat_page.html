@@ -1037,6 +1037,7 @@
        data-companies-url="{% url 'chat:companies_json' %}"
        data-sessions-url="{% url 'chat:sessions_json' %}"
        data-new-url="{% url 'chat:new_session' %}"
+       data-agents-url="{% url 'chat:agents_json' %}"
        data-base-url="/chat/"
        data-preselect="{{ preselect_session_id }}"
        data-active-company="{{ active_company.id|default:'' }}"
@@ -1103,6 +1104,10 @@
               class="font-semibold text-sm truncate text-font-important-light dark:text-font-important-dark">
             {% translate "Conversation" %}
           </h2>
+          <select id="chat-agent"
+                  title="{% translate 'Agent' %}"
+                  aria-label="{% translate 'Agent' %}"
+                  class="appearance-none border border-base-200 bg-white font-medium px-3 py-2 rounded-default shadow-xs text-font-default-light text-sm focus:ring focus:ring-primary-300 dark:bg-base-900 dark:border-base-700 dark:text-font-default-dark chat-ui-model"></select>
           <select id="chat-model"
                   title="{% translate 'Model' %}"
                   aria-label="{% translate 'Model' %}"
@@ -1158,6 +1163,7 @@
       const companiesUrl = root.dataset.companiesUrl;
       const sessionsUrl = root.dataset.sessionsUrl;
       const newUrl = root.dataset.newUrl;
+      const agentsUrl = root.dataset.agentsUrl;
       const baseUrl = root.dataset.baseUrl;
       const preselectId = root.dataset.preselect || "";
       const activeCompanyId = root.dataset.activeCompany || "";
@@ -1175,6 +1181,7 @@
       const inputEl = document.getElementById("chat-input");
       const sendBtn = document.getElementById("chat-send");
       const modelSel = document.getElementById("chat-model");
+      const agentSel = document.getElementById("chat-agent");
       const attachBtn = document.getElementById("chat-attach-btn");
       const attachInput = document.getElementById("chat-attach-input");
       const attachmentsEl = document.getElementById("chat-attachments");
@@ -1550,7 +1557,7 @@
         row.className = "mt-2 flex items-center gap-1 chat-ui-meta";
         const label = document.createElement("span");
         label.className = "text-xs text-font-subtle-light dark:text-font-subtle-dark";
-        label.textContent = "Method:";
+        label.textContent = "Tool";
         const pill = document.createElement("span");
         pill.className = "inline-block border border-base-200 bg-base-100 px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800 chat-ui-chip chat-ui-chip--muted";
         pill.textContent = methodLabel(message);
@@ -2207,6 +2214,7 @@
           .then(function (data) {
             renderMessages(data.messages);
             setConversationHeader(data.title, true);
+            loadAgents(data.company_id, data.selected_agent_id);
             setStatus("");
           })
           .catch(function () {
@@ -2374,11 +2382,89 @@
           .catch(function () { setStatus("Could not load companies."); });
       }
 
+      // Agent selector: "Normal RAG" (empty value) or one of the company's
+      // Agents. With an open chat the choice is saved on the session; before
+      // the first message it is kept here and sent when the chat is created.
+      let agentLoadSeq = 0;
+
+      function selectedAgentUrlFor(id) {
+        return baseUrl + encodeURIComponent(id) + "/selected-agent/";
+      }
+
+      function loadAgents(companyId, selectedId) {
+        const seq = ++agentLoadSeq;
+        const keep = selectedId === undefined ? agentSel.value : (selectedId || "");
+        function fill(agents) {
+          if (seq !== agentLoadSeq) { return; }
+          clear(agentSel);
+          const none = document.createElement("option");
+          none.value = "";
+          none.textContent = "Normal RAG";
+          agentSel.appendChild(none);
+          agents.forEach(function (a) {
+            const opt = document.createElement("option");
+            opt.value = a.id;
+            opt.textContent = a.name || a.slug;
+            agentSel.appendChild(opt);
+          });
+          const present = agents.some(function (a) { return a.id === keep; });
+          agentSel.value = present ? keep : "";
+          agentSel.dataset.current = agentSel.value;
+        }
+        if (!agentsUrl || !companyId) { fill([]); return; }
+        fetch(agentsUrl + "?company=" + encodeURIComponent(companyId), {
+          method: "GET",
+          headers: jsonHeaders(),
+          credentials: "same-origin"
+        })
+          .then(function (r) { return r.ok ? r.json() : { agents: [] }; })
+          .then(function (data) { fill(data.agents || []); })
+          .catch(function () { fill([]); setStatus("Could not load agents."); });
+      }
+
+      function appendAgentChoice(body) {
+        const agentId = agentSel.value;
+        if (agentId && agentId.length === 26) { body.append("agent_id", agentId); }
+      }
+
+      agentSel.addEventListener("change", function () {
+        if (!currentSessionId) { agentSel.dataset.current = agentSel.value; return; }
+        const previous = agentSel.dataset.current || "";
+        const sessionId = currentSessionId;
+        agentSel.disabled = true;
+        fetch(selectedAgentUrlFor(sessionId), {
+          method: "POST",
+          headers: jsonHeaders({
+            "X-CSRFToken": getCookie("csrftoken"),
+            "Content-Type": "application/json"
+          }),
+          credentials: "same-origin",
+          body: JSON.stringify({ agent_id: agentSel.value || null })
+        })
+          .then(function (r) {
+            return r.json().then(function (d) { return { ok: r.ok, data: d }; });
+          })
+          .then(function (res) {
+            if (!res.ok || res.data.error) { throw new Error(res.data.error || "not ok"); }
+            if (sessionId === currentSessionId) {
+              agentSel.value = res.data.selected_agent_id || "";
+              agentSel.dataset.current = agentSel.value;
+            }
+          })
+          .catch(function (err) {
+            agentSel.value = previous;
+            setStatus((err && err.message && err.message !== "not ok")
+              ? err.message : "Could not change the agent.");
+          })
+          .then(function () { agentSel.disabled = false; });
+      });
+
       function createNewChat() {
         const companyId = companySel.value;
         if (!companyId) { return; }
         const body = new URLSearchParams();
         body.append("company", companyId);
+        appendAgentChoice(body);
         newBtn.disabled = true;
         fetch(newUrl, {
           method: "POST",
@@ -2426,6 +2512,7 @@
         setComposerEnabled(false, false);
         setConversationHeader("Conversation", false);
         persistActiveCompany(companySel.value);
+        loadAgents(companySel.value, "");
         loadSessions(function (sessions) {
           if (sessions && sessions.length) { loadSession(sessions[0].id, true); }
         });
@@ -2562,6 +2649,7 @@
 
         const createBody = new URLSearchParams();
         createBody.append("company", companyId);
+        appendAgentChoice(createBody);
         fetch(newUrl, {
           method: "POST",
           headers: jsonHeaders({
@@ -2582,6 +2670,8 @@
               return;
             }
             currentSessionId = res.data.id;
+            agentSel.value = res.data.selected_agent_id || "";
+            agentSel.dataset.current = agentSel.value;
             history.pushState({ sessionId: currentSessionId }, "", pageUrlFor(currentSessionId));
             setComposerEnabled(true, false);
             setConversationHeader(res.data.title || "Conversation", true);
@@ -2762,6 +2852,7 @@
       const wantNew = /[?&]new=1(&|$)/.test(window.location.search);
 
       loadCompanies(function () {
+        loadAgents(companySel.value, "");
         loadSessions(function (sessions) {
           if (preselectId) {
             loadSession(preselectId, false);

@@ -94,10 +94,12 @@ class Tool(BaseModel, SoftDeleteModel):
 
 
 class Agent(BaseModel, SoftDeleteModel):
-    """A named chat flow (container). Its ordered Steps are the nodes.
+    """A named, independently-usable chat flow (container).
 
-    Exactly one Agent per company is active (is_active=True) — the flow the
-    company's chat runs. Activation is transactional (clears others).
+    An Agent groups an ordered set of Steps (its nodes) into a runnable
+    START -> Step ... -> END pipeline. Multiple live Agents may coexist in a
+    company; none is implicitly chosen for chat. A user selects one per
+    ConversationSession (or Normal RAG) in the chat header.
     """
 
     id = ULIDField()
@@ -112,7 +114,6 @@ class Agent(BaseModel, SoftDeleteModel):
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
     order = models.IntegerField(default=0, db_index=True)
-    is_active = models.BooleanField(default=False, db_index=True)
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()

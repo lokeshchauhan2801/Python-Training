@@ -81,7 +81,6 @@ function anchorNode(id: string, label: string, x: number, y: number, cls: string
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [tools, setTools] = useState<Tool[]>([]);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
@@ -179,7 +178,6 @@ export default function App() {
       setAgents(allAgents);
       setTools(flowTools);
       setSteps(flowSteps);
-      setActiveAgentId(payload.active_agent_id);
       setSelectedAgentId(payload.selected_agent_id);
       renderFlow(flowSteps, flowTools);
     },
@@ -210,11 +208,6 @@ export default function App() {
     if (!selectedStepId) return null;
     return steps.find((s) => String(s.id) === selectedStepId) || null;
   }, [selectedStepId, steps]);
-
-  const isActive = useMemo(
-    () => !!selectedAgentId && selectedAgentId === activeAgentId,
-    [selectedAgentId, activeAgentId]
-  );
 
   // Create a new empty Agent container, then select it.
   const createAgent = useCallback(
@@ -285,17 +278,6 @@ export default function App() {
     },
     [busy, company, refresh, rfInstance, selectedAgentId, showError, showSuccess]
   );
-
-  const activate = useCallback(async () => {
-    if (!selectedAgentId) return;
-    try {
-      await api.activateAgent(selectedAgentId);
-      showSuccess("Agent activated");
-      await refresh(selectedAgentId);
-    } catch (e) {
-      showError(e);
-    }
-  }, [selectedAgentId, refresh, showError, showSuccess]);
 
   // Debounced position save: while a STEP node is dragged we coalesce rapid
   // moves and PATCH its position ~1s after the last movement. flushPosition
@@ -529,13 +511,6 @@ export default function App() {
           >
             + Step
           </button>
-          <button
-            className="ab-btn ab-btn-primary"
-            onClick={activate}
-            disabled={!selectedAgentId}
-          >
-            {isActive ? "Active" : "Activate"}
-          </button>
           {agents.length > 0 && (
             <select
               className="ab-select"
@@ -546,8 +521,7 @@ export default function App() {
             >
               {agents.map((a) => (
                 <option key={String(a.id)} value={String(a.id)}>
-                  {(a.name || a.slug) +
-                    (String(a.id) === activeAgentId ? " ● active" : "")}
+                  {a.name || a.slug}
                 </option>
               ))}
             </select>
@@ -597,9 +571,7 @@ export default function App() {
           <strong>{companyName() || "Agent flow"}</strong>
           <div className="ab-node-kind">
             {selectedAgent
-              ? `${selectedAgent.name || selectedAgent.slug} · ${
-                  isActive ? "active" : "inactive"
-                }`
+              ? selectedAgent.name || selectedAgent.slug
               : "no agent selected"}
           </div>
         </div>
