@@ -279,6 +279,24 @@ class ChartTarget:
     tokens: tuple = ()
 
 
+def references_file(message: str | None, files=()) -> bool:
+    """Whether the message expressly identifies a chat file or document."""
+    text = (message or "").lower()
+    if _DOTTED_NAME.search(text):
+        return True
+    if re.search(
+        r"\b(?:this|that|my|the|attached|uploaded|from|in)\s+"
+        r"(?:pdf|docx|txt|md|csv|xlsx|json|png|jpe?g|tiff?|image|picture|photo"
+        r"|screenshot|attachment)\b",
+        text,
+    ):
+        return True
+    if re.search(r"\b(?:file|files|document|documents|doc|docs|sheet|spreadsheet)\b", text):
+        return True
+    match = match_files(text, files, stopwords=CHART_STOPWORDS)
+    return match.kind in ("exact", "prefix") and bool(match.files)
+
+
 def select_chart_file(files, message: str | None) -> ChartTarget:
     """Pick the file a chart request should use (D7, H.2)."""
     readable = _readable(files)

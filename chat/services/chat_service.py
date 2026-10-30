@@ -539,17 +539,17 @@ class ChatService:
 
     @classmethod
     def _chart_target(cls, conversation, question):
-        """The D7 chart target (``file_matching.ChartTarget``), or None.
+        """The expressly referenced chart file, or ``None``.
 
-        None when there is no conversation or ``question`` is not a chart
-        request. Pure over the session context, so ``views.send`` step 6, the
-        LangGraph router, the tools and the readers all agree.
+        General charts use the LLM's knowledge even when this chat has files.
+        File selection applies only when the user names or references a file.
         """
         if conversation is None or not cls._is_chart_request(question or ""):
             return None
-        return file_matching.select_chart_file(
-            session_files.list_files(conversation), question
-        )
+        files = session_files.list_files(conversation)
+        if not file_matching.references_file(question, files):
+            return None
+        return file_matching.select_chart_file(files, question)
 
     @staticmethod
     def _with_source_line(content, title):
@@ -612,11 +612,15 @@ class ChatService:
 
         files = session_files.list_files(conversation)
         by_id = {f.id: f for f in files}
+        # A file attached on THIS turn is referenced by the message itself.
+        file_referenced = bool(attachment_ids) or file_matching.references_file(
+            question, files
+        )
 
         def _eligible(candidates):
             return [f for f in candidates if not f.is_csv and f.readable]
 
-        # A chart request reads only its D7 target (a CSV included), or nothing.
+        # File content is used only when the message expressly references it.
         target = self._chart_target(conversation, question)
         if target is not None:
             chosen = (
@@ -624,6 +628,8 @@ class ChatService:
                 if target.kind == "file" and target.file.readable
                 else []
             )
+        elif not file_referenced:
+            chosen = []
         elif attachment_ids:
             chosen = _eligible(
                 by_id[i]
@@ -985,6 +991,7 @@ class ChatService:
         company=None,
         attachment_ids=None,
         model_name=None,
+        metadata=None,
     ):
         if not user or not user.is_authenticated:
             raise ValueError("A signed-in user is required to chat.")
@@ -1074,7 +1081,7 @@ class ChatService:
                 )
 
 
-            if conversation and self._is_chart_request(message_text):
+            if chart_file is not None:
                 local_chart = self._build_csv_distribution_chart(
                     conversation, message_text
                 )
@@ -1136,6 +1143,7 @@ class ChatService:
                     if completion.chart
                     else None
                 ),
+                metadata=metadata,
                 attachment_ids=attachment_ids,
                 actor=user,
             )
