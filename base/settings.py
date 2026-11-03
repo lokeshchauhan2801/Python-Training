@@ -247,8 +247,9 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 # Temporal Web UI is never opened directly: Django proxies /temporal/ to it for
 # active staff only (infrastructure/temporal/ui_proxy.py). TEMPORAL_UI_URL is
-# the INTERNAL upstream (bound to 127.0.0.1); the UI runs with
-# TEMPORAL_UI_PUBLIC_PATH=/temporal so its paths match the proxied ones.
+# the nginx gate (temporal-ui-gate, 127.0.0.1:8080); Temporal UI itself has no
+# host port. The UI runs with TEMPORAL_UI_PUBLIC_PATH=/temporal so its paths
+# match the proxied ones. Full flow: TEMPORAL_FLOW.md.
 TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8080").rstrip("/")
 TEMPORAL_UI_PUBLIC_PATH = "/temporal"
 # Shared with the temporal-ui-gate container, which refuses any request
