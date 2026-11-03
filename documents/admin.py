@@ -608,6 +608,8 @@ class DocumentAdmin(BaseModelAdmin):
 
         if request.method != "GET":
             return JsonResponse({"detail": "Method not allowed."}, status=405)
+        from chat.services.kb import temporal_ui_url, workflow_id_for
+
         since = timezone.now() - timezone.timedelta(
             seconds=_STATUS_POLL_WINDOW_SECONDS
         )
@@ -646,6 +648,11 @@ class DocumentAdmin(BaseModelAdmin):
                         ),
                         "processing_stage": row["processing_stage"],
                         "processing_backend": row["processing_backend"],
+                        "temporal_url": (
+                            temporal_ui_url(workflow_id_for(row["id"]))
+                            if row["processing_backend"] == "temporal"
+                            else None
+                        ),
                     }
                     for row in rows
                 ]
@@ -823,6 +830,8 @@ class DocumentAdmin(BaseModelAdmin):
         _job_id, resolved = enqueue_document_processing(
             str(document.pk), backend=backend
         )
+        from chat.services.kb import temporal_ui_url, workflow_id_for
+
         return JsonResponse(
             {
                 "status": Document.STATUS_QUEUED,
@@ -830,6 +839,11 @@ class DocumentAdmin(BaseModelAdmin):
                     Document.STATUS_QUEUED
                 ],
                 "backend": resolved,
+                "temporal_url": (
+                    temporal_ui_url(workflow_id_for(document.pk))
+                    if resolved == "temporal"
+                    else None
+                ),
                 "document_id": str(document.pk),
                 "title": document.title,
                 "message": (
@@ -864,6 +878,8 @@ class DocumentAdmin(BaseModelAdmin):
                 status=400,
             )
         enqueue_document_processing(str(document.pk), backend="temporal")
+        from chat.services.kb import temporal_ui_url, workflow_id_for
+
         return JsonResponse(
             {
                 "status": Document.STATUS_QUEUED,
@@ -871,6 +887,7 @@ class DocumentAdmin(BaseModelAdmin):
                     Document.STATUS_QUEUED
                 ],
                 "backend": "temporal",
+                "temporal_url": temporal_ui_url(workflow_id_for(document.pk)),
                 "document_id": str(document.pk),
                 "title": document.title,
                 "message": (

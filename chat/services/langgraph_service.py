@@ -83,7 +83,11 @@ _ROUTER_RULES = {
         "references an attached/uploaded file or document (e.g. 'make a chart "
         "from my CSV', 'chart the figures in this document'), or asks a "
         "follow-up about the file the previous turn was answered from (see the "
-        "attachment note). Do not select it merely because files exist."
+        "attachment note). Also choose it for questions about the company's "
+        "own data or knowledge base: what or how many documents it holds, or "
+        "facts found in company documents (e.g. 'how many documents are in "
+        "the knowledge base', 'how many employees do we have', 'what does our "
+        "leave policy say'). Do not select it merely because files exist."
     ),
     "add_to_knowledge_base": (
         "Choose 'add_to_knowledge_base' when the user asks to ADD, SAVE, STORE, "
@@ -95,9 +99,10 @@ _ROUTER_RULES = {
     ),
     "document_processing_status": (
         "Choose 'document_processing_status' when the user asks about the "
-        "STATUS, PROGRESS, or count of documents being processed, or the status "
-        "of a specific document/task id (e.g. 'what's processing right now', "
-        "'is my file done', 'status of doc-01H...')."
+        "STATUS, PROGRESS, or count of documents being processed, the total "
+        "number of documents by status, or the status of a specific "
+        "document/task id (e.g. 'what's processing right now', 'is my file "
+        "done', 'status of doc-01H...')."
     ),
 }
 

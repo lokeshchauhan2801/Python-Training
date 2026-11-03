@@ -171,12 +171,73 @@ def _extract_doc_id(text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def _display_title(document: Document) -> str:
+    """The document's title, or its file name while no title is derived yet.
+
+    Titles are LLM-derived during processing, so a document that failed early
+    has a blank one; without this fallback it rendered as ``- : Failed``.
+    """
+    if (document.title or "").strip():
+        return document.title.strip()
+    if document.file:
+        return document.file.name.rsplit("/", 1)[-1]
+    return f"Untitled document {document.id}"
+
+
+def _knowledge_base_documents(company):
+    return Document.objects.filter(
+        company=company, source=Document.SOURCE_LIBRARY
+    )
+
+
+def knowledge_base_totals(*, company) -> str:
+    """One line with the company knowledge base's document count by status."""
+    if company is None:
+        return ""
+    labels = dict(Document.STATUS_CHOICES)
+    counts: dict[str, int] = {}
+    for status in _knowledge_base_documents(company).values_list(
+        "status", flat=True
+    ):
+        counts[status] = counts.get(status, 0) + 1
+    total = sum(counts.values())
+    if not total:
+        return "The company knowledge base has no documents yet."
+    breakdown = ", ".join(
+        f"{count} {labels.get(status, status).lower()}"
+        for status, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    )
+    return f"The company knowledge base has {total} document(s): {breakdown}."
+
+
+def knowledge_base_overview(*, company, limit: int = 50) -> str:
+    """Totals plus one line per document, for grounding LLM answers.
+
+    Similarity search only returns passages, so questions about the knowledge
+    base itself ("how many documents are there", "which files do we have")
+    could not be answered from retrieval alone.
+    """
+    if company is None:
+        return ""
+    documents = list(
+        _knowledge_base_documents(company).order_by("-created_at")[:limit]
+    )
+    lines = [knowledge_base_totals(company=company)]
+    for d in documents:
+        lines.append(
+            f"- {_display_title(d)} (id {d.id}, type {d.file_type}, "
+            f"status {d.get_status_display()}, {d.chunk_count} chunk(s), "
+            f"added {d.created_at:%Y-%m-%d})"
+        )
+    return "\n".join(lines)
+
+
 def _describe(document: Document) -> str:
     wf = workflow_id_for(document.id)
     progress = document.processing_progress_display
     stage = document.processing_stage or "—"
     line = (
-        f"- {document.title}: {document.get_status_display()} "
+        f"- {_display_title(document)}: {document.get_status_display()} "
         f"({progress}%, stage: {stage}, backend: {document.processing_backend}, "
         f"workflow: {wf})"
     )
@@ -245,9 +306,12 @@ def document_status_report(*, company, message_text: str | None) -> str:
     )
 
     if not in_flight and not recent:
-        return "No documents are being processed right now for this company."
+        return (
+            "No documents are being processed right now for this company.\n\n"
+            + knowledge_base_totals(company=company)
+        )
 
-    parts: list[str] = []
+    parts: list[str] = [knowledge_base_totals(company=company)]
     if in_flight:
         parts.append(
             f"{len(in_flight)} document(s) currently in process:\n"
@@ -308,7 +372,7 @@ def document_status_rows(*, company, document_ids=None, message_text=None) -> li
                 "temporal_url": (
                     temporal_ui_url(wf) if d.processing_backend == "temporal" else ""
                 ),
-                "title": d.title,
+                "title": _display_title(d),
                 "status": d.status,
                 "status_display": d.get_status_display(),
                 "stage": d.processing_stage or "",
