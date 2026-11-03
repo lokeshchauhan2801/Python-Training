@@ -131,6 +131,37 @@
     }
   }
 
+  // Insert the "See workflow" link into the row's actions cell if it isn't
+  // there yet, so it appears as soon as a document is dispatched to Temporal
+  // instead of only after a page reload. Markup mirrors
+  // DocumentAdmin.temporal_link.
+  function ensureWorkflowLink(docId, url) {
+    if (!docId || !url) {
+      return;
+    }
+    var toggle = document.querySelector(
+      '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
+    );
+    var row = toggle && toggle.closest("tr");
+    var cell = row && row.querySelector(".document-actions-cell");
+    if (!cell || cell.querySelector(".workflow-link")) {
+      return;
+    }
+    var link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.className =
+      "workflow-link inline-flex items-center gap-1 rounded-default " +
+      "border border-base-200 dark:border-base-700 px-2 py-1 text-xs " +
+      "hover:bg-base-100 dark:hover:bg-base-800";
+    link.setAttribute("data-doc-id", docId);
+    link.textContent = "See workflow";
+    cell.appendChild(link);
+  }
+
+  window.ensureDocumentWorkflowLink = ensureWorkflowLink;
+
   function disableScheduleButton(docId) {
     var toggle = document.querySelector(
       '.schedule-toggle[data-doc-id="' + cssEscape(docId) + '"]'
@@ -386,6 +417,9 @@
         }
         if (data && data.backend) {
           updateProcessingBackend(docId, data.backend);
+        }
+        if (data && data.temporal_url) {
+          ensureWorkflowLink(docId, data.temporal_url);
         }
 
         showNotice(
