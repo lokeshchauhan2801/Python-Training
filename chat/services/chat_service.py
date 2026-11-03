@@ -6,11 +6,15 @@ import logging
 import math
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Literal
 
-from django.db import transaction
+from django.conf import settings
+from django.core.cache import cache
+from django.db import connection, transaction
 from pydantic import BaseModel as PydanticBaseModel, Field, model_validator
 
 from basics.llm import LLMClient
@@ -22,6 +26,7 @@ from chat.retitle import retitle_if_default
 from chat.services import file_matching, session_files
 from chat.services.plain_text import normalize_llm_response
 from chat.services.session_files import FileUnavailable
+from chat.services.timing import timed, with_timing
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,24 @@ class ChatCompletion(PydanticBaseModel):
     response: str = Field(min_length=1)
     chart: ChartData | None = None
     title: str | None = Field(default=None, max_length=200)
+
+
+@dataclass(frozen=True)
+class _PreparedTurn:
+    """What ``ChatService._prepare_turn`` hands to the LLM and finalize steps."""
+
+    user: object
+    message_text: str
+    conversation: object
+    company: object
+    attachment_ids: object
+    assistant_model_name: str
+    chart_file: object
+    structured: bool
+    chunks: list
+    attachment_sections: list
+    prompt: str
+    citations: list
 
 
 class ChatService:
@@ -226,10 +249,20 @@ class ChatService:
         *,
         has_file_context=None,
         attachment_sections=None,
+        structured=True,
     ):
+        """Build the grounded answer prompt and its citation list.
 
-
+        ``structured=False`` is for a plain-text ``complete()`` call (a
+        non-chart message): it leaves out the chart, JSON-schema, title and
+        "Return a response object" instructions; the grounding, citation and
+        plain-text formatting rules are the same in both modes.
+        """
         attachment_sections = attachment_sections or []
+        # Charts are file-only when the user targeted a file (a chart target or
+        # an attachment). Library passages found by similarity search alone may
+        # be off-topic, so they don't forbid a general-knowledge chart.
+        file_only_charts = bool(has_file_context) or bool(attachment_sections)
         if has_file_context is None:
             has_file_context = bool(chunks) or bool(attachment_sections)
 
@@ -273,9 +306,20 @@ class ChatService:
             else "No relevant passages were retrieved from uploaded files for this question."
         )
 
-        if has_file_context:
-
-
+        if has_file_context and not file_only_charts:
+            chart_instructions = (
+                "For explicit chart/graph requests, use the retrieved passages "
+                "only if they actually contain the requested figures; then copy "
+                "their values and cite them. If they do not contain those "
+                "figures, ignore the passages, do not cite them, and do not "
+                "refuse: fill the chart from your own general knowledge with "
+                "your best real numeric values, add a short \"(general "
+                "knowledge)\" marker in the chart title, and include a one-line "
+                "caveat in the response that the figures are approximate and "
+                "may be outdated. Ignore any earlier turns in this conversation "
+                "that refused a chart for lack of file data. "
+            )
+        elif has_file_context:
             chart_instructions = (
                 "For explicit chart/graph requests, return a chart only when the "
                 "retrieved file context supports the values; copy metric values "
@@ -305,6 +349,20 @@ class ChatService:
                 "Cite factual claims from those passages with their exact reference "
                 "in square brackets, for example [<reference ULID>]. Never invent "
                 "a source, page, or reference. "
+                "These are the user's own company documents and the user is "
+                "authorised to view the personal details in them (names, ID "
+                "numbers such as Aadhaar or PAN, bank details); report such "
+                "values when they appear in the passages. "
+                "Text from scanned pages and images (locations marked OCR, "
+                "including [... (OCR)] sections inside attached files) is machine-read and may contain misread "
+                "characters, especially handwriting: quote such values exactly "
+                "as they appear, never guess or complete missing digits, and "
+                "say they should be checked against the original document. "
+                "Only attribute a value to a field (e.g. Aadhaar, PAN, bank "
+                "account) when that field's own label is clearly readable next "
+                "to it; never take a value from a neighbouring field. If the "
+                "label or the value is garbled, say the field could not be read "
+                "reliably and quote the garbled text without interpreting it. "
             )
         else:
             grounding_instructions = (
@@ -320,24 +378,37 @@ class ChatService:
                 "not constrain this answer. "
             )
 
-        prompt = (
-            grounding_instructions
-            + chart_instructions
-            + "The chart must ALWAYS go in the structured chart field only. "
+        # The prose rules shared by both modes (kept verbatim from the
+        # structured prompt so plain answers are formatted the same way).
+        prose_rules = (
             "NEVER put JSON, code fences, or a chart specification in the "
             "response text; the response is prose for humans to read. Format "
             "the visible response as plain text with normal sentences, dot bullets, "
             "or numbered lists. Do not use Markdown emphasis or asterisk bullets. "
-            "For pie charts use one series and non-negative values. For bar/line "
-            "charts use one or more named series. The chart must use this schema: "
-            "{type: pie|bar|line, title, x_axis, y_axis, series: [names], "
-            "data: [{label, values: [one number per series in series order]}]}. "
-            "Limit chart data "
-            "to 100 points and 6 series. Also provide a concise chat title of "
-            "at most 8 words based on the user's request, without quotes or "
-            "punctuation at the end. Return a response object containing "
-            "response (answer text), title (chat title), and chart (chart "
-            "object or null).\n\n"
+        )
+        if structured:
+            instructions = (
+                grounding_instructions
+                + chart_instructions
+                + "The chart must ALWAYS go in the structured chart field only. "
+                + prose_rules
+                + "For pie charts use one series and non-negative values. For bar/line "
+                "charts use one or more named series. The chart must use this schema: "
+                "{type: pie|bar|line, title, x_axis, y_axis, series: [names], "
+                "data: [{label, values: [one number per series in series order]}]}. "
+                "Limit chart data "
+                "to 100 points and 6 series. Also provide a concise chat title of "
+                "at most 8 words based on the user's request, without quotes or "
+                "punctuation at the end. Return a response object containing "
+                "response (answer text), title (chat title), and chart (chart "
+                "object or null)."
+            )
+        else:
+            instructions = grounding_instructions + prose_rules.rstrip()
+
+        prompt = (
+            instructions
+            + "\n\n"
             f"Retrieved passages:\n{document_context}\n\n"
             f"Conversation so far:\n{history_text or '(new conversation)'}\n\n"
             f"User: {question}\nAssistant:"
@@ -345,9 +416,32 @@ class ChatService:
         return prompt, citations
 
 
-    _RECENT_TURNS = 30
     _DIGEST_TURNS = 60
     _DIGEST_SNIPPET = 160
+
+    @staticmethod
+    def _recent_turns_limit():
+        """How many recent turns go to the model verbatim (``CHAT_RECENT_TURNS``).
+
+        Read at call time (not import time) so settings overrides apply.
+        """
+        return max(int(getattr(settings, "CHAT_RECENT_TURNS", 12)), 0)
+
+    # Turns the chat_summarise tool keeps verbatim (the pre-CHAT_RECENT_TURNS
+    # cap), so summaries still see full text of a long chat's turns.
+    _SUMMARY_RECENT_TURNS = 30
+
+    @classmethod
+    def _split_turns(cls, turns, limit=None):
+        """Split ``turns`` into ``(older, recent)`` at the recent-turns limit.
+
+        ``limit`` overrides ``CHAT_RECENT_TURNS`` (``None`` = use the setting).
+        """
+        if limit is None:
+            limit = cls._recent_turns_limit()
+        if limit == 0:
+            return list(turns), []
+        return list(turns[:-limit]), list(turns[-limit:])
 
     @staticmethod
     def _turn_lines(turn):
@@ -357,45 +451,56 @@ class ChatService:
             lines.append(f"Assistant: {turn.response}")
         return lines
 
-    def _build_conversation_context(self, turns):
+    @classmethod
+    def _conversation_digest(cls, older):
+        """Condense ``older`` turns into a short digest block ("" when none).
+
+        Shared by the prompt history (``_build_conversation_context``) and the
+        LangGraph tools' chat messages (``llm_tools._history_messages``).
+        """
+        if not older:
+            return ""
+        digest_source = older[-cls._DIGEST_TURNS :]
+        digest_lines = []
+        for turn in digest_source:
+            q = " ".join(turn.question.split())[: cls._DIGEST_SNIPPET]
+            digest_lines.append(f"User: {q}")
+            if turn.response:
+                r = " ".join(turn.response.split())[: cls._DIGEST_SNIPPET]
+                digest_lines.append(f"Assistant: {r}")
+        omitted = len(older) - len(digest_source)
+        prefix = (
+            f"(earlier conversation digest; {omitted} oldest turns omitted)\n"
+            if omitted > 0
+            else "(earlier conversation digest)\n"
+        )
+        return prefix + "\n".join(digest_lines)
+
+    def _build_conversation_context(self, turns, recent_limit=None):
         """Format whole-chat context from the session's ``Conversation`` turns.
 
         Recent turns are included verbatim; older turns are condensed into a
         short digest so the model keeps a reference to the entire conversation
         without blowing the token budget on very long chats. Each turn is a
         (question, response) pair rendered as ``User:``/``Assistant:`` lines.
+        ``recent_limit`` overrides how many turns stay verbatim.
         """
 
         if not turns:
             return ""
 
-        recent = turns[-self._RECENT_TURNS :]
-        older = turns[: -self._RECENT_TURNS] if len(turns) > self._RECENT_TURNS else []
+        older, recent = self._split_turns(turns, recent_limit)
 
         parts = []
-        if older:
-
-
-            digest_source = older[-self._DIGEST_TURNS :]
-            digest_lines = []
-            for turn in digest_source:
-                q = " ".join(turn.question.split())[: self._DIGEST_SNIPPET]
-                digest_lines.append(f"User: {q}")
-                if turn.response:
-                    r = " ".join(turn.response.split())[: self._DIGEST_SNIPPET]
-                    digest_lines.append(f"Assistant: {r}")
-            omitted = len(older) - len(digest_source)
-            prefix = (
-                f"(earlier conversation digest; {omitted} oldest turns omitted)\n"
-                if omitted > 0
-                else "(earlier conversation digest)\n"
-            )
-            parts.append(prefix + "\n".join(digest_lines))
+        digest = self._conversation_digest(older)
+        if digest:
+            parts.append(digest)
 
         recent_lines = []
         for turn in recent:
             recent_lines.extend(self._turn_lines(turn))
-        parts.append("\n".join(recent_lines))
+        if recent_lines:
+            parts.append("\n".join(recent_lines))
         return "\n\n".join(parts)
 
 
@@ -477,6 +582,21 @@ class ChatService:
                 re.I,
             )
         )
+
+    # Wider than _is_chart_request ("as a pie", "histogram", plurals), but only
+    # visual nouns: the prompt returns a chart for explicit chart/graph
+    # requests alone, so words like "line", "compare" or "breakdown" would just
+    # disable streaming without ever producing a chart.
+    _MAY_WANT_CHART_RE = re.compile(
+        r"\b(charts?|graphs?|plot(s|ted|ting)?|visuali[sz]\w*|distribution|"
+        r"pie|histograms?|diagrams?|donut|doughnut)\b",
+        re.I,
+    )
+
+    @classmethod
+    def _wants_structured(cls, question):
+        """Whether to request structured output (chart field) for ``question``."""
+        return bool(cls._MAY_WANT_CHART_RE.search(question or ""))
 
     # The user explicitly wants the raw numbers alongside the chart.
     _WANTS_DATA_RE = re.compile(
@@ -589,6 +709,31 @@ class ChatService:
         return list(reversed(files))
 
 
+    @classmethod
+    def _follows_file_turn(cls, conversation, question):
+        """Whether ``question`` follows a turn that was answered from a file.
+
+        True when the latest stored turn attached a file or was answered by
+        ``document_search``, so a follow-up like "and the aadhaar number?"
+        keeps that file's content. Chart requests are excluded: a file in the
+        prompt makes charts file-only, which would block a general-knowledge
+        chart asked right after a document question.
+        """
+        if conversation is None or cls._is_chart_request(question or ""):
+            return False
+        latest = (
+            conversation.turns.order_by("-created_at")
+            .values("context", "metadata")
+            .first()
+        )
+        if latest is None:
+            return False
+        context = latest["context"] or {}
+        metadata = latest["metadata"] or {}
+        return bool(context.get("attachments")) or (
+            metadata.get("tool_used") == "document_search"
+        )
+
     _MAX_ATTACHMENT_CHARS = 8000
     _MAX_ATTACHMENT_DOCS = 5
 
@@ -612,9 +757,12 @@ class ChatService:
 
         files = session_files.list_files(conversation)
         by_id = {f.id: f for f in files}
-        # A file attached on THIS turn is referenced by the message itself.
-        file_referenced = bool(attachment_ids) or file_matching.references_file(
-            question, files
+        # A file attached on THIS turn is referenced by the message itself, and
+        # a follow-up to a turn answered from a file keeps using that file.
+        file_referenced = (
+            bool(attachment_ids)
+            or file_matching.references_file(question, files)
+            or self._follows_file_turn(conversation, question)
         )
 
         def _eligible(candidates):
@@ -652,20 +800,50 @@ class ChatService:
 
         sections = []
         for session_file in chosen[: self._MAX_ATTACHMENT_DOCS]:
-            try:
-                text = document_services.extract_document_text(
-                    session_file.as_extractable()
-                )
-            except Exception:
-                logger.warning(
-                    "Could not read chat file %s", session_file.id, exc_info=True
-                )
-                continue
+            text = self._cached_chat_file_text(session_file)
             if text:
-                sections.append(
-                    (session_file.title, text[: self._MAX_ATTACHMENT_CHARS])
-                )
+                sections.append((session_file.title, text))
         return sections
+
+    _CHAT_FILE_CACHE_TIMEOUT = 6 * 60 * 60
+    # An empty result may come from a transient OCR timeout/unavailability
+    # (extract_document_text returns "" for those), so keep it only briefly.
+    _CHAT_FILE_EMPTY_CACHE_TIMEOUT = 5 * 60
+    _CACHE_MISS = object()
+
+    def _cached_chat_file_text(self, session_file):
+        """Extracted (already truncated) text of one chat file, or ``None``.
+
+        Extraction (PDF parse / OCR) is cached per process in Django's cache,
+        keyed by entry id + document id. Entry bytes are never rewritten, so
+        an entry can't go stale. An empty result is cached only for a few
+        minutes (it may be a transient OCR timeout), so a file with no usable
+        text isn't re-OCR'd on every turn of a burst; a read error is not
+        cached (it may be transient) and returns ``None`` as before.
+        """
+        key = f"chatfile2:{session_file.id}:{session_file.document_id or ''}"
+        cached = cache.get(key, self._CACHE_MISS)
+        if cached is not self._CACHE_MISS:
+            logger.info("chat.timing cache=hit chat_file=%s", session_file.id)
+            return cached
+        try:
+            text = document_services.extract_document_text(
+                session_file.as_extractable()
+            )
+        except Exception:
+            logger.warning(
+                "Could not read chat file %s", session_file.id, exc_info=True
+            )
+            return None
+        text = (text or "")[: self._MAX_ATTACHMENT_CHARS]
+        cache.set(
+            key,
+            text,
+            self._CHAT_FILE_CACHE_TIMEOUT
+            if text
+            else self._CHAT_FILE_EMPTY_CACHE_TIMEOUT,
+        )
+        return text
 
     def _build_csv_distribution_chart(
         self, conversation, question, attachment_ids=None
@@ -992,7 +1170,121 @@ class ChatService:
         attachment_ids=None,
         model_name=None,
         metadata=None,
+        timing=None,
     ):
+        """Answer ``message_text`` and persist one turn; return the turn.
+
+        ``timing`` is an optional ``TurnTimer`` (``chat.services.timing``):
+        stages are recorded into it and its summary is saved under
+        ``metadata["timing"]``. ``None`` only logs the stages.
+        """
+        prep = self._prepare_turn(
+            user,
+            message_text,
+            conversation=conversation,
+            company=company,
+            attachment_ids=attachment_ids,
+            model_name=model_name,
+            timing=timing,
+        )
+        generation = self._generate_completion(prep, timing)
+        while True:
+            # Not streaming: the generator yields nothing and just returns.
+            try:
+                next(generation)
+            except StopIteration as stop:
+                completion, llm_response, generated_title = stop.value
+                break
+        return self._finalize_turn(
+            prep,
+            completion,
+            llm_response=llm_response,
+            generated_title=generated_title,
+            metadata=metadata,
+            timing=timing,
+        )
+
+    def stream_message(
+        self,
+        user,
+        message_text,
+        conversation=None,
+        company=None,
+        attachment_ids=None,
+        model_name=None,
+        metadata=None,
+        timing=None,
+    ):
+        """Streaming ``process_message``: a generator of ``(event, value)``.
+
+        Yields ``("delta", text)`` for each answer piece on the plain-text
+        path, then ``("done", turn)`` once the turn is persisted. Chart and
+        structured turns yield only ``("done", turn)``. The saved turn and the
+        errors raised are the same as ``process_message``; post-processing
+        runs on the joined text, so the saved reply can differ slightly from
+        the streamed pieces.
+
+        If the consumer closes the generator mid-stream (client disconnect),
+        the answer is still generated to the end and the turn persisted, as
+        the JSON path would; nothing more is yielded and errors are logged.
+        """
+        prep = self._prepare_turn(
+            user,
+            message_text,
+            conversation=conversation,
+            company=company,
+            attachment_ids=attachment_ids,
+            model_name=model_name,
+            timing=timing,
+        )
+        # Driven by hand (not ``yield from``) so a close() here doesn't close
+        # the LLM stream: the remaining pieces are drained and the turn saved.
+        generation = self._generate_completion(prep, timing, stream=True)
+        disconnected = False
+        try:
+            while True:
+                try:
+                    event = next(generation)
+                except StopIteration as stop:
+                    completion, llm_response, generated_title = stop.value
+                    break
+                if disconnected:
+                    continue
+                try:
+                    yield event
+                except GeneratorExit:
+                    disconnected = True
+                    logger.info(
+                        "Chat stream closed by client; finishing the turn"
+                    )
+            turn = self._finalize_turn(
+                prep,
+                completion,
+                llm_response=llm_response,
+                generated_title=generated_title,
+                metadata=metadata,
+                timing=timing,
+            )
+        except Exception:
+            if not disconnected:
+                raise
+            logger.exception("Chat turn failed after the client disconnected")
+            return
+        if not disconnected:
+            yield ("done", turn)
+
+    def _prepare_turn(
+        self,
+        user,
+        message_text,
+        *,
+        conversation,
+        company,
+        attachment_ids,
+        model_name,
+        timing=None,
+    ):
+        """Everything before the LLM call; returns a ``_PreparedTurn``."""
         if not user or not user.is_authenticated:
             raise ValueError("A signed-in user is required to chat.")
 
@@ -1004,10 +1296,13 @@ class ChatService:
 
         assistant_model_name = model_name or _DEFAULT_MODEL_NAME
 
-        all_turns = (
-            list(conversation.turns.order_by("created_at")) if conversation else []
-        )
-        history = self._build_conversation_context(all_turns)
+        with timed(timing, "history"):
+            all_turns = (
+                list(conversation.turns.order_by("created_at"))
+                if conversation
+                else []
+            )
+            history = self._build_conversation_context(all_turns)
         # A chart request with a D7 file target charts only that file (F.4).
         chart_target = self._chart_target(conversation, message_text)
         chart_file = (
@@ -1015,23 +1310,18 @@ class ChatService:
             if chart_target is not None and chart_target.kind == "file"
             else None
         )
+        # Structured output (chart field + title) only for messages that may
+        # want a chart; every other message is a plain-text complete() call.
+        structured = self._wants_structured(message_text)
         try:
-            chunks = (
-                []
-                if chart_file is not None
-                else self._find_relevant_chunks(
-                    user,
-                    message_text,
-                    conversation,
-                    company,
-                )
-            )
-
-
-            attachment_sections = self._chat_attachment_texts(
-                conversation,
+            chunks, attachment_sections = self._prepare_context(
+                user,
+                message_text,
+                conversation=conversation,
+                company=company,
                 attachment_ids=attachment_ids,
-                question=message_text,
+                skip_chunks=chart_file is not None,
+                timing=timing,
             )
             prompt, citations = self._build_prompt(
                 history,
@@ -1039,25 +1329,84 @@ class ChatService:
                 chunks,
                 has_file_context=True if chart_file is not None else None,
                 attachment_sections=attachment_sections,
+                structured=structured,
             )
             # Prepend the REAL provider/model identity so "which model are you?"
             # is answered correctly (models misreport themselves otherwise).
             prompt = f"{self._identity_line()}\n\n{prompt}"
+        except (ChatRetrievalError, ChatProviderError):
+            raise
+        except Exception as exc:
+            raise ChatProviderError(
+                "The LLM provider failed to generate a response."
+            ) from exc
 
+        return _PreparedTurn(
+            user=user,
+            message_text=message_text,
+            conversation=conversation,
+            company=company,
+            attachment_ids=attachment_ids,
+            assistant_model_name=assistant_model_name,
+            chart_file=chart_file,
+            structured=structured,
+            chunks=chunks,
+            attachment_sections=attachment_sections,
+            prompt=prompt,
+            citations=citations,
+        )
+
+    def _generate_completion(self, prep, timing=None, *, stream=False):
+        """LLM stage of a prepared turn, as a generator.
+
+        Yields ``("delta", text)`` only when ``stream`` is set and the turn
+        takes the plain-text path; returns
+        ``(completion, llm_response, generated_title)``. Errors map exactly as
+        they always have in ``process_message``.
+        """
+        conversation = prep.conversation
+        message_text = prep.message_text
+        chart_file = prep.chart_file
+        generated_title = None
+        try:
             completion = None
             provider_error = None
             llm_response = False
             try:
-                if chart_file is not None and not attachment_sections:
+                if chart_file is not None and not prep.attachment_sections:
                     # Nothing readable in the target: no LLM call. The CSV
                     # override below still replaces this when it can chart.
                     completion = ChatCompletion(
                         response=self._unreadable_chart_reply(chart_file.title)
                     )
+                elif prep.structured:
+                    with timed(timing, "llm"):
+                        completion = self._llm.generate_structured(
+                            prep.prompt, ChatCompletion
+                        )
+                    llm_response = True
                 else:
-                    completion = self._llm.generate_structured(
-                        prompt, ChatCompletion
+                    want_title = (
+                        conversation is None
+                        or conversation.title == "New session"
                     )
+                    with timed(timing, "llm"):
+                        if stream:
+                            text, generated_title = yield from (
+                                self._stream_with_title(
+                                    prep.prompt,
+                                    message_text,
+                                    want_title=want_title,
+                                    timing=timing,
+                                )
+                            )
+                        else:
+                            text, generated_title = self._complete_with_title(
+                                prep.prompt,
+                                message_text,
+                                want_title=want_title,
+                            )
+                    completion = ChatCompletion(response=text, chart=None)
                     llm_response = True
 
 
@@ -1120,7 +1469,22 @@ class ChatService:
             raise ChatProviderError(
                 "The LLM provider failed to generate a response."
             ) from exc
+        return completion, llm_response, generated_title
 
+    def _finalize_turn(
+        self,
+        prep,
+        completion,
+        *,
+        llm_response,
+        generated_title,
+        metadata=None,
+        timing=None,
+    ):
+        """Post-process ``completion``, persist the turn, retitle; return the turn."""
+        user = prep.user
+        message_text = prep.message_text
+        citations = prep.citations
         if llm_response:
             completion = completion.model_copy(
                 update={"response": normalize_llm_response(completion.response)}
@@ -1129,14 +1493,26 @@ class ChatService:
         if not completion.response.strip():
             raise ChatProviderError("The LLM provider returned an empty response.")
 
-        with transaction.atomic():
-            convo = conversation or self._create_session(user, message_text, company)
+        # A chart drawn from general knowledge cites none of the retrieved
+        # passages; keep only the ones the reply actually references.
+        if prep.chunks and self._is_chart_request(message_text):
+            citations = [
+                c for c in citations if c["reference_id"] in completion.response
+            ]
+
+        # Timing is measured up to here (persist is only logged: the turn row
+        # that would carry it is the one being written).
+        metadata = with_timing(metadata, timing)
+        with timed(None, "persist"), transaction.atomic():
+            convo = prep.conversation or self._create_session(
+                user, message_text, prep.company
+            )
             turn = self.create_turn(
                 convo,
                 user=user,
                 question=message_text,
                 response=completion.response.strip(),
-                model_name=assistant_model_name,
+                model_name=prep.assistant_model_name,
                 citations=citations,
                 chart_data=(
                     completion.chart.model_dump(mode="json")
@@ -1144,17 +1520,163 @@ class ChatService:
                     else None
                 ),
                 metadata=metadata,
-                attachment_ids=attachment_ids,
+                attachment_ids=prep.attachment_ids,
                 actor=user,
             )
 
             retitle_if_default(
                 convo,
-                llm_title=completion.title,
+                # Chart turns carry the title in the structured completion;
+                # plain turns use the parallel title call (None on failure).
+                llm_title=completion.title or generated_title,
                 fallback_text=message_text,
                 actor=user,
             )
         return turn
+
+    def _prepare_context(
+        self,
+        user,
+        message_text,
+        *,
+        conversation,
+        company,
+        attachment_ids,
+        skip_chunks,
+        timing=None,
+    ):
+        """Return ``(chunks, attachment_sections)`` for the prompt.
+
+        Library retrieval (embedding + Chroma) and chat-file extraction are
+        independent, so they run at the same time. Each worker closes its own
+        DB connection when done. Exceptions propagate unchanged (retrieval
+        first, as before) when the results are read, without waiting for the
+        other worker. Each worker is timed as
+        ``retrieval`` / ``extraction``.
+        """
+
+        def _in_worker(stage, func, *args, **kwargs):
+            try:
+                with timed(timing, stage):
+                    return func(*args, **kwargs)
+            finally:
+                # Worker threads get their own DB connection; don't leak it.
+                connection.close()
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            chunks_future = (
+                None
+                if skip_chunks
+                else executor.submit(
+                    _in_worker,
+                    "retrieval",
+                    self._find_relevant_chunks,
+                    user,
+                    message_text,
+                    conversation,
+                    company,
+                )
+            )
+            sections_future = executor.submit(
+                _in_worker,
+                "extraction",
+                self._chat_attachment_texts,
+                conversation,
+                attachment_ids=attachment_ids,
+                question=message_text,
+            )
+            chunks = [] if chunks_future is None else chunks_future.result()
+            attachment_sections = sections_future.result()
+        except BaseException:
+            # Fail fast: a retrieval error must not wait for attachment OCR.
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        executor.shutdown(wait=True)
+        return chunks, attachment_sections
+
+    _TITLE_PROMPT = (
+        "Provide a concise chat title of at most 8 words based on the user's "
+        "request, without quotes or punctuation at the end. Reply with the "
+        "title only.\n\nUser request: {question}"
+    )
+
+    def _complete_with_title(self, prompt, message_text, *, want_title):
+        """Plain-text answer for ``prompt``, plus a chat title when wanted.
+
+        The title is a tiny separate ``complete()`` run in a thread at the same
+        time as the answer (it touches no DB). Returns ``(text, title)``; the
+        title is ``None`` when not wanted or when its call fails, so
+        ``retitle_if_default`` falls back to the message text as before.
+        """
+        if not want_title:
+            return self._llm.complete([{"role": "user", "content": prompt}]), None
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            title_future = executor.submit(
+                self._llm.complete,
+                [
+                    {
+                        "role": "user",
+                        "content": self._TITLE_PROMPT.format(
+                            question=message_text
+                        ),
+                    }
+                ],
+            )
+            text = self._llm.complete([{"role": "user", "content": prompt}])
+            try:
+                title = title_future.result()
+            except Exception:
+                logger.info("Chat title generation failed", exc_info=True)
+                title = None
+            return text, title
+        finally:
+            # Don't block an error reply on the title call.
+            executor.shutdown(wait=False)
+
+    def _stream_with_title(self, prompt, message_text, *, want_title, timing=None):
+        """Streaming ``_complete_with_title`` (generator).
+
+        Yields ``("delta", text)`` per answer piece and returns
+        ``(text, title)`` like ``_complete_with_title``; the title call still
+        runs in parallel. The first piece marks time-to-first-token.
+        """
+        executor = ThreadPoolExecutor(max_workers=1) if want_title else None
+        try:
+            title_future = (
+                executor.submit(
+                    self._llm.complete,
+                    [
+                        {
+                            "role": "user",
+                            "content": self._TITLE_PROMPT.format(
+                                question=message_text
+                            ),
+                        }
+                    ],
+                )
+                if executor is not None
+                else None
+            )
+            parts = []
+            for piece in self._llm.stream([{"role": "user", "content": prompt}]):
+                if not parts and timing is not None:
+                    timing.mark_first_token()
+                parts.append(piece)
+                yield ("delta", piece)
+            title = None
+            if title_future is not None:
+                try:
+                    title = title_future.result()
+                except Exception:
+                    logger.info("Chat title generation failed", exc_info=True)
+            return "".join(parts), title
+        finally:
+            if executor is not None:
+                # Don't block an error reply on the title call.
+                executor.shutdown(wait=False)
 
     def _create_session(self, user, message_text, company):
         """Create a new ConversationSession to hold a fresh message thread."""

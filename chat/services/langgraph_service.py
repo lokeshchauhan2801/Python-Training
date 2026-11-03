@@ -12,11 +12,14 @@ imports of ``chat.services.langgraph_service.available_slugs`` /
 ``get_handler`` keep working unchanged.
 """
 
+import contextvars
 import logging
+import queue
 import re
+import threading
 from typing import TypedDict
 
-from django.db import transaction
+from django.db import connection, transaction
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import Field
 
@@ -30,6 +33,7 @@ from chat.services.llm_tools import (  # noqa: F401
     register,
 )
 from chat.services.plain_text import normalize_llm_response
+from chat.services.timing import timed, with_timing
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +81,9 @@ _ROUTER_RULES = {
     "document_search": (
         "Choose 'document_search' only when the user expressly names or "
         "references an attached/uploaded file or document (e.g. 'make a chart "
-        "from my CSV', 'chart the figures in this document'). Do not select it "
-        "merely because files exist."
+        "from my CSV', 'chart the figures in this document'), or asks a "
+        "follow-up about the file the previous turn was answered from (see the "
+        "attachment note). Do not select it merely because files exist."
     ),
     "add_to_knowledge_base": (
         "Choose 'add_to_knowledge_base' when the user asks to ADD, SAVE, STORE, "
@@ -122,6 +127,33 @@ class RouterDecision(PydanticBaseModel):
     reason: str = Field(default="", max_length=300)
 
 
+class _StreamingLLM:
+    """``LLMClient`` proxy whose ``complete()`` streams its answer.
+
+    Each text piece goes to ``on_delta`` and the joined text is returned, so
+    callers see the same result as ``complete()``. Everything else
+    (``generate_structured``, embeddings, ``provider`` / ``model``) goes
+    straight to the wrapped client. Handed only to the chain's last step.
+    """
+
+    def __init__(self, llm, on_delta):
+        self._llm = llm
+        self._on_delta = on_delta
+
+    def complete(self, messages, **kwargs):
+        if kwargs:
+            # stream() takes no sampling overrides; keep them exact.
+            return self._llm.complete(messages, **kwargs)
+        parts = []
+        for piece in self._llm.stream(messages):
+            parts.append(piece)
+            self._on_delta(piece)
+        return "".join(parts)
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
+
+
 class LangGraphChatService:
 
     def __init__(self, chat_service, langfuse, agent):
@@ -139,18 +171,160 @@ class LangGraphChatService:
         attachment_ids=None,
         model_name=None,
         selected_entry_ids=None,
+        timing=None,
     ):
         """Route one message through the graph and persist one turn.
 
         Returns the created ``Conversation`` turn (same as ``ChatService``).
+        ``timing`` is an optional ``TurnTimer``; its summary is saved under
+        ``metadata["timing"]`` (``None`` only logs the stages).
         Raises only the exception types ``chat.views.send`` already catches
         (``LLMConfigurationError``, ``LLMBackendError``, ``ChatProviderError``,
         ``ChatRetrievalError``) so the view's HTTP status mapping is unchanged.
         """
-        from basics.llm import LLMBackendError, LLMConfigurationError
-        from chat.retitle import retitle_if_default
-        from chat.services import ChatProviderError, ChatRetrievalError
+        self._check_turn(user, conversation, company)
+        llm = self._chat._llm
 
+
+        with timed(timing, "history"):
+            history_text, router_history_text = self._history_texts(conversation)
+
+        selected_entry_ids = list(selected_entry_ids or [])
+
+        result = self._run_graph_mapped(
+            user=user,
+            message_text=message_text,
+            conversation=conversation,
+            company=company,
+            attachment_ids=attachment_ids,
+            model_name=model_name,
+            history_text=history_text,
+            router_history_text=router_history_text,
+            agent=self._agent,
+            llm=llm,
+            selected_entry_ids=selected_entry_ids,
+            timing=timing,
+        )
+        return self._persist(
+            result,
+            user=user,
+            message_text=message_text,
+            conversation=conversation,
+            attachment_ids=attachment_ids,
+            model_name=model_name,
+            llm=llm,
+            timing=timing,
+        )
+
+    def stream_message(
+        self,
+        user,
+        message_text,
+        conversation=None,
+        company=None,
+        attachment_ids=None,
+        model_name=None,
+        selected_entry_ids=None,
+        timing=None,
+    ):
+        """Streaming ``process_message``: a generator of ``(event, value)``.
+
+        The graph runs in a worker thread. Only the chain's last step gets a
+        streaming LLM, so ``("delta", text)`` items are that step's answer
+        pieces (the router and earlier steps never stream). Ends with
+        ``("done", turn)``; the saved turn and the errors raised are the same
+        as ``process_message``.
+        """
+        self._check_turn(user, conversation, company)
+        llm = self._chat._llm
+
+        with timed(timing, "history"):
+            history_text, router_history_text = self._history_texts(conversation)
+
+        selected_entry_ids = list(selected_entry_ids or [])
+        events = queue.Queue()
+
+        def _on_delta(piece):
+            if timing is not None:
+                timing.mark_first_token()
+            events.put(("delta", piece))
+
+        def _worker():
+            try:
+                events.put((
+                    "result",
+                    self._run_graph_mapped(
+                        user=user,
+                        message_text=message_text,
+                        conversation=conversation,
+                        company=company,
+                        attachment_ids=attachment_ids,
+                        model_name=model_name,
+                        history_text=history_text,
+                        router_history_text=router_history_text,
+                        agent=self._agent,
+                        llm=llm,
+                        stream_llm=_StreamingLLM(llm, _on_delta),
+                        selected_entry_ids=selected_entry_ids,
+                        timing=timing,
+                    ),
+                ))
+            except BaseException as exc:
+                events.put(("error", exc))
+            finally:
+                # The worker thread has its own DB connection; don't leak it.
+                connection.close()
+
+        # copy_context keeps the request's current user (audit actor).
+        worker = threading.Thread(
+            target=contextvars.copy_context().run, args=(_worker,), daemon=True
+        )
+        worker.start()
+        # A close() at a delta yield (client disconnect) must not lose the
+        # turn: keep draining until the worker's result, then persist as the
+        # JSON path would, without yielding anything more.
+        disconnected = False
+        try:
+            while True:
+                kind, value = events.get()
+                if kind == "delta":
+                    if disconnected:
+                        continue
+                    try:
+                        yield ("delta", value)
+                    except GeneratorExit:
+                        disconnected = True
+                        logger.info(
+                            "Agent chat stream closed by client; "
+                            "finishing the turn"
+                        )
+                elif kind == "error":
+                    raise value
+                else:
+                    result = value
+                    break
+            worker.join()
+            turn = self._persist(
+                result,
+                user=user,
+                message_text=message_text,
+                conversation=conversation,
+                attachment_ids=attachment_ids,
+                model_name=model_name,
+                llm=llm,
+                timing=timing,
+            )
+        except Exception:
+            if not disconnected:
+                raise
+            logger.exception(
+                "Agent chat turn failed after the client disconnected"
+            )
+            return
+        if not disconnected:
+            yield ("done", turn)
+
+    def _check_turn(self, user, conversation, company):
         if not user or not user.is_authenticated:
             raise ValueError("A signed-in user is required to chat.")
         if conversation and (
@@ -164,26 +338,13 @@ class LangGraphChatService:
         ):
             raise ValueError("Selected agent does not belong to the chat company.")
 
-        llm = self._chat._llm
-
-
-        history_text = self._history_text(conversation)
-
-        selected_entry_ids = list(selected_entry_ids or [])
+    def _run_graph_mapped(self, **kwargs):
+        """``_run_graph`` with errors mapped to the types the view catches."""
+        from basics.llm import LLMBackendError, LLMConfigurationError
+        from chat.services import ChatProviderError, ChatRetrievalError
 
         try:
-            result = self._run_graph(
-                user=user,
-                message_text=message_text,
-                conversation=conversation,
-                company=company,
-                attachment_ids=attachment_ids,
-                model_name=model_name,
-                history_text=history_text,
-                agent=self._agent,
-                llm=llm,
-                selected_entry_ids=selected_entry_ids,
-            )
+            return self._run_graph(**kwargs)
         except (
             LLMConfigurationError,
             LLMBackendError,
@@ -197,6 +358,22 @@ class LangGraphChatService:
                 "The LLM provider failed to generate a response."
             ) from exc
 
+    def _persist(
+        self,
+        result,
+        *,
+        user,
+        message_text,
+        conversation,
+        attachment_ids,
+        model_name,
+        llm,
+        timing=None,
+    ):
+        """Post-process the graph ``result`` and save it as one turn."""
+        from chat.retitle import retitle_if_default
+        from chat.services import ChatProviderError
+
         tool_result = result["tool_result"]
         content = (tool_result.content or "").strip()
         if getattr(tool_result, "llm_generated", False):
@@ -208,7 +385,8 @@ class LangGraphChatService:
         assistant_model_name = model_name or getattr(llm, "model", None)
 
 
-        with transaction.atomic():
+        # Timing is measured up to here (persist is only logged).
+        with timed(None, "persist"), transaction.atomic():
             convo = conversation
             turn = self._chat.create_turn(
                 convo,
@@ -218,7 +396,7 @@ class LangGraphChatService:
                 model_name=assistant_model_name,
                 citations=tool_result.citations or [],
                 chart_data=tool_result.chart_data,
-                metadata={
+                metadata=with_timing({
                     # Tool metadata (file_panel, temporal_links, ...) first so
                     # the fixed keys below always win.
                     **(getattr(tool_result, "metadata", None) or {}),
@@ -235,7 +413,7 @@ class LangGraphChatService:
                         "agent_slug": self._agent.slug,
                         "outcome": "pipeline",
                     },
-                },
+                }, timing),
                 attachment_ids=attachment_ids,
                 actor=user,
             )
@@ -262,14 +440,34 @@ class LangGraphChatService:
         agent,
         llm,
         selected_entry_ids=None,
+        router_history_text=None,
+        timing=None,
+        stream_llm=None,
     ):
         from agents.services.flow import walk_reachable_steps
+
+        # The router sees only the last CHAT_ROUTER_TURNS turns; the tool
+        # handlers still get the full (capped) history.
+        if router_history_text is None:
+            router_history_text = history_text
 
         selected_entry_ids = list(selected_entry_ids or [])
         chain = walk_reachable_steps(agent)
         if not chain:
             raise ValueError("Selected agent has no runnable flow.")
         entry_slug = chain[0].slug if chain else ""
+        # Steps that end the walk (see ``_build_graph``): only their handler
+        # may stream. Repeated slugs make that unclear, so nothing streams.
+        chain_slugs = [s.slug for s in chain]
+        last_slugs = (
+            {
+                s.slug
+                for i, s in enumerate(chain)
+                if s.connected_to_end or i == len(chain) - 1
+            }
+            if stream_llm is not None and len(set(chain_slugs)) == len(chain_slugs)
+            else set()
+        )
 
         outcome = {
             "tool_result": None,
@@ -345,10 +543,23 @@ class LangGraphChatService:
             available = [slug for slug in capable if slug in enabled]
             return available[0] if len(available) == 1 else None
 
+        _follow_up = []
+
+        def follows_file_turn():
+            """The previous turn was answered from a file (router decides
+            whether this message is a follow-up about it)."""
+            if not _follow_up:
+                _follow_up.append(
+                    ChatService._follows_file_turn(conversation, message_text)
+                )
+            return _follow_up[0]
+
         def file_referenced():
             from chat.services import file_matching
 
-            return file_matching.references_file(message_text, session_file_list())
+            return file_matching.references_file(
+                message_text, session_file_list()
+            ) or follows_file_turn()
 
         def _make_node(step):
             """Build a FULL router-executing node for ``step``.
@@ -361,17 +572,25 @@ class LangGraphChatService:
 
             def _node(state):
                 pipeline_context = state.get("pipeline_context", "") or ""
-                # The router sees the handoff via effective_history; the handler
-                # sees it via ctx.pipeline_context (both from the same source).
+                # The router sees the handoff via router_history (trimmed to the
+                # last CHAT_ROUTER_TURNS turns); the handler sees it via
+                # effective_history + ctx.pipeline_context (same source).
                 effective_history = history_text
+                router_history = router_history_text
                 pc = pipeline_context.strip()
                 if pc:
+                    handoff = f"[Pipeline context from previous steps]\n{pc}"
                     effective_history = (
-                        f"{history_text}\n\n"
-                        f"[Pipeline context from previous steps]\n{pc}"
+                        f"{history_text}\n\n{handoff}"
+                    ).strip()
+                    router_history = (
+                        f"{router_history_text}\n\n{handoff}"
                     ).strip()
 
                 enabled, tool_rows = self._enabled_for(step)
+                # The router always gets ``llm`` (never streams); a final
+                # step's handler gets the streaming proxy when streaming.
+                step_llm = stream_llm if step.slug in last_slugs else llm
 
                 def _execute(slug):
                     """Run the handler for ``slug`` -> ToolResult (keying verbatim)."""
@@ -394,12 +613,15 @@ class LangGraphChatService:
                         attachment_ids=list(attachment_ids or []),
                         model_name=model_name,
                         tool=tool_row,
-                        llm=llm,
+                        llm=step_llm,
                         langfuse=self._langfuse,
                         pipeline_context=pipeline_context,
                         selected_entry_ids=list(selected_entry_ids),
                     )
-                    result = handler(ctx)
+                    # A streamed last-step answer marks time-to-first-token
+                    # on its first piece (``stream_message``).
+                    with timed(timing, "llm"):
+                        result = handler(ctx)
                     if not result.tool_used:
                         result.tool_used = handler_slug
                     return result
@@ -441,6 +663,17 @@ class LangGraphChatService:
                     selected = "document_search"
                     reason = "explicit file reference"
                     result = _execute(selected)
+                elif (
+                    has_attachment
+                    and "document_search" in enabled
+                    and not file_command_requested()
+                ):
+                    # A file attached on THIS turn is referenced by the message
+                    # itself (as on the Normal chat path), even when the text
+                    # never says "file" ("can you recheck and give the PAN").
+                    selected = "document_search"
+                    reason = "file attached on this turn"
+                    result = _execute(selected)
                 else:
                     unreferenced_files = (
                         has_files()
@@ -457,12 +690,14 @@ class LangGraphChatService:
                     else:
                         selected, reason, trace_id = self._route(
                             message_text=message_text,
-                            history_text=effective_history,
+                            history_text=router_history,
                             enabled_tools=candidates,
                             step=step,
                             tool_rows=tool_rows,
                             llm=llm,
                             has_attachment=has_attachment,
+                            follows_file_turn=follows_file_turn(),
+                            timing=timing,
                         )
                     result = _execute(selected)
 
@@ -586,6 +821,8 @@ class LangGraphChatService:
         tool_rows,
         llm,
         has_attachment=False,
+        follows_file_turn=False,
+        timing=None,
     ):
         from basics.llm import LLMBackendError, LLMConfigurationError
         from chat.services import ChatProviderError
@@ -594,12 +831,21 @@ class LangGraphChatService:
             f"{slug}: {self._tool_description(tool_rows.get(slug), slug)}"
             for slug in enabled_tools
         )
-        attachment_note = (
-            "Attachment note: files are present, but use document_search only when "
-            "the user expressly names or references one."
-            if has_attachment
-            else "Attachment note: no file is attached on this message."
-        )
+        if follows_file_turn and "document_search" in enabled_tools:
+            attachment_note = (
+                "Attachment note: the previous turn was answered from a file in "
+                "this chat. If this message is a follow-up about that file or "
+                "its contents (e.g. 'and the aadhaar number?', 'what about his "
+                "PAN?'), choose document_search. If it is about an unrelated "
+                "topic, choose general_assistant."
+            )
+        elif has_attachment:
+            attachment_note = (
+                "Attachment note: files are present, but use document_search only when "
+                "the user expressly names or references one."
+            )
+        else:
+            attachment_note = "Attachment note: no file is attached on this message."
         prompt_name = "agent_router"
         template = self._langfuse.get_prompt(
             prompt_name, fallback=_FALLBACK_ROUTER_PROMPT
@@ -635,7 +881,10 @@ class LangGraphChatService:
         with self._langfuse.trace("agent_router") as span:
             trace_id = self._trace_id(span)
             try:
-                decision = llm.generate_structured(router_prompt, RouterDecision)
+                with timed(timing, "router"):
+                    decision = llm.generate_structured(
+                        router_prompt, RouterDecision
+                    )
             except LLMConfigurationError:
                 raise
             except LLMBackendError as exc:
@@ -682,12 +931,25 @@ class LangGraphChatService:
         tool_rows = {t.slug: t for t in step.tools.all()}
         return enabled, tool_rows
 
-    def _history_text(self, conversation):
-        """Build the condensed conversation context, mirroring the RAG path."""
+    def _history_texts(self, conversation):
+        """Return ``(history_text, router_history_text)`` from one turns query.
+
+        ``history_text`` is the full condensed context the tools get;
+        ``router_history_text`` covers only the last ``CHAT_ROUTER_TURNS``
+        turns, which is all the router needs to pick a tool.
+        """
+        from django.conf import settings
+
         if conversation is None:
-            return ""
+            return "", ""
         turns = list(conversation.turns.order_by("created_at"))
-        return self._chat._build_conversation_context(turns)
+        router_turns = max(int(getattr(settings, "CHAT_ROUTER_TURNS", 4)), 0)
+        return (
+            self._chat._build_conversation_context(turns),
+            self._chat._build_conversation_context(
+                turns[-router_turns:] if router_turns else []
+            ),
+        )
 
     @staticmethod
     def _tool_description(tool_row, slug):

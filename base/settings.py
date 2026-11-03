@@ -132,6 +132,30 @@ LLM_API_KEY = (
     or ""
 )
 
+# Per-request timeout (seconds) and retry budget for every chat/embedding call.
+# Defaults match the openai SDK (600s, 2 retries): a non-streamed call waits
+# for the whole generation, so long answers must not be cut off. Connecting is
+# bounded separately so an unreachable endpoint fails fast.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "600"))
+LLM_CONNECT_TIMEOUT_SECONDS = float(
+    os.getenv("LLM_CONNECT_TIMEOUT_SECONDS", "10")
+)
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+# with_structured_output method used for EVERY provider/model. "function_calling"
+# (tool calls) works on both OpenAI and DeepSeek; DeepSeek rejects "json_schema".
+LLM_STRUCTURED_METHOD = os.getenv("LLM_STRUCTURED_METHOD", "function_calling")
+
+# Chat history sent to the model: the last CHAT_RECENT_TURNS turns verbatim
+# (older turns are condensed into a digest), and only the last
+# CHAT_ROUTER_TURNS turns for the Agent router's tool pick.
+CHAT_RECENT_TURNS = int(os.getenv("CHAT_RECENT_TURNS", "12"))
+CHAT_ROUTER_TURNS = int(os.getenv("CHAT_ROUTER_TURNS", "4"))
+# Show the response-time line ("⏱ 3.2s · ...") under each assistant reply.
+# Timing is always recorded in turn metadata; this only hides the line.
+CHAT_SHOW_TIMING = os.getenv("CHAT_SHOW_TIMING", "True").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 def _csv(env_value, default_list):
     """Parse a comma-separated env list, falling back to default_list."""
     raw = (env_value or "").strip()
