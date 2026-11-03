@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from io import TextIOWrapper
+from io import StringIO, TextIOWrapper
 from pathlib import Path
 from typing import Literal
 
@@ -103,6 +103,22 @@ class _PreparedTurn:
     attachment_sections: list
     prompt: str
     citations: list
+
+
+class _LibraryCsv:
+    """A knowledge-base CSV ``Document`` shaped like a chat ``SessionFile``
+    (``id`` / ``title`` / ``open()``) for ``_build_csv_distribution_chart``."""
+
+    def __init__(self, document):
+        self._document = document
+        self.id = str(document.pk)
+        self.title = document.title
+
+    def open(self):
+        try:
+            return self._document.file.open("rb")
+        except OSError as exc:
+            raise FileUnavailable(self.id) from exc
 
 
 class ChatService:
@@ -250,6 +266,7 @@ class ChatService:
         has_file_context=None,
         attachment_sections=None,
         structured=True,
+        kb_overview="",
     ):
         """Build the grounded answer prompt and its citation list.
 
@@ -257,6 +274,9 @@ class ChatService:
         non-chart message): it leaves out the chart, JSON-schema, title and
         "Return a response object" instructions; the grounding, citation and
         plain-text formatting rules are the same in both modes.
+        ``kb_overview`` is the company knowledge base's document list
+        (``kb.knowledge_base_overview``), so questions about the knowledge base
+        itself can be answered.
         """
         attachment_sections = attachment_sections or []
         # Charts are file-only when the user targeted a file (a chart target or
@@ -264,7 +284,9 @@ class ChatService:
         # be off-topic, so they don't forbid a general-knowledge chart.
         file_only_charts = bool(has_file_context) or bool(attachment_sections)
         if has_file_context is None:
-            has_file_context = bool(chunks) or bool(attachment_sections)
+            has_file_context = (
+                bool(chunks) or bool(attachment_sections) or bool(kb_overview)
+            )
 
         context_sections = []
         citations = []
@@ -311,7 +333,13 @@ class ChatService:
                 "For explicit chart/graph requests, use the retrieved passages "
                 "only if they actually contain the requested figures; then copy "
                 "their values and cite them. If they do not contain those "
-                "figures, ignore the passages, do not cite them, and do not "
+                "figures and the request is about the user's own documents, "
+                "company or data (a named file, table or dataset in the "
+                "knowledge base), set chart to null and say which figures are "
+                "missing; NEVER fill such a chart with invented or "
+                "\"illustrative\" values. Only for a public, world-knowledge "
+                "topic (e.g. a country's GDP) may you ignore the passages, not "
+                "cite them, and not "
                 "refuse: fill the chart from your own general knowledge with "
                 "your best real numeric values, add a short \"(general "
                 "knowledge)\" marker in the chart title, and include a one-line "
@@ -406,10 +434,18 @@ class ChatService:
         else:
             instructions = grounding_instructions + prose_rules.rstrip()
 
+        kb_block = (
+            "Knowledge base overview (authoritative document list and counts; "
+            "use it for questions about which or how many documents exist):\n"
+            f"{kb_overview}\n\n"
+            if kb_overview
+            else ""
+        )
         prompt = (
             instructions
             + "\n\n"
-            f"Retrieved passages:\n{document_context}\n\n"
+            + kb_block
+            + f"Retrieved passages:\n{document_context}\n\n"
             f"Conversation so far:\n{history_text or '(new conversation)'}\n\n"
             f"User: {question}\nAssistant:"
         )
@@ -738,12 +774,13 @@ class ChatService:
     _MAX_ATTACHMENT_DOCS = 5
 
     def _chat_attachment_texts(self, conversation, attachment_ids=None, question=None):
-        """Return ``(title, text)`` for this session's non-CSV chat files.
+        """Return ``(title, text)`` for this session's chat files.
 
         Chat files are read directly (processed or not) and their extracted
-        text is injected into the prompt. CSV files are EXCLUDED here — they
-        drive the deterministic chart builder (``_build_csv_distribution_chart``)
-        instead.
+        text is injected into the prompt. A CSV comes in as its rows with the
+        exact row count (``_csv_prompt_text``), so row-level questions are
+        answered from the data; chart requests still go to the deterministic
+        chart builder (``_build_csv_distribution_chart``) first.
 
         Precedence: THIS turn's ``attachment_ids`` (the current turn is not
         stored yet when this runs), else the latest stored turn's chips
@@ -766,7 +803,7 @@ class ChatService:
         )
 
         def _eligible(candidates):
-            return [f for f in candidates if not f.is_csv and f.readable]
+            return [f for f in candidates if f.readable]
 
         # File content is used only when the message expressly references it.
         target = self._chart_target(conversation, question)
@@ -800,7 +837,11 @@ class ChatService:
 
         sections = []
         for session_file in chosen[: self._MAX_ATTACHMENT_DOCS]:
-            text = self._cached_chat_file_text(session_file)
+            text = (
+                self._csv_prompt_text(session_file)
+                if session_file.is_csv
+                else self._cached_chat_file_text(session_file)
+            )
             if text:
                 sections.append((session_file.title, text))
         return sections
@@ -845,6 +886,128 @@ class ChatService:
         )
         return text
 
+    @staticmethod
+    def _named_library_csvs(conversation, question):
+        """Processed knowledge-base CSVs the question names by title or id.
+
+        Without this a chart request for a library dataset ("pie chart of
+        Employee Database Records Table") only saw a few similarity-search
+        chunks, and the LLM filled the chart with invented values. Longest
+        title first, so a longer title wins over a shorter one it contains.
+        """
+        company_id = getattr(conversation, "company_id", None)
+        if company_id is None or not question:
+            return []
+        text = question.casefold()
+        candidates = Document.objects.filter(
+            company_id=company_id,
+            source=Document.SOURCE_LIBRARY,
+            status=Document.STATUS_READY,
+            file_type="csv",
+        ).exclude(file="")
+        named = [
+            d
+            for d in candidates
+            if str(d.pk).casefold() in text
+            or (d.title.strip() and d.title.strip().casefold() in text)
+        ]
+        named.sort(key=lambda d: -len(d.title or ""))
+        return [_LibraryCsv(d) for d in named]
+
+    @staticmethod
+    def _read_csv(csv_file):
+        """``(headers, rows)`` of a chat/library CSV, or ``None`` if unreadable.
+
+        Blank rows and leading ``#`` comment lines are skipped; the delimiter
+        is sniffed from the first 8 KB.
+        """
+        try:
+            with csv_file.open() as source:
+                text_source = TextIOWrapper(source, encoding="utf-8-sig", newline="")
+                sample = text_source.read(8192)
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+                except csv.Error:
+                    dialect = csv.excel
+                text_source.seek(0)
+                reader = csv.reader(text_source, dialect)
+                headers = None
+                for row in reader:
+                    if not row or not any(cell.strip() for cell in row):
+                        continue
+                    if len(row) == 1 and row[0].lstrip().startswith("#"):
+                        continue
+                    headers = [cell.strip() for cell in row]
+                    break
+                if not headers:
+                    return None
+                rows = [
+                    row
+                    for row in reader
+                    if row and any(cell.strip() for cell in row)
+                ]
+        except (OSError, FileUnavailable, UnicodeDecodeError, csv.Error):
+            logger.exception("Could not read CSV %s", csv_file.id)
+            return None
+        return headers, rows
+
+    # A CSV goes into the prompt whole when it fits this budget; a bigger one
+    # is cut to its first rows, with the exact total stated so the model can
+    # still answer "how many rows" and "show the top N rows".
+    _MAX_CSV_PROMPT_CHARS = 60000
+
+    def _csv_prompt_text(self, csv_file):
+        """Prompt text for one CSV: exact row/column counts, then its rows."""
+        key = f"chatcsv1:{csv_file.id}:{self._MAX_CSV_PROMPT_CHARS}"
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        parsed = self._read_csv(csv_file)
+        if parsed is None:
+            return None
+        headers, rows = parsed
+        buffer = StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(headers)
+        shown = 0
+        for row in rows:
+            before = buffer.tell()
+            writer.writerow(row)
+            if buffer.tell() > self._MAX_CSV_PROMPT_CHARS:
+                buffer.seek(before)
+                buffer.truncate()
+                break
+            shown += 1
+        if shown == len(rows):
+            coverage = "All rows are included below."
+        else:
+            coverage = (
+                f"Only the first {shown:,} of {len(rows):,} rows are included "
+                "below. Answer questions about the row count, columns or "
+                "these rows exactly; for anything needing every row (totals, "
+                "averages, counts by value) say the excerpt is incomplete "
+                "rather than estimating."
+            )
+        text = (
+            f"CSV with exactly {len(rows):,} data rows (header excluded) and "
+            f"{len(headers)} columns: {', '.join(headers)}. Rows are in file "
+            f"order, so 'top N rows' means the first N below. {coverage}\n"
+            + buffer.getvalue()
+        )
+        cache.set(key, text, self._CHAT_FILE_CACHE_TIMEOUT)
+        return text
+
+    def csv_sections(self, conversation, question):
+        """``(title, text)`` for the knowledge-base CSVs the question names."""
+        sections = []
+        for csv_file in self._named_library_csvs(conversation, question)[
+            : self._MAX_ATTACHMENT_DOCS
+        ]:
+            text = self._csv_prompt_text(csv_file)
+            if text:
+                sections.append((csv_file.title, text))
+        return sections
+
     def _build_csv_distribution_chart(
         self, conversation, question, attachment_ids=None
     ):
@@ -859,43 +1022,16 @@ class ChatService:
             or re.search(r"over\s+time", question, re.I)
         )
 
-        csv_files = self._chat_csv_documents(
-            conversation, attachment_ids=attachment_ids, question=question
+        csv_files = self._named_library_csvs(conversation, question) + (
+            self._chat_csv_documents(
+                conversation, attachment_ids=attachment_ids, question=question
+            )
         )
         for csv_file in csv_files:
-            try:
-                with csv_file.open() as source:
-                    text_source = TextIOWrapper(source, encoding="utf-8-sig", newline="")
-                    sample = text_source.read(8192)
-                    try:
-                        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-                    except csv.Error:
-                        dialect = csv.excel
-                    text_source.seek(0)
-                    reader = csv.reader(text_source, dialect)
-                    headers = None
-                    for row in reader:
-                        if not row or not any(cell.strip() for cell in row):
-                            continue
-                        if len(row) == 1 and row[0].lstrip().startswith("#"):
-                            continue
-                        headers = [cell.strip() for cell in row]
-                        break
-                    if not headers:
-                        continue
-
-                    rows = [
-                        row
-                        for row in reader
-                        if row and any(cell.strip() for cell in row)
-                    ]
-            except (OSError, FileUnavailable, UnicodeDecodeError, csv.Error):
-                logger.exception(
-                    "Could not read CSV %s to generate a local chart",
-                    csv_file.id,
-                )
+            parsed = self._read_csv(csv_file)
+            if parsed is None:
                 continue
-
+            headers, rows = parsed
             if not rows:
                 continue
 
