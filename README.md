@@ -733,9 +733,15 @@ flowchart TD
     J --> K
 ```
 
-## Temporal UI access
+## Temporal: processing flow and UI access
 
-Full guide (request flow, checks, troubleshooting): [TEMPORAL_AUTH.md](TEMPORAL_AUTH.md).
+Full guide (processing flow, UI access flow, checks, troubleshooting): [TEMPORAL_FLOW.md](TEMPORAL_FLOW.md).
+
+Processing: the documents admin (**Action → Temporal**, staff) or chat ("add
+this file to the knowledge base", any logged-in user) queues a document;
+Django starts the workflow `doc-<document id>` and `python manage.py
+temporal_worker` runs its seven stages. **Stop** terminates it; **Retry**
+resumes at the stage that failed.
 
 The Temporal Web UI is only reachable through Django at `/temporal/`, for
 active staff users (normal Django admin login; tick **Staff status** to grant
