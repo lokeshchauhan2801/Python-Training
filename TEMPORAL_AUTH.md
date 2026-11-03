@@ -169,6 +169,27 @@ All links are built by `chat/services/kb.py → temporal_ui_url` as
 cosmetic; the staff check in `ui_proxy.py` and the nginx gate are what block
 access.
 
+### Starting and following a workflow
+
+Starting a workflow and viewing it in Temporal UI are separate permissions.
+Every document has one workflow id, `doc-<document id>`.
+
+| Where | Who | Start | Follow progress | Workflow link |
+|---|---|---|---|---|
+| Documents admin, **Action → Temporal** | staff | `<pk>/dispatch/` → `enqueue_document_processing(..., backend="temporal")` | progress bar and status, polled every 4 s (`status_poll.js`) | "See workflow" appears **as soon as** the dispatch returns (the JSON carries `temporal_url`); the poll adds it too if missing |
+| Chat, "add this file to the knowledge base" | any logged-in chat user | `add_to_knowledge_base` tool → same `enqueue_document_processing` | status replies and the file panel | shown only to staff; non-staff see the status and the workflow id as text, and opening `/temporal/…` gives them 403 |
+
+Controls in the documents admin:
+
+- **Stop** (`<pk>/temporal-cancel/`, queued or processing only): terminates the
+  running workflow and marks the document failed with "Processing stopped by
+  user." Completed stages and chunks are kept.
+- **Retry** (`<pk>/temporal-retry/`, failed only): starts a new run of
+  `doc-<id>`. Completed stages are skipped, so it **resumes** at the stage that
+  failed.
+- Choosing another backend from **Action** removes the "See workflow" link
+  straight away.
+
 ---
 
 ## 4. Files
