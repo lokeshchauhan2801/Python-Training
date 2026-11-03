@@ -72,13 +72,14 @@ def workflow_id_for(document_id) -> str:
 def temporal_ui_url(workflow_id: str) -> str:
     """Deep link to a workflow in the Temporal Web UI.
 
-    Base comes from ``settings.TEMPORAL_UI_URL`` (default http://localhost:8081).
-    The default namespace is ``default``; the workflows view accepts the
-    workflow id path segment.
+    A site-relative link through Django's staff-only proxy
+    (``settings.TEMPORAL_UI_PUBLIC_PATH``, ``/temporal``); the UI itself is not
+    reachable directly. The default namespace is ``default``; the workflows
+    view accepts the workflow id path segment.
     """
     from django.conf import settings
 
-    base = (getattr(settings, "TEMPORAL_UI_URL", "") or "").rstrip("/")
+    base = (getattr(settings, "TEMPORAL_UI_PUBLIC_PATH", "") or "").rstrip("/")
     if not base:
         return ""
     return f"{base}/namespaces/default/workflows/{workflow_id}"

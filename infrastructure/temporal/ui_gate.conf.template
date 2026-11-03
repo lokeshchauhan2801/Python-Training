@@ -1,0 +1,23 @@
+# Gate in front of Temporal UI (rendered by the nginx image's envsubst).
+#
+# Temporal UI has no login of its own, so it is not published on the host at
+# all. This gate is, on 127.0.0.1:8080, and forwards ONLY requests carrying
+# the shared secret that Django's staff-only proxy adds
+# (infrastructure/temporal/ui_proxy.py). A browser opening :8080 directly
+# gets 403, logged in or not.
+server {
+    listen 8080;
+    server_tokens off;
+
+    location / {
+        if ($http_x_temporal_ui_gate != "${TEMPORAL_UI_PROXY_SECRET}") {
+            return 403;
+        }
+        proxy_pass http://temporal-ui:8080;
+        proxy_set_header X-Temporal-UI-Gate "";
+        proxy_set_header Host $http_host;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 60s;
+    }
+}

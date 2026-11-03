@@ -287,7 +287,7 @@ venv/bin/python manage.py kafka_worker
 # Temporal: start the server + its Postgres + Web UI, then the worker
 sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
 venv/bin/python manage.py temporal_worker
-# Temporal Web UI: http://localhost:8081   (server :7234, Kafka :9093)
+# Temporal Web UI: http://localhost:8000/temporal/ (staff only, via Django; direct 127.0.0.1:8080 is blocked by a gate)   (server :7234, Kafka :9093)
 
 # Stop the workers and this project's containers (preserves data volumes)
 ./scripts/stop_processing.sh
@@ -299,7 +299,7 @@ starts the workers. It writes worker logs and PID files under
 
 `docker-compose.processing.yml` provides a project-scoped, single-broker KRaft
 Kafka (`:9093`), Temporal auto-setup (`:7234`) with its own Postgres, and the
-Temporal Web UI (`:8081`). These dedicated ports and generated container names let
+Temporal Web UI (`127.0.0.1:8080`, opened through Django at `/temporal/`). These dedicated ports and generated container names let
 this stack run alongside other Kafka/Temporal containers. See `START_PROCESSING.txt`
 for the full local walkthrough.
 
@@ -708,7 +708,7 @@ DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py temporal_worker
 #   or simply:  python manage.py temporal_worker
 ```
 
-- Temporal Web UI: http://localhost:8081/
+- Temporal Web UI: http://localhost:8000/temporal/ (staff only; proxied by Django through the gate on 127.0.0.1:8080, which refuses direct access)
 
 #### Shutting down the brokers
 
@@ -728,7 +728,7 @@ flowchart TD
     F --> G{need Kafka/Temporal?}
     G -->|No| H["use Schedule → Process now (inline, no infra)"]
     G -->|Kafka| I["docker compose up -d kafka → manage.py kafka_worker"]
-    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8081"]
+    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8000/temporal/"]
     I --> K["pick that backend in the Schedule dropdown"]
     J --> K
 ```

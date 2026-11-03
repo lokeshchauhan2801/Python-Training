@@ -9,6 +9,7 @@ inserted at the START of the right-side links region, so it shows on EVERY admin
 page (and on /chat/, which renders inside the same Unfold shell). The context
 keys (``can_switch_company``, ``accessible_companies``, ``active_company``,
 ``set_active_company_url``) come from ``company.context_processors.active_company``.
+It also adds the "Temporal workflows" link (/temporal/, the staff-only proxy).
 {% endcomment %}
 
 <div class="flex flex-row gap-4 items-center ml-auto">
@@ -29,6 +30,13 @@ keys (``can_switch_company``, ``accessible_companies``, ``active_company``,
     {% elif active_company %}
 
         <span class="font-medium text-font-default-light text-sm dark:text-font-default-dark">{{ active_company.name }}</span>
+    {% endif %}
+
+    {% if request.user.is_active and request.user.is_staff %}
+        <a href="/temporal/" target="_blank" rel="noopener"
+           class="font-medium text-sm text-primary-600 hover:underline dark:text-primary-500">
+            {% translate 'Temporal workflows' %}
+        </a>
     {% endif %}
 
     {% if environment %}
