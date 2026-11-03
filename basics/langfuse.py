@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+# Prompt name -> monotonic time until which it is treated as missing.
+_PROMPT_MISSES: dict[str, float] = {}
 
 
 class LangfuseClient:
@@ -56,11 +60,20 @@ class LangfuseClient:
         client = self._ensure_client()
         if client is None:
             return fallback
+        # The SDK caches found prompts but not missing ones, so an absent
+        # prompt costs a blocking fetch (seconds) on every turn. Remember the
+        # miss briefly; a prompt created in Langfuse is picked up after the TTL.
+        if _PROMPT_MISSES.get(name, 0) > time.monotonic():
+            return fallback
         try:
             prompt = client.get_prompt(name)
         except Exception:
             logger.debug("langfuse get_prompt(%s) failed; using fallback", name)
+            _PROMPT_MISSES[name] = time.monotonic() + getattr(
+                settings, "LANGFUSE_PROMPT_MISS_TTL_SECONDS", 300
+            )
             return fallback
+        _PROMPT_MISSES.pop(name, None)
 
         for attr in ("compile", "get_langchain_prompt"):
             method = getattr(prompt, attr, None)

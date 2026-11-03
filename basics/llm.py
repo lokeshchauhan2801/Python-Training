@@ -1,8 +1,65 @@
 import logging
+import threading
 
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+# Backend SDK clients shared across LLMClient instances (views/tools build a new
+# LLMClient per request), so HTTP connections are reused instead of opening a new
+# TLS connection each time. Keyed by every argument the client is built with.
+_BACKEND_CACHE = {}
+_BACKEND_CACHE_LOCK = threading.Lock()
+
+# (provider, model, base_url) triples whose native structured output was
+# REJECTED as unsupported (see _native_structured_unsupported); later
+# generate_structured calls go straight to the prompt+parse fallback. Transient
+# or per-response failures (timeouts, 429s, validation) are never recorded.
+_NATIVE_STRUCTURED_UNSUPPORTED = set()
+
+# Words in a 400/422 body that mean the request's tools/response_format (not
+# its content) was rejected.
+_UNSUPPORTED_STRUCTURED_HINTS = (
+    "tool",
+    "function",
+    "response_format",
+    "json_schema",
+    "structured",
+)
+
+
+def _native_structured_unsupported(exc):
+    """Whether ``exc`` means the endpoint does not support native structured output."""
+    if isinstance(exc, NotImplementedError):
+        return True
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - langchain_openai depends on it
+        return False
+    if isinstance(exc, (openai.BadRequestError, openai.UnprocessableEntityError)):
+        message = str(exc).lower()
+        return any(hint in message for hint in _UNSUPPORTED_STRUCTURED_HINTS)
+    return False
+
+
+def _request_timeout():
+    """``(cache key part, httpx.Timeout)`` from the LLM timeout settings."""
+    import httpx
+
+    total = settings.LLM_TIMEOUT_SECONDS
+    connect = min(settings.LLM_CONNECT_TIMEOUT_SECONDS, total)
+    return (total, connect), httpx.Timeout(total, connect=connect)
+
+
+def _cached_backend(kind, key, factory):
+    """Return the cached backend client for ``(kind, key)``, building it once."""
+    cache_key = (kind,) + key
+    with _BACKEND_CACHE_LOCK:
+        backend = _BACKEND_CACHE.get(cache_key)
+        if backend is None:
+            backend = factory()
+            _BACKEND_CACHE[cache_key] = backend
+        return backend
 
 
 class LLMError(Exception):
@@ -101,10 +158,24 @@ class LLMClient:
 
             from langchain_openai import ChatOpenAI
 
-            self._client = ChatOpenAI(
-                model=self.model,
-                api_key=self._api_key,
-                base_url=self.base_url,
+            timeout_key, timeout = _request_timeout()
+            retries = settings.LLM_MAX_RETRIES
+            self._client = _cached_backend(
+                "chat",
+                (
+                    self.model,
+                    self.base_url,
+                    self._api_key,
+                    timeout_key,
+                    retries,
+                ),
+                lambda: ChatOpenAI(
+                    model=self.model,
+                    api_key=self._api_key,
+                    base_url=self.base_url,
+                    timeout=timeout,
+                    max_retries=retries,
+                ),
             )
         return self._client
 
@@ -119,10 +190,24 @@ class LLMClient:
 
             from langchain_openai import OpenAIEmbeddings
 
-            self._embeddings = OpenAIEmbeddings(
-                model=self._embedding_model,
-                api_key=self._embedding_api_key,
-                base_url=self._embedding_base_url,
+            timeout_key, timeout = _request_timeout()
+            retries = settings.LLM_MAX_RETRIES
+            self._embeddings = _cached_backend(
+                "embeddings",
+                (
+                    self._embedding_model,
+                    self._embedding_base_url,
+                    self._embedding_api_key,
+                    timeout_key,
+                    retries,
+                ),
+                lambda: OpenAIEmbeddings(
+                    model=self._embedding_model,
+                    api_key=self._embedding_api_key,
+                    base_url=self._embedding_base_url,
+                    timeout=timeout,
+                    max_retries=retries,
+                ),
             )
         return self._embeddings
 
@@ -138,6 +223,26 @@ class LLMClient:
             )
             raise LLMBackendError("LLM backend call failed.") from exc
         return self._content_to_text(result.content)
+
+    def stream(self, messages):
+        """Yield the completion for ``messages`` as text deltas.
+
+        Same backend and error mapping as ``complete``; a failure while the
+        stream is being consumed is raised as ``LLMBackendError`` too.
+        """
+        client = self._ensure_client()
+        try:
+            for chunk in client.stream(self._to_lc_messages(messages)):
+                text = self._content_to_text(chunk.content)
+                if text:
+                    yield text
+        except Exception as exc:
+            logger.error(
+                "LLM backend stream failed (provider=%s model=%s)",
+                self.provider,
+                self.model,
+            )
+            raise LLMBackendError("LLM backend call failed.") from exc
 
     def embed_documents(self, texts) -> list:
         embeddings = self._ensure_embeddings()
@@ -166,16 +271,25 @@ class LLMClient:
     def generate_structured(self, prompt, schema):
         """Return a ``schema`` instance validated from a structured completion.
 
-        Tries the provider's NATIVE structured output first (OpenAI function /
-        json-schema via ``with_structured_output``). Providers without that
-        capability — notably DeepSeek's ``deepseek-chat`` over the OpenAI-compat
-        shim — raise there; for them we FALL BACK to a plain completion that
-        appends the schema and parses JSON out of the text. So structured output
-        works across providers without the caller changing anything.
+        Tries the provider's NATIVE structured output first via
+        ``with_structured_output`` using ``settings.LLM_STRUCTURED_METHOD``
+        (default ``function_calling``: tool calls, which OpenAI and DeepSeek both
+        support — DeepSeek rejects the ``json_schema`` default). If that raises we
+        FALL BACK to a plain completion that appends the schema and parses JSON
+        out of the text, so structured output works across providers without the
+        caller changing anything. A native failure that means "unsupported"
+        (a 400/422 about tools/response_format, or NotImplementedError) is
+        remembered per (provider, model, base_url) so later calls skip the
+        doomed native attempt; any other failure falls back for this call only.
         """
         client = self._ensure_client()
+        memo_key = (self.provider, self.model, self.base_url)
+        if memo_key in _NATIVE_STRUCTURED_UNSUPPORTED:
+            return self._structured_via_prompt(prompt, schema, None)
         try:
-            structured_client = client.with_structured_output(schema)
+            structured_client = client.with_structured_output(
+                schema, method=settings.LLM_STRUCTURED_METHOD
+            )
             response = structured_client.invoke(prompt)
             if isinstance(response, schema):
                 return response
@@ -187,6 +301,8 @@ class LLMClient:
                 self.provider,
                 self.model,
             )
+            if _native_structured_unsupported(native_exc):
+                _NATIVE_STRUCTURED_UNSUPPORTED.add(memo_key)
             return self._structured_via_prompt(prompt, schema, native_exc)
 
     def _structured_via_prompt(self, prompt, schema, native_exc):

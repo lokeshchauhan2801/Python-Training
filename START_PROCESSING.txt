@@ -51,7 +51,7 @@ when needed. The worker logs and PID files are stored in:
     ~/.local/state/agentic-flow-processing/
 
 Kafka uses localhost:9093, Temporal gRPC uses localhost:7234, and the Temporal
-UI is at http://localhost:8081. To stop the workers and this Compose stack:
+UI is at http://localhost:8000/temporal/ (staff only, through Django). To stop the workers and this Compose stack:
 
     ./scripts/stop_processing.sh
 
@@ -85,7 +85,7 @@ Document chunks admin.
 
 Open TWO terminals, both in /home/auriga/learnings/agentic-flow.
 
-Terminal 1 — start the Temporal server (gRPC :7234) + Web UI (:8081):
+Terminal 1 — start the Temporal server (gRPC :7234) + Web UI (127.0.0.1:8080, opened via Django at /temporal/):
     sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
     sudo docker compose -f docker-compose.processing.yml ps
 
@@ -96,7 +96,7 @@ Terminal 2 — start the Temporal worker, leave it running:
 
 Then in the admin, pick a library document and choose "Process with…" →
 Temporal. Inspect runs (workflow id doc-<ulid>) in the Temporal Web UI:
-    http://localhost:8081
+    http://localhost:8000/temporal/   (log in to the admin first; staff only)
 
 ===============================================================================
  OPTION C — PROCESS WITH CELERY (default)
@@ -138,7 +138,7 @@ Also delete the data volumes (full reset):
     Both the container AND the worker must run for that backend. For celery in
     DEBUG this cannot happen — it runs inline.
 
-* Port already in use (9093 / 7234 / 8081):
+* Port already in use (9093 / 7234 / 8080):
     Stop the other process, or tear the stack down first.
 
 * Which backend is the default?

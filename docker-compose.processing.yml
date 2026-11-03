@@ -50,8 +50,9 @@ services:
     depends_on:
       temporal-postgresql:
         condition: service_healthy
+    # gRPC on loopback only: workers and Django run on this host.
     ports:
-      - "7234:7233"
+      - "127.0.0.1:7234:7233"
     environment:
       DB: postgres12
       DB_PORT: 5432
@@ -60,15 +61,35 @@ services:
       POSTGRES_SEEDS: temporal-postgresql
 
   temporal-ui:
-    image: temporalio/ui:2.26.2
+    # 2.26.x shows a blank page under TEMPORAL_UI_PUBLIC_PATH: its CSP hash
+    # no longer matches the inline boot script, so the browser blocks it.
+    image: temporalio/ui:2.34.0
     restart: unless-stopped
     depends_on:
       - temporal
-    ports:
-      - "8081:8080"
+    # Not published on the host at all: only temporal-ui-gate can reach it.
+    # Browsers go through Django's staff-only proxy at
+    # http://localhost:8000/temporal/.
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:8081
+      TEMPORAL_UI_PUBLIC_PATH: /temporal
+      # View only for every admin: no cancel, terminate, reset or signal.
+      TEMPORAL_DISABLE_WRITE_ACTIONS: "true"
+      TEMPORAL_CORS_ORIGINS: http://localhost:8000
+
+  temporal-ui-gate:
+    # Loopback only. Returns 403 unless the request carries the secret that
+    # only Django's proxy sends, so opening :8080 directly does not work.
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - temporal-ui
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      TEMPORAL_UI_PROXY_SECRET: ${TEMPORAL_UI_PROXY_SECRET:?set TEMPORAL_UI_PROXY_SECRET in .env}
+    volumes:
+      - ./infrastructure/temporal/ui_gate.conf.template:/etc/nginx/templates/default.conf.template:ro
 
 volumes:
   kafka-data:

@@ -128,12 +128,60 @@ def _tesseract_available() -> bool:
         return False
 
 
+def _ocr_cleanup(image):
+    """Adaptive black/white version of ``image`` for a second OCR pass.
+
+    Phone photos of paper (grey background, shadows, dark edges) defeat
+    Tesseract's global threshold; on a photographed EPF form it read 3
+    characters. Marking a pixel as ink only when it is clearly darker than its
+    local neighbourhood removes the uneven background (same form: ~2,600
+    characters). Pillow only, no OpenCV/numpy.
+    """
+    from PIL import Image, ImageChops, ImageFilter, ImageOps
+
+    if image.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
+        # Grayscale would clip 16-bit values at 255 (all white): scale down.
+        image = image.convert("I").point(lambda value: value / 256).convert("L")
+    if image.mode in ("RGBA", "LA", "PA") or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        # Grayscale drops alpha, so black text on transparent black would turn
+        # all black: composite onto white first, as pytesseract does.
+        rgba = image.convert("RGBA")
+        image = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        image.alpha_composite(rgba)
+    gray = ImageOps.grayscale(image)
+    background = gray.filter(ImageFilter.BoxBlur(settings.DOCUMENT_OCR_CLEANUP_BLOCK))
+    darker_by = ImageChops.subtract(background, gray)
+    offset = settings.DOCUMENT_OCR_CLEANUP_OFFSET
+    return darker_by.point(lambda value: 0 if value > offset else 255)
+
+
 def _ocr_image(image, timeout: int | None = None) -> str:
-    """Run Tesseract OCR on a single PIL image and return extracted text."""
+    """Run Tesseract OCR on a single PIL image and return extracted text.
+
+    When the plain pass finds almost nothing, the image is retried after
+    ``_ocr_cleanup`` and the longer result is kept, so clean scans pay nothing
+    extra and only poor photos take the second pass.
+    """
     import pytesseract
 
     kwargs = {"timeout": timeout} if timeout is not None else {}
-    return pytesseract.image_to_string(image, **kwargs) or ""
+    text = pytesseract.image_to_string(image, **kwargs) or ""
+    if len(text.strip()) >= settings.DOCUMENT_OCR_RETRY_BELOW_CHARS:
+        return text
+    # The retry is optional: if it fails (e.g. times out), keep the plain pass.
+    cleaned = None
+    try:
+        cleaned = _ocr_cleanup(image)
+        retry = pytesseract.image_to_string(cleaned, config="--psm 6", **kwargs) or ""
+    except Exception:
+        logger.warning("OCR cleanup retry failed; keeping the plain pass.", exc_info=True)
+        return text
+    finally:
+        if cleaned is not None:
+            cleaned.close()
+    return retry if len(retry.strip()) > len(text.strip()) else text
 
 
 def _validate_pdf_limits(raw: bytes, page_count: int) -> None:
@@ -154,8 +202,13 @@ def _ocr_pdf(
     raw: bytes,
     page_count: int,
     progress_callback: Callable[[int, int], None] | None = None,
+    page_numbers: list[int] | None = None,
 ) -> list[tuple[int, str, str]]:
-    """OCR a scanned PDF one bounded page range at a time."""
+    """OCR a scanned PDF one bounded page range at a time.
+
+    ``page_numbers`` limits OCR to those pages (the scanned pages of a PDF that
+    otherwise has a text layer); finding no text there is not an error.
+    """
     if not _tesseract_available():
         raise DocumentValidationError(OCR_UNAVAILABLE_MESSAGE)
     if convert_from_bytes is None:
@@ -166,8 +219,14 @@ def _ocr_pdf(
 
     chunks: list[tuple[int, str, str]] = []
     batch_pages = settings.DOCUMENT_OCR_BATCH_PAGES
-    for first_page in range(1, page_count + 1, batch_pages):
-        last_page = min(page_count, first_page + batch_pages - 1)
+    if page_numbers is None:
+        page_ranges = [
+            (first, min(page_count, first + batch_pages - 1))
+            for first in range(1, page_count + 1, batch_pages)
+        ]
+    else:
+        page_ranges = [(number, number) for number in page_numbers]
+    for first_page, last_page in page_ranges:
         render_started = time.monotonic()
         try:
             images = convert_from_bytes(
@@ -233,7 +292,7 @@ def _ocr_pdf(
                 image.close()
             raise
 
-    if not chunks:
+    if not chunks and page_numbers is None:
         raise DocumentValidationError(
             "OCR did not detect any readable text in this PDF. The scan may be "
             "too low quality or blank."
@@ -285,14 +344,18 @@ def _extract_pdf(
         page_count = len(reader.pages)
         _validate_pdf_limits(raw, page_count)
         chunks = []
+        scanned_pages = []
         for page_number, page in enumerate(reader.pages, start=1):
-            chunks.extend(
-                (page, f"Page {page}", content)
-                for page, content in split_page_text(
+            page_chunks = [
+                (number, f"Page {number}", content)
+                for number, content in split_page_text(
                     page.extract_text() or "",
                     page_number,
                 )
-            )
+            ]
+            if not page_chunks and _page_has_images(page):
+                scanned_pages.append(page_number)
+            chunks.extend(page_chunks)
     except DocumentValidationError:
         raise
     except Exception as exc:
@@ -309,7 +372,40 @@ def _extract_pdf(
             page_count=page_count,
             progress_callback=progress_callback,
         )
+    if scanned_pages:
+        # A text PDF with some scanned pages: OCR just those pages. A failure
+        # here keeps the text pages rather than failing the whole document.
+        logger.info(
+            "PDF %s has scanned pages %s; running OCR on them.",
+            document.pk,
+            scanned_pages,
+        )
+        try:
+            chunks.extend(
+                _ocr_pdf(
+                    document,
+                    raw=raw,
+                    page_count=page_count,
+                    progress_callback=progress_callback,
+                    page_numbers=scanned_pages,
+                )
+            )
+        except DocumentValidationError:
+            logger.warning(
+                "OCR of scanned pages failed for PDF %s; using text pages only.",
+                document.pk,
+                exc_info=True,
+            )
+        chunks.sort(key=lambda chunk: chunk[0])
     return chunks
+
+
+def _page_has_images(page) -> bool:
+    """Whether a pypdf page embeds any image (counted, not decoded)."""
+    try:
+        return len(page.images) > 0
+    except Exception:
+        return False
 
 
 def _decode_text(document: Document) -> str:
@@ -607,7 +703,9 @@ def extract_document_text(document: Document) -> str:
     directly. This reuses the same dispatch-by-suffix extraction pipeline the
     library indexer uses (``extract_document_chunks`` — which already handles
     pdf/docx/txt/md/csv/xlsx/json and image OCR via tesseract), then joins the
-    chunk bodies into one blank-line-separated string.
+    chunk bodies into one blank-line-separated string. OCR'd chunks keep their
+    location label (e.g. ``[Page 3 (OCR)]``) so the chat prompt can tell
+    machine-read text apart from a real text layer.
 
     A bad or edge attachment (OCR found no readable text, unsupported type, or
     an unreadable file) degrades to an empty string rather than raising, so the
@@ -617,7 +715,11 @@ def extract_document_text(document: Document) -> str:
         chunks = extract_document_chunks(document)
     except DocumentValidationError:
         return ""
-    return "\n\n".join(content for _, _, content in chunks if content).strip()
+    return "\n\n".join(
+        f"[{location}]\n{content}" if "(OCR)" in location else content
+        for _, location, content in chunks
+        if content
+    ).strip()
 
 
 def derive_document_title(

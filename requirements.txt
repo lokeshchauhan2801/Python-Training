@@ -18,3 +18,5 @@ celery==5.5.3
 redis==5.2.1
 confluent-kafka==2.10.0
 temporalio==1.10.0
+mozilla-django-oidc==5.0.2
+requests==2.34.2

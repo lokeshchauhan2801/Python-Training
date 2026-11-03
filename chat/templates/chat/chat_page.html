@@ -1041,7 +1041,9 @@
        data-base-url="/chat/"
        data-preselect="{{ preselect_session_id }}"
        data-active-company="{{ active_company.id|default:'' }}"
-       data-set-active-url="{{ set_active_company_url }}">
+       data-set-active-url="{{ set_active_company_url }}"
+       data-show-timing="{{ show_timing|yesno:'1,0' }}"
+       data-can-view-temporal="{% if request.user.is_active and request.user.is_staff %}1{% else %}0{% endif %}">
 
     <p id="chat-empty" class="hidden mb-4 text-red-600 text-sm dark:text-red-400">
       {% translate "No companies available. You cannot start a chat yet." %}
@@ -1168,6 +1170,10 @@
       const preselectId = root.dataset.preselect || "";
       const activeCompanyId = root.dataset.activeCompany || "";
       const setActiveUrl = root.dataset.setActiveUrl || "";
+      // CHAT_SHOW_TIMING: "0" hides the response-time line (still recorded).
+      const showTiming = root.dataset.showTiming !== "0";
+      // Workflow links open the staff-only /temporal/ proxy; others get 403.
+      const canViewTemporal = root.dataset.canViewTemporal === "1";
 
       const companySel = document.getElementById("chat-company");
       const emptyEl = document.getElementById("chat-empty");
@@ -1566,6 +1572,39 @@
         container.appendChild(row);
       }
 
+      // Stage order for the timing line; unknown stages follow in key order.
+      const TIMING_STAGES = ["history", "retrieval", "extraction", "router", "llm"];
+
+      function formatSeconds(ms) {
+        return (ms / 1000).toFixed(1) + "s";
+      }
+
+      function renderTiming(container, message) {
+        // Testing aid: "⏱ 3.2s · first token 0.7s · retrieval 0.4s · llm 2.6s"
+        // from metadata.timing (saved with the turn, so reloads keep it).
+        if (!showTiming) { return; }
+        const timing = (message.metadata || {}).timing;
+        if (!timing || typeof timing.total_ms !== "number") { return; }
+        const parts = ["⏱ " + formatSeconds(timing.total_ms)];
+        if (typeof timing.ttft_ms === "number") {
+          parts.push("first token " + formatSeconds(timing.ttft_ms));
+        }
+        const stages = timing.stages || {};
+        const names = TIMING_STAGES.filter(function (name) { return name in stages; })
+          .concat(Object.keys(stages).filter(function (name) {
+            return TIMING_STAGES.indexOf(name) === -1;
+          }));
+        names.forEach(function (name) {
+          if (typeof stages[name] === "number") {
+            parts.push(name + " " + formatSeconds(stages[name]));
+          }
+        });
+        const row = document.createElement("div");
+        row.className = "mt-1 text-xs text-font-subtle-light dark:text-font-subtle-dark chat-ui-meta chat-ui-timing";
+        row.textContent = parts.join(" · ");
+        container.appendChild(row);
+      }
+
       function renderRetry(bubble, message) {
         // Show a "Retry" button when a knowledge-base dispatch failed
         // (transient). metadata.retry_document_ids carries the failed doc ids.
@@ -1630,7 +1669,7 @@
         // Quick links to the Temporal workflow(s) for a knowledge-base reply.
         const meta = message.metadata || {};
         const links = meta.temporal_links;
-        if (!Array.isArray(links) || !links.length) { return; }
+        if (!canViewTemporal || !Array.isArray(links) || !links.length) { return; }
         const row = document.createElement("div");
         row.className = "mt-2 flex flex-col gap-1 chat-ui-temporal-links";
         links.forEach(function (l) {
@@ -1682,7 +1721,7 @@
             err.textContent = doc.error;
             wrap.appendChild(err);
           }
-          if (doc.temporal_url) {
+          if (canViewTemporal && doc.temporal_url) {
             const linkRow = document.createElement("div");
             linkRow.className = "mt-1";
             linkRow.appendChild(temporalLink(doc.temporal_url, "View Temporal workflow"));
@@ -2003,6 +2042,11 @@
             btn.addEventListener("click", function () { runFileAction(panel, r, action, btn); });
             line.appendChild(btn);
           });
+          if (canViewTemporal && r.temporal_url) {
+            const wf = temporalLink(r.temporal_url, "Workflow");
+            wf.classList.add("shrink-0");
+            line.appendChild(wf);
+          }
           wrap.appendChild(line);
 
           if (r.state === "failed") {
@@ -2107,6 +2151,7 @@
           renderCitations(bubble, message.citations);
           renderChart(bubble, message.chart_data);
           renderToolBadge(bubble, message);
+          renderTiming(bubble, message);
           renderRetry(bubble, message);
           renderTemporalLinks(bubble, message);
           renderLiveStatus(bubble, message);
@@ -2547,6 +2592,93 @@
           .then(function () { attachInput.value = ""; });
       });
 
+      // Live assistant bubble that a streamed reply's text is appended to.
+      // The final ``done`` payload replaces it with a normal rendered message.
+      function renderLiveBubble() {
+        const wrap = document.createElement("div");
+        wrap.className = "mb-3 flex justify-start chat-ui-msg chat-ui-msg--assistant";
+        wrap.setAttribute("data-streaming", "1");
+        const bubble = document.createElement("div");
+        bubble.className = "max-w-[80%] px-3 py-2 rounded-default text-sm border border-base-200 text-font-default-light dark:border-base-700 dark:text-font-default-dark chat-ui-bubble chat-ui-bubble--assistant";
+        const text = document.createElement("div");
+        text.className = "chat-ui-text";
+        text.style.whiteSpace = "pre-wrap";
+        bubble.appendChild(text);
+        wrap.appendChild(bubble);
+        messagesEl.appendChild(wrap);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return { wrap: wrap, text: text };
+      }
+
+      // Read a ``text/event-stream`` send reply. Each event is a
+      // ``data: <json>`` line: ``{delta}`` pieces, then ``{done, ...}`` (the
+      // same body as the JSON reply) or ``{error, status}``. Resolves to the
+      // ``{ ok, data }`` shape the JSON branch produces. ``live`` holds the
+      // live bubble (``live.el``) so the caller can remove it on failure.
+      // Pieces are only shown while ``sessionId`` is still the open chat.
+      function readSendStream(r, placeholder, live, sessionId) {
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let result = null;
+
+        function handleEvent(raw) {
+          const data = raw.split("\n")
+            .filter(function (line) { return line.indexOf("data:") === 0; })
+            .map(function (line) { return line.slice(5).replace(/^ /, ""); })
+            .join("\n");
+          if (!data) { return; }
+          let event;
+          try { event = JSON.parse(data); } catch (e) { return; }
+          if (event.delta) {
+            if (currentSessionId !== sessionId) {
+              // The user switched chats: don't stream into another one.
+              if (live.el) { removeProcessingPlaceholder(live.el.wrap); live.el = null; }
+              return;
+            }
+            if (!live.el) {
+              removeProcessingPlaceholder(placeholder);
+              live.el = renderLiveBubble();
+            }
+            // Keep following the reply only if the user is at the bottom.
+            const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+            live.el.text.textContent += event.delta;
+            if (atBottom) { messagesEl.scrollTop = messagesEl.scrollHeight; }
+          } else if (event.done) {
+            result = { ok: true, data: event };
+          } else if (event.error) {
+            result = { ok: false, data: { error: event.error } };
+          }
+        }
+
+        function pump() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) {
+              buffer += decoder.decode();
+            } else {
+              buffer += decoder.decode(chunk.value, { stream: true });
+            }
+            buffer = buffer.replace(/\r\n/g, "\n");
+            let idx = buffer.indexOf("\n\n");
+            while (idx !== -1) {
+              handleEvent(buffer.slice(0, idx));
+              buffer = buffer.slice(idx + 2);
+              idx = buffer.indexOf("\n\n");
+            }
+            if (chunk.done) {
+              if (buffer.trim()) { handleEvent(buffer); }
+              return result || { ok: false, data: { error: "Send failed." } };
+            }
+            return pump();
+          });
+        }
+
+        return pump().then(function (res) {
+          if (live.el) { removeProcessingPlaceholder(live.el.wrap); live.el = null; }
+          return res;
+        });
+      }
+
       function postMessage(sessionId, question, opts) {
         // opts.selectedIds: files checked in a picker (selected_file_ids).
         // opts.includePending: false for the picker's Process button, so the
@@ -2583,22 +2715,36 @@
           clearAttachmentsUI();
         }
         const placeholder = renderProcessingPlaceholder();
+        const live = { el: null };
 
         return fetch(sendUrlFor(sessionId), {
           method: "POST",
           headers: jsonHeaders({
             "X-CSRFToken": getCookie("csrftoken"),
-            "Content-Type": "application/x-www-form-urlencoded"
+            "Content-Type": "application/x-www-form-urlencoded",
+            // Plain-text replies stream in; other replies stay JSON.
+            "Accept": "text/event-stream, application/json"
           }),
           credentials: "same-origin",
           body: body.toString()
         })
           .then(function (r) {
+            const type = r.headers.get("Content-Type") || "";
+            if (type.indexOf("text/event-stream") !== -1) {
+              return readSendStream(r, placeholder, live, sessionId);
+            }
             return r.json().then(function (d) { return { ok: r.ok, data: d }; });
           })
           .then(function (res) {
             removeProcessingPlaceholder(placeholder);
             if (!res.ok || res.data.error) { setStatus(res.data.error || "Send failed."); return false; }
+            if (currentSessionId !== sessionId) {
+              // Saved in the chat it was sent to; it shows when that chat is
+              // reopened, not in the one now on screen.
+              setStatus("");
+              loadSessions();
+              return true;
+            }
             if (!question && res.data.user) { renderMessage(res.data.user); }
             if (res.data.selection_consumed && picker) { picker.clearChecks(); }
             renderMessage(res.data.assistant);
@@ -2608,6 +2754,7 @@
           })
           .catch(function () {
             removeProcessingPlaceholder(placeholder);
+            if (live.el) { removeProcessingPlaceholder(live.el.wrap); live.el = null; }
             setStatus("Send failed.");
             return false;
           })
