@@ -1,0 +1,28 @@
+# Local Keycloak for Django admin login (dev mode, loopback only).
+#
+#   docker compose -f docker-compose.keycloak.yml up -d
+#
+# On first start it imports the "agentic-flow" realm (client django-app,
+# groups /django-admins and /django-superusers, groups mapper, registration
+# off, verified email required). The client secret comes from
+# KEYCLOAK_CLIENT_SECRET in .env, the same variable Django reads.
+# Admin console: http://localhost:8180 (KEYCLOAK_ADMIN_USER / _PASSWORD).
+name: agentic-flow-keycloak
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "127.0.0.1:8180:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      DJANGO_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?set KEYCLOAK_CLIENT_SECRET in .env}
+    volumes:
+      - ./infrastructure/keycloak/realm-agentic-flow.json:/opt/keycloak/data/import/realm-agentic-flow.json:ro
+      - keycloak-data:/opt/keycloak/data
+
+volumes:
+  keycloak-data:
