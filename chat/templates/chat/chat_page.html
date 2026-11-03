@@ -1859,12 +1859,24 @@
           return wanted.map(function (id) { return rows[id]; }).filter(Boolean);
         }
 
+        function copyNumber(row) {
+          // 1 for the first file with this title, 2+ for later attachments.
+          let n = 0;
+          for (let i = 0; i < order.length; i++) {
+            const r = rows[order[i]];
+            if (r && r.title === row.title) { n++; }
+            if (order[i] === row.id) { break; }
+          }
+          return n || 1;
+        }
+
         return {
           reset: reset,
           subscribe: subscribe,
           upsert: upsert,
           kick: kick,
           list: list,
+          copyNumber: copyNumber,
           isLoaded: function () { return loaded; }
         };
       })();
@@ -2011,7 +2023,8 @@
 
           const name = document.createElement("span");
           name.className = "truncate chat-ui-file-name";
-          name.textContent = r.title;
+          const copy = fileStore.copyNumber(r);
+          name.textContent = copy > 1 ? r.title + " (copy " + copy + ")" : r.title;
           name.title = r.title;
           line.appendChild(name);
 
@@ -2026,7 +2039,7 @@
           const status = document.createElement("span");
           status.className = "shrink-0 chat-ui-file-status chat-ui-file-status--" + (r.state || "unknown");
           status.textContent = isPicker && r.state === "processed"
-            ? "Already processed"
+            ? "Already processed — select to reprocess"
             : (r.label || "");
           line.appendChild(status);
 

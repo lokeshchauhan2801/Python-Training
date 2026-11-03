@@ -16,6 +16,7 @@ import logging
 from http.cookies import SimpleCookie
 
 import requests
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied
@@ -48,6 +49,20 @@ SKIP_REQUEST_HEADERS = HOP_BY_HOP | {
     "x-temporal-ui-gate",
 }
 SKIP_RESPONSE_HEADERS = HOP_BY_HOP | {"content-length", "content-encoding", "set-cookie"}
+
+# Temporal UI serves its JS/CSS from _app/immutable/ under content-hashed names
+# but sends no cache headers, so the browser re-downloaded ~150 files through
+# this proxy on every page load (6-10 s). Those files never change, so the
+# browser may keep them; "private" because they sit behind the staff login.
+IMMUTABLE_PREFIX = "_app/immutable/"
+IMMUTABLE_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+# One pooled session: keep-alive connections to the gate instead of a new TCP
+# connection per request.
+_upstream = requests.Session()
+_upstream.mount(
+    "http://", HTTPAdapter(pool_connections=4, pool_maxsize=32)
+)
 
 
 def _django_cookie_names():
@@ -96,7 +111,7 @@ def temporal_ui_proxy(request, path=""):
     headers["X-Temporal-UI-Gate"] = settings.TEMPORAL_UI_PROXY_SECRET
 
     try:
-        upstream = requests.request(
+        upstream = _upstream.request(
             request.method,
             url,
             headers=headers,
@@ -124,6 +139,8 @@ def temporal_ui_proxy(request, path=""):
             # Keep the browser on Django, never on the internal address.
             value = value[len(base):] or "/"
         response[name] = value
+    if upstream.status_code == 200 and path.startswith(IMMUTABLE_PREFIX):
+        response["Cache-Control"] = IMMUTABLE_CACHE_CONTROL
 
     blocked = _django_cookie_names()
     for raw in upstream.raw.headers.getlist("Set-Cookie"):
