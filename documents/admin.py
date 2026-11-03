@@ -406,8 +406,8 @@ class DocumentAdmin(BaseModelAdmin):
     def temporal_link(self, obj):
         """Quick link to this document's workflow in the Temporal Web UI.
 
-        Only shown for temporal-backed documents; the base URL comes from
-        ``settings.TEMPORAL_UI_URL`` (default http://localhost:8081). The
+        Only shown for temporal-backed documents; the link goes through the
+        staff-only proxy at ``settings.TEMPORAL_UI_PUBLIC_PATH``. The
         ``workflow-link`` class + ``data-doc-id`` let document_controls.js
         remove the link live when a reprocess switches the backend away from
         Temporal (otherwise the stale link would linger until a page reload).

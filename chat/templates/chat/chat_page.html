@@ -1042,7 +1042,8 @@
        data-preselect="{{ preselect_session_id }}"
        data-active-company="{{ active_company.id|default:'' }}"
        data-set-active-url="{{ set_active_company_url }}"
-       data-show-timing="{{ show_timing|yesno:'1,0' }}">
+       data-show-timing="{{ show_timing|yesno:'1,0' }}"
+       data-can-view-temporal="{% if request.user.is_active and request.user.is_staff %}1{% else %}0{% endif %}">
 
     <p id="chat-empty" class="hidden mb-4 text-red-600 text-sm dark:text-red-400">
       {% translate "No companies available. You cannot start a chat yet." %}
@@ -1171,6 +1172,8 @@
       const setActiveUrl = root.dataset.setActiveUrl || "";
       // CHAT_SHOW_TIMING: "0" hides the response-time line (still recorded).
       const showTiming = root.dataset.showTiming !== "0";
+      // Workflow links open the staff-only /temporal/ proxy; others get 403.
+      const canViewTemporal = root.dataset.canViewTemporal === "1";
 
       const companySel = document.getElementById("chat-company");
       const emptyEl = document.getElementById("chat-empty");
@@ -1666,7 +1669,7 @@
         // Quick links to the Temporal workflow(s) for a knowledge-base reply.
         const meta = message.metadata || {};
         const links = meta.temporal_links;
-        if (!Array.isArray(links) || !links.length) { return; }
+        if (!canViewTemporal || !Array.isArray(links) || !links.length) { return; }
         const row = document.createElement("div");
         row.className = "mt-2 flex flex-col gap-1 chat-ui-temporal-links";
         links.forEach(function (l) {
@@ -1718,7 +1721,7 @@
             err.textContent = doc.error;
             wrap.appendChild(err);
           }
-          if (doc.temporal_url) {
+          if (canViewTemporal && doc.temporal_url) {
             const linkRow = document.createElement("div");
             linkRow.className = "mt-1";
             linkRow.appendChild(temporalLink(doc.temporal_url, "View Temporal workflow"));
@@ -2039,6 +2042,11 @@
             btn.addEventListener("click", function () { runFileAction(panel, r, action, btn); });
             line.appendChild(btn);
           });
+          if (canViewTemporal && r.temporal_url) {
+            const wf = temporalLink(r.temporal_url, "Workflow");
+            wf.classList.add("shrink-0");
+            line.appendChild(wf);
+          }
           wrap.appendChild(line);
 
           if (r.state === "failed") {

@@ -217,7 +217,19 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8081")
+# Temporal Web UI is never opened directly: Django proxies /temporal/ to it for
+# active staff only (infrastructure/temporal/ui_proxy.py). TEMPORAL_UI_URL is
+# the INTERNAL upstream (bound to 127.0.0.1); the UI runs with
+# TEMPORAL_UI_PUBLIC_PATH=/temporal so its paths match the proxied ones.
+TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8080").rstrip("/")
+TEMPORAL_UI_PUBLIC_PATH = "/temporal"
+# Shared with the temporal-ui-gate container, which refuses any request
+# without it, so :8080 cannot be opened directly. Never commit it.
+TEMPORAL_UI_PROXY_SECRET = os.getenv("TEMPORAL_UI_PROXY_SECRET", "")
+TEMPORAL_UI_PROXY_CONNECT_TIMEOUT_SECONDS = 5
+TEMPORAL_UI_PROXY_TIMEOUT_SECONDS = float(
+    os.getenv("TEMPORAL_UI_PROXY_TIMEOUT_SECONDS", "30")
+)
 
 # Scanned PDFs are rendered one page at a time at 300 DPI. These limits bound
 # OCR memory/CPU while preserving recognition quality for normal documents.
