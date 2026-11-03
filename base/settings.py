@@ -33,7 +33,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
-    "mozilla_django_oidc",
     "basics",
     "auth",
     "company",
@@ -58,56 +57,6 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-# --- Keycloak (OIDC) login -------------------------------------------------
-# Off by default: the normal Django admin login works exactly as before. When
-# on, /admin/login/ hands off to Keycloak. Users are matched ONLY by the
-# Keycloak ``sub`` (auth.OIDCIdentity), never by email; roles are synced from
-# the ``groups`` claim on every login (see auth/oidc.py).
-KEYCLOAK_LOGIN_ENABLED = _env_flag("KEYCLOAK_LOGIN_ENABLED", False)
-# Separate local-password login at /admin/local-login/ for when Keycloak is
-# down. Only for accounts NOT linked to Keycloak. Keep off in normal operation.
-BREAK_GLASS_LOGIN_ENABLED = _env_flag("BREAK_GLASS_LOGIN_ENABLED", False)
-
-KEYCLOAK_REALM_URL = os.getenv(
-    "KEYCLOAK_REALM_URL", "http://localhost:8180/realms/agentic-flow"
-).rstrip("/")
-KEYCLOAK_ADMIN_GROUP = "/django-admins"
-KEYCLOAK_SUPERUSER_GROUP = "/django-superusers"
-
-OIDC_RP_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "django-app")
-OIDC_RP_CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
-if KEYCLOAK_LOGIN_ENABLED and not OIDC_RP_CLIENT_SECRET:
-    from django.core.exceptions import ImproperlyConfigured
-
-    raise ImproperlyConfigured(
-        "KEYCLOAK_LOGIN_ENABLED is on but KEYCLOAK_CLIENT_SECRET is not set."
-    )
-OIDC_RP_SIGN_ALGO = "RS256"
-OIDC_RP_SCOPES = "openid email profile"
-OIDC_OP_AUTHORIZATION_ENDPOINT = f"{KEYCLOAK_REALM_URL}/protocol/openid-connect/auth"
-OIDC_OP_TOKEN_ENDPOINT = f"{KEYCLOAK_REALM_URL}/protocol/openid-connect/token"
-OIDC_OP_USER_ENDPOINT = f"{KEYCLOAK_REALM_URL}/protocol/openid-connect/userinfo"
-OIDC_OP_JWKS_ENDPOINT = f"{KEYCLOAK_REALM_URL}/protocol/openid-connect/certs"
-OIDC_OP_LOGOUT_ENDPOINT = f"{KEYCLOAK_REALM_URL}/protocol/openid-connect/logout"
-OIDC_OP_LOGOUT_URL_METHOD = "auth.oidc.provider_logout"
-# The id_token is kept (DB session) only as the logout hint for Keycloak.
-OIDC_STORE_ID_TOKEN = True
-# SessionRefresh re-checks the user with Keycloak every 15 minutes, so a user
-# removed from a group or disabled in Keycloak loses access within 15 minutes.
-OIDC_RENEW_ID_TOKEN_EXPIRY_SECONDS = 15 * 60
-OIDC_TIMEOUT = 10
-
-AUTHENTICATION_BACKENDS = ["django.contrib.auth.backends.ModelBackend"]
-if KEYCLOAK_LOGIN_ENABLED:
-    AUTHENTICATION_BACKENDS.insert(0, "auth.oidc.KeycloakOIDCBackend")
-    MIDDLEWARE.append("mozilla_django_oidc.middleware.SessionRefresh")
-    LOGIN_URL = "admin:login"
-    LOGIN_REDIRECT_URL = "/admin/"
-    LOGOUT_REDIRECT_URL = "/admin/"
-# Must NOT be /admin/login/: with Keycloak on that redirects straight back to
-# Keycloak, which would loop on a refused login.
-LOGIN_REDIRECT_URL_FAILURE = "/auth/login-failed/"
-
 # --- Session / cookie security ----------------------------------------------
 # Secure cookies are on by default; a plain-http local setup turns them off in
 # .env (SESSION_COOKIE_SECURE=False, CSRF_COOKIE_SECURE=False).
@@ -124,10 +73,7 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {
-        # Login, role-change and break-glass audit lines (never tokens).
-        "auth": {"handlers": ["console"], "level": "INFO"},
         "infrastructure.temporal.ui_proxy": {"handlers": ["console"], "level": "INFO"},
-        "mozilla_django_oidc": {"handlers": ["console"], "level": "WARNING"},
     },
 }
 
