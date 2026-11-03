@@ -732,3 +732,31 @@ flowchart TD
     I --> K["pick that backend in the Schedule dropdown"]
     J --> K
 ```
+
+## Admin login with Keycloak
+
+Full guide (user creation, linking, request flow, troubleshooting): [TEMPORAL_AUTH.md](TEMPORAL_AUTH.md).
+
+Django admin can sign in through Keycloak (OIDC), and the Temporal Web UI is
+only reachable through Django at `/temporal/` for active staff users.
+
+1. Start Keycloak (realm, client, groups and mapper are imported on first start):
+   `docker compose -f docker-compose.keycloak.yml up -d` → admin console http://localhost:8180
+   (`KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`).
+2. In realm `agentic-flow`, create users (email verified) and add admins to
+   `/django-admins`; superusers (2–3 people at most) also to `/django-superusers`.
+3. Link existing Django users to their Keycloak user ID (CSV `username,sub`):
+   `python manage.py link_keycloak_identities admins.csv --dry-run`, then without `--dry-run`.
+4. Set `KEYCLOAK_LOGIN_ENABLED=True` in `.env` and restart Django.
+
+| Variable | Meaning |
+|---|---|
+| `KEYCLOAK_LOGIN_ENABLED` | `True` sends `/admin/login/` to Keycloak; `False` = normal Django login |
+| `KEYCLOAK_REALM_URL` | e.g. `http://localhost:8180/realms/agentic-flow` |
+| `KEYCLOAK_CLIENT_ID` / `KEYCLOAK_CLIENT_SECRET` | confidential client `django-app`; secret only in `.env` |
+| `BREAK_GLASS_LOGIN_ENABLED` | `True` opens `/admin/local-login/` for accounts NOT linked to Keycloak |
+| `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | default `True`; set `False` only for plain-http local dev |
+| `TEMPORAL_UI_URL` | internal Temporal UI address, `http://localhost:8080` |
+
+Roles are synced from Keycloak on every login (`/django-admins` → `is_staff`,
+`/django-superusers` → `is_superuser`) and re-checked every 15 minutes.

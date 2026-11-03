@@ -3,13 +3,15 @@
 How the Temporal Web UI is protected, how Django admin login works with
 Keycloak, and how to add new users.
 
-**In short:** Temporal UI is never opened directly. It listens on
-`127.0.0.1:8080` only, and Django passes requests through to it at
-`/temporal/`, for **active staff users only**. Keycloak decides who is staff
+**In short:** Temporal UI is never opened directly. It is not published on
+the host at all; a small nginx gate (`temporal-ui-gate`) listens on
+`127.0.0.1:8080` and returns **403** unless the request carries
+`TEMPORAL_UI_PROXY_SECRET`, which only Django's proxy adds. Django passes
+requests through at `/temporal/`, for **active staff users only**. Keycloak decides who is staff
 (through groups); Django enforces it.
 
 ```
-Browser ──► Django :8000 ───────────────────────────► Temporal UI 127.0.0.1:8080 ──► Temporal server :7234
+Browser ──► Django :8000 ──► gate 127.0.0.1:8080 (secret header) ──► Temporal UI ──► Temporal server :7234
               │  /admin/login/  → auth/views.py          (served under /temporal, view only)
               │  /oidc/*        → mozilla-django-oidc
               │  /temporal/*    → infrastructure/temporal/ui_proxy.py
@@ -39,11 +41,11 @@ python manage.py runserver
 |---|---|
 | Django admin | http://localhost:8000/admin/ |
 | Temporal UI (use this) | **http://localhost:8000/temporal/** |
-| Temporal UI direct (this machine only, skips login) | http://localhost:8080/temporal/ |
+| Temporal UI direct | http://localhost:8080/temporal/ returns **403** (blocked by the gate) |
 | Keycloak admin console | http://localhost:8180 |
 
-> `http://localhost:8080/` (without `/temporal/`) keeps reloading forever.
-> That is expected: the UI only works under `/temporal/`.
+> Opening `http://localhost:8080` directly always returns 403, even when you
+> are logged in. That is expected: use `http://localhost:8000/temporal/`.
 
 After changing `.env`, **fully restart** `runserver`. The auto-reloader does
 not pick up `.env` changes.
@@ -62,7 +64,8 @@ not pick up `.env` changes.
 | `BREAK_GLASS_LOGIN_ENABLED` | `False` | `True` opens `/admin/local-login/` (emergency password login) |
 | `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | `False` locally | Default `True`. Set to `False` only for plain-http local development. |
 | `USE_X_FORWARDED_PROTO` | `True` in production | Set only when Django sits behind an HTTPS proxy that sets this header |
-| `TEMPORAL_UI_URL` | `http://localhost:8080` | Internal address of Temporal UI, used only by the proxy |
+| `TEMPORAL_UI_URL` | `http://localhost:8080` | Internal address of the Temporal UI gate, used only by the proxy |
+| `TEMPORAL_UI_PROXY_SECRET` | *(random)* | Shared by the Django proxy and the `temporal-ui-gate` container. Without it every Temporal page is 403. Never commit it. |
 | `TEMPORAL_UI_PROXY_TIMEOUT_SECONDS` | `30` | How long the proxy waits for Temporal UI |
 
 ---
@@ -256,7 +259,8 @@ Every break-glass login attempt is logged at WARNING level.
 | `auth/management/commands/link_keycloak_identities.py` | Links existing users from a CSV |
 | `auth/templates/auth/login_problem.html` | "Login failed" and "No access" pages |
 | `infrastructure/temporal/ui_proxy.py` | Staff-only proxy to Temporal UI |
-| `docker-compose.processing.yml` | Temporal UI `2.34.0` on `127.0.0.1:8080`, gRPC on `127.0.0.1:7234` |
+| `docker-compose.processing.yml` | Temporal UI `2.34.0` (no host port), gate on `127.0.0.1:8080`, gRPC on `127.0.0.1:7234` |
+| `infrastructure/temporal/ui_gate.conf.template` | nginx gate: 403 unless the secret header matches |
 | `docker-compose.keycloak.yml` | Local Keycloak on `127.0.0.1:8180` |
 | `infrastructure/keycloak/realm-agentic-flow.json` | Realm setup: client, groups, groups mapper, security settings |
 
@@ -282,8 +286,9 @@ Every break-glass login attempt is logged at WARNING level.
 
 | Problem | Cause / fix |
 |---|---|
-| `/temporal/` shows a blank white page | Temporal UI 2.26.x breaks under `/temporal` (its Content Security Policy blocks its own startup script). Use `temporalio/ui:2.34.0` or newer. Hard-refresh with Ctrl+Shift+R. |
-| `localhost:8080` keeps loading forever | Wrong address. Use `localhost:8000/temporal/`. |
+| `/temporal/` shows a blank white page | Temporal UI older than 2.27 breaks under `/temporal` (its Content Security Policy blocks its own startup script). Use `temporalio/ui:2.34.0` or newer. Hard-refresh with Ctrl+Shift+R. |
+| `localhost:8080` shows 403 | Expected. Use `localhost:8000/temporal/`. |
+| `localhost:8000/temporal/` shows 403 for a staff user | `TEMPORAL_UI_PROXY_SECRET` missing or different between `.env` and the gate. Fully restart `runserver` and `docker compose -f docker-compose.processing.yml up -d`. |
 | "Login failed" | Email not verified, or the email belongs to an unlinked Django account (section 5). The Django console log shows the reason. |
 | Login does nothing / admin forms fail on http | `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` are `True` on plain http. Set them to `False` locally. |
 | Logged in, but `/admin/` says "no access" | The user is not in `/django-admins`. Add them, then log out and back in. |
