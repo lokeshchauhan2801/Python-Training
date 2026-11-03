@@ -156,6 +156,8 @@
         if (staleLink) {
           staleLink.remove();
         }
+      } else if (doc.temporal_url && window.ensureDocumentWorkflowLink) {
+        window.ensureDocumentWorkflowLink(doc.id, doc.temporal_url);
       }
     }
   }
