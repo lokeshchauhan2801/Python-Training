@@ -3,7 +3,7 @@
 The app only READS prompts from Langfuse (handlers call get_prompt(name) and
 fall back to a built-in string when the prompt is absent). So a fresh Langfuse
 project shows an EMPTY Prompts page — that is expected, not a bug. This command
-seeds the four built-in tool prompts into Langfuse (labelled "production", which
+seeds the built-in router and tool prompts into Langfuse (labelled "production", which
 is the version get_prompt serves) so they appear in the portal and can then be
 edited there. Re-running creates a new version each time (Langfuse versions
 prompts), so it is safe to run repeatedly; it never deletes a user's edits.
@@ -18,8 +18,11 @@ from django.core.management.base import BaseCommand
 
 from basics.langfuse import get_langfuse_client
 from chat.services import _SUMMARY_SYSTEM_PROMPT
+from chat.services.langgraph_service import _FALLBACK_ROUTER_PROMPT
 
 _DEFAULT_PROMPTS = {
+    # Without it every routed Agent turn pays a failed Langfuse fetch.
+    "agent_router": _FALLBACK_ROUTER_PROMPT,
     "tool_chat_summarise": _SUMMARY_SYSTEM_PROMPT,
     "tool_general_assistant": (
         "You are a helpful general assistant. Answer the user's question "

@@ -287,7 +287,7 @@ venv/bin/python manage.py kafka_worker
 # Temporal: start the server + its Postgres + Web UI, then the worker
 sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
 venv/bin/python manage.py temporal_worker
-# Temporal Web UI: http://localhost:8081   (server :7234, Kafka :9093)
+# Temporal Web UI: http://localhost:8000/temporal/ (staff only, via Django; direct 127.0.0.1:8080 is blocked by a gate)   (server :7234, Kafka :9093)
 
 # Stop the workers and this project's containers (preserves data volumes)
 ./scripts/stop_processing.sh
@@ -299,7 +299,7 @@ starts the workers. It writes worker logs and PID files under
 
 `docker-compose.processing.yml` provides a project-scoped, single-broker KRaft
 Kafka (`:9093`), Temporal auto-setup (`:7234`) with its own Postgres, and the
-Temporal Web UI (`:8081`). These dedicated ports and generated container names let
+Temporal Web UI (`127.0.0.1:8080`, opened through Django at `/temporal/`). These dedicated ports and generated container names let
 this stack run alongside other Kafka/Temporal containers. See `START_PROCESSING.txt`
 for the full local walkthrough.
 
@@ -708,7 +708,7 @@ DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py temporal_worker
 #   or simply:  python manage.py temporal_worker
 ```
 
-- Temporal Web UI: http://localhost:8081/
+- Temporal Web UI: http://localhost:8000/temporal/ (staff only; proxied by Django through the gate on 127.0.0.1:8080, which refuses direct access)
 
 #### Shutting down the brokers
 
@@ -728,7 +728,35 @@ flowchart TD
     F --> G{need Kafka/Temporal?}
     G -->|No| H["use Schedule → Process now (inline, no infra)"]
     G -->|Kafka| I["docker compose up -d kafka → manage.py kafka_worker"]
-    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8081"]
+    G -->|Temporal| J["docker compose up -d temporal... → manage.py temporal_worker\nUI http://localhost:8000/temporal/"]
     I --> K["pick that backend in the Schedule dropdown"]
     J --> K
 ```
+
+## Admin login with Keycloak
+
+Full guide (user creation, linking, request flow, troubleshooting): [TEMPORAL_AUTH.md](TEMPORAL_AUTH.md).
+
+Django admin can sign in through Keycloak (OIDC), and the Temporal Web UI is
+only reachable through Django at `/temporal/` for active staff users.
+
+1. Start Keycloak (realm, client, groups and mapper are imported on first start):
+   `docker compose -f docker-compose.keycloak.yml up -d` → admin console http://localhost:8180
+   (`KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`).
+2. In realm `agentic-flow`, create users (email verified) and add admins to
+   `/django-admins`; superusers (2–3 people at most) also to `/django-superusers`.
+3. Link existing Django users to their Keycloak user ID (CSV `username,sub`):
+   `python manage.py link_keycloak_identities admins.csv --dry-run`, then without `--dry-run`.
+4. Set `KEYCLOAK_LOGIN_ENABLED=True` in `.env` and restart Django.
+
+| Variable | Meaning |
+|---|---|
+| `KEYCLOAK_LOGIN_ENABLED` | `True` sends `/admin/login/` to Keycloak; `False` = normal Django login |
+| `KEYCLOAK_REALM_URL` | e.g. `http://localhost:8180/realms/agentic-flow` |
+| `KEYCLOAK_CLIENT_ID` / `KEYCLOAK_CLIENT_SECRET` | confidential client `django-app`; secret only in `.env` |
+| `BREAK_GLASS_LOGIN_ENABLED` | `True` opens `/admin/local-login/` for accounts NOT linked to Keycloak |
+| `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | default `True`; set `False` only for plain-http local dev |
+| `TEMPORAL_UI_URL` | internal Temporal UI address, `http://localhost:8080` |
+
+Roles are synced from Keycloak on every login (`/django-admins` → `is_staff`,
+`/django-superusers` → `is_superuser`) and re-checked every 15 minutes.

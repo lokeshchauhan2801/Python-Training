@@ -37,6 +37,32 @@ class User(BaseModel, SoftDeleteModel, AbstractUser):
         return self.email
 
 
+class OIDCIdentity(models.Model):
+    """Links a Django user to exactly one Keycloak account by its ``sub``.
+
+    Keycloak logins are matched ONLY through this table, never by email, so a
+    Keycloak account cannot take over a local user that merely shares an email.
+    Rows are created on first Keycloak login (new users) or by the
+    ``link_keycloak_identities`` command (existing users).
+    """
+
+    user = models.OneToOneField(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="oidc_identity",
+    )
+    sub = models.CharField(max_length=255, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "accounts_oidc_identity"
+        verbose_name = "Keycloak identity"
+        verbose_name_plural = "Keycloak identities"
+
+    def __str__(self) -> str:
+        return f"{self.user_id} <- {self.sub}"
+
+
 class CompanyMembership(BaseModel, SoftDeleteModel):
     """A user's membership in a company, with a role.
 

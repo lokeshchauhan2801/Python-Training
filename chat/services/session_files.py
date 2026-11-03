@@ -30,6 +30,7 @@ from django.utils.text import get_valid_filename
 
 from basics.ulid import new_ulid
 from chat.models import ConversationSession
+from chat.services import kb
 from documents import controls
 from documents.models import Document
 from documents.services import SUPPORTED_FILE_TYPES
@@ -528,6 +529,12 @@ def file_row(session_file: SessionFile) -> dict:
         "actions": actions,
         "terminal": state not in _IN_FLIGHT,
         "document_id": session_file.document_id,
+        # Staff-only proxy link; the page shows it only to staff users.
+        "temporal_url": (
+            kb.temporal_ui_url(kb.workflow_id_for(document.pk))
+            if document is not None and document.processing_backend == "temporal"
+            else ""
+        ),
     }
 
 
