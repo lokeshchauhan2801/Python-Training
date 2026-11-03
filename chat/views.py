@@ -1,11 +1,13 @@
+import contextvars
 import json
 import logging
 from functools import partial
 
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.http import Http404, JsonResponse
+from django.http import Http404, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods
 
@@ -324,6 +326,7 @@ def chat_home(request):
         **admin.site.each_context(request),
         "title": "New Chat",
         "preselect_session_id": "",
+        "show_timing": settings.CHAT_SHOW_TIMING,
     }
     return render(request, "chat/chat_page.html", context)
 
@@ -352,6 +355,7 @@ def chat_session(request, session_id):
         **admin.site.each_context(request),
         "title": "New Chat",
         "preselect_session_id": preselect,
+        "show_timing": settings.CHAT_SHOW_TIMING,
     }
     return render(request, "chat/chat_page.html", context)
 
@@ -548,27 +552,133 @@ def _attachment_titles(session, attachment_ids):
     return ", ".join(f"“{t}”" for t in titles[:-1]) + f" and “{titles[-1]}”"
 
 
-def _turn_response(request, session, turn, selection_consumed=False):
-    """Serialize a stored turn as the ``send`` shape.
+def _send_payload(session, turn, selection_consumed=False):
+    """The ``send`` reply body for a stored turn (JSON and the SSE ``done``).
 
     ``{user, assistant, session, selection_consumed}``; ``selection_consumed``
     tells the page to clear the picker's checkboxes.
     """
     session.refresh_from_db(fields=["title"])
     pair = _turn_payload(turn)
-    return JsonResponse(
-        {
-            "user": pair["user"],
-            "assistant": pair["assistant"],
-            "session": {
-                "id": str(session.session_id),
-                "title": session.title,
-                "selected_agent_id": _selected_agent_id(session),
-            },
-            "selection_consumed": bool(selection_consumed),
+    return {
+        "user": pair["user"],
+        "assistant": pair["assistant"],
+        "session": {
+            "id": str(session.session_id),
+            "title": session.title,
+            "selected_agent_id": _selected_agent_id(session),
         },
-        status=201,
+        "selection_consumed": bool(selection_consumed),
+    }
+
+
+def _turn_response(request, session, turn, selection_consumed=False):
+    """Serialize a stored turn as the ``send`` shape (see ``_send_payload``)."""
+    return JsonResponse(
+        _send_payload(session, turn, selection_consumed), status=201
     )
+
+
+# Exceptions a chat turn may raise, mapped to the reply ``send`` gives.
+_SEND_ERRORS = (
+    LLMConfigurationError,
+    LLMBackendError,
+    ChatProviderError,
+    ChatRetrievalError,
+    ValueError,
+)
+
+
+def _send_error(exc):
+    """``(message, status)`` for one of ``_SEND_ERRORS`` (JSON and SSE alike)."""
+    if isinstance(exc, LLMConfigurationError):
+        return "LLM not configured", 503
+    if isinstance(exc, (LLMBackendError, ChatProviderError)):
+        return "LLM request failed", 502
+    if isinstance(exc, ChatRetrievalError):
+        return "Document retrieval failed", 502
+    return "This chat is not available.", 400
+
+
+def _sse(data):
+    return f"data: {json.dumps(data)}\n\n"
+
+
+def _send_events(session, start_turn):
+    """SSE body for a streamed ``send``.
+
+    ``start_turn()`` returns a service ``stream_message`` generator. Emits
+    ``{"delta": ...}`` per piece, then ``{"done": true, ...}`` with the JSON
+    reply body, or ``{"error": ..., "status": ...}`` mapped like the JSON
+    branch. The body runs after the view (and its middleware) returned, so
+    each step runs in a copy of the request's context (current user).
+    """
+    context = contextvars.copy_context()
+
+    def _lines():
+        events = None
+        try:
+            events = start_turn()
+            for kind, value in events:
+                if kind == "delta":
+                    yield _sse({"delta": value})
+                else:
+                    yield _sse({"done": True, **_send_payload(session, value)})
+        except _SEND_ERRORS as exc:
+            message, status = _send_error(exc)
+            yield _sse({"error": message, "status": status})
+        except Exception:
+            # Headers are sent; a 500 can't be returned any more.
+            logger.exception("Streamed chat turn failed")
+            yield _sse({"error": "Server error", "status": 500})
+        finally:
+            # On a client disconnect, close the service generator HERE (inside
+            # the request context) so it finishes and persists the turn,
+            # instead of leaving it to garbage collection.
+            if events is not None:
+                events.close()
+
+    lines = _lines()
+
+    def _in_context():
+        try:
+            while True:
+                try:
+                    line = context.run(next, lines)
+                except StopIteration:
+                    return
+                yield line
+        finally:
+            context.run(lines.close)
+
+    return _in_context()
+
+
+def _async_events(lines):
+    """Async wrapper of a sync SSE body, for ASGI.
+
+    Django's ASGI handler buffers a sync streaming body in full (it collects
+    it with ``sync_to_async(list)``), so nothing would stream. Each step runs
+    in the request's thread-sensitive worker instead, so the DB connection
+    and the body's own context handling stay as under WSGI; the sync body is
+    closed (persisting the turn) on a client disconnect too.
+    """
+    from asgiref.sync import sync_to_async
+
+    end = object()
+    step = sync_to_async(lambda: next(lines, end), thread_sensitive=True)
+
+    async def _body():
+        try:
+            while True:
+                line = await step()
+                if line is end:
+                    return
+                yield line
+        finally:
+            await sync_to_async(lines.close, thread_sensitive=True)()
+
+    return _body()
 
 
 def _reply_empty_attachment(request, session, attachment_ids, *, selection_metadata=None):
@@ -762,6 +872,10 @@ def _policy_turn(request, session, question, attachment_ids, *, agent, decision)
 @require_http_methods(["POST"])
 def send(request, session_id):
     """Run the RAG pipeline for one message; return the user+assistant pair."""
+    from chat.services.timing import TurnTimer
+
+    # Started at view entry so the saved total covers the whole request.
+    timing = TurnTimer()
     session = _resolve_session(request, session_id)
 
     question = request.POST.get("question")
@@ -890,13 +1004,16 @@ def send(request, session_id):
         if reply is not None:
             return reply
 
-    try:
+    def _run_turn(stream):
+        """Run the turn (``process_message``), or start ``stream_message``."""
         if run_pipeline:
-            turn = _orchestrator_for(
+            service = _orchestrator_for(
                 session.company,
                 selected_agent=selected_agent,
                 llm_client=llm_client,
-            ).process_message(
+            )
+            run = service.stream_message if stream else service.process_message
+            return run(
                 user=chat_user,
                 message_text=question,
                 conversation=session,
@@ -904,44 +1021,42 @@ def send(request, session_id):
                 attachment_ids=attachment_ids or None,
                 model_name=effective_model,
                 selected_entry_ids=pipeline_entry_ids,
+                timing=timing,
             )
-        else:
-            turn = _rag_service(llm_client).process_message(
-                user=chat_user,
-                message_text=question,
-                conversation=session,
-                company=session.company,
-                attachment_ids=attachment_ids or None,
-                model_name=effective_model,
-                metadata=selection_metadata,
-            )
-    except LLMConfigurationError:
-        return JsonResponse({"error": "LLM not configured"}, status=503)
-    except (LLMBackendError, ChatProviderError):
-        return JsonResponse({"error": "LLM request failed"}, status=502)
-    except ChatRetrievalError:
-        return JsonResponse({"error": "Document retrieval failed"}, status=502)
-    except ValueError:
+        service = _rag_service(llm_client)
+        run = service.stream_message if stream else service.process_message
+        return run(
+            user=chat_user,
+            message_text=question,
+            conversation=session,
+            company=session.company,
+            attachment_ids=attachment_ids or None,
+            model_name=effective_model,
+            metadata=selection_metadata,
+            timing=timing,
+        )
 
+    # The page asks for SSE; any other client keeps the JSON reply.
+    if "text/event-stream" in request.headers.get("Accept", ""):
+        from django.core.handlers.asgi import ASGIRequest
 
-        return JsonResponse({"error": "This chat is not available."}, status=400)
+        events = _send_events(session, partial(_run_turn, True))
+        if isinstance(request, ASGIRequest):
+            events = _async_events(events)
+        response = StreamingHttpResponse(
+            events, content_type="text/event-stream"
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
-    session.refresh_from_db(fields=["title"])
+    try:
+        turn = _run_turn(False)
+    except _SEND_ERRORS as exc:
+        message, status = _send_error(exc)
+        return JsonResponse({"error": message}, status=status)
 
-    pair = _turn_payload(turn)
-    return JsonResponse(
-        {
-            "user": pair["user"],
-            "assistant": pair["assistant"],
-            "session": {
-                "id": str(session.session_id),
-                "title": session.title,
-                "selected_agent_id": _selected_agent_id(session),
-            },
-            "selection_consumed": False,
-        },
-        status=201,
-    )
+    return JsonResponse(_send_payload(session, turn), status=201)
 
 
 @login_required

@@ -93,9 +93,24 @@ def available_slugs() -> set[str]:
 # Shared helpers
 # --------------------------------------------------------------------------- #
 def _history_messages(conversation, message_text):
-    """Build provider-neutral chat messages from prior turns + this message."""
+    """Build provider-neutral chat messages from prior turns + this message.
+
+    The last ``CHAT_RECENT_TURNS`` turns are sent verbatim. Older turns are
+    condensed (``ChatService._conversation_digest``) into ONE leading system
+    message. Callers insert their own system prompt at index 0, so the order
+    is: tool/identity system prompt, then the digest note, then the recent
+    turns and this message.
+    """
+    from chat.services.chat_service import ChatService
+
+    older, recent = ChatService._split_turns(
+        list(conversation.turns.order_by("created_at"))
+    )
     messages = []
-    for turn in conversation.turns.order_by("created_at"):
+    digest = ChatService._conversation_digest(older)
+    if digest:
+        messages.append({"role": "system", "content": digest})
+    for turn in recent:
         messages.append({"role": "user", "content": turn.question})
         if turn.response:
             messages.append({"role": "assistant", "content": turn.response})
@@ -429,25 +444,27 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
                 tool_used="document_search",
             )
 
-    chunks = service._find_relevant_chunks(
+    # Library retrieval and chat-file text run at the same time. Chat
+    # attachments are NOT embedded; their text is read directly and folded
+    # into the prompt. Without this the document_search tool answered "no
+    # content" for an attached file even though its text was available.
+    chunks, attachment_sections = service._prepare_context(
         ctx.user,
         ctx.message_text,
         conversation=ctx.conversation,
         company=ctx.company,
-    )
-    # Chat attachments are NOT embedded; their text is read directly and folded
-    # into the prompt. Without this the document_search tool answered "no
-    # content" for an attached file even though its text was available.
-    attachment_sections = service._chat_attachment_texts(
-        ctx.conversation,
         attachment_ids=attachment_ids or None,
-        question=ctx.message_text,
+        skip_chunks=False,
     )
+    # Structured output (the chart field) only when the message may want a
+    # chart; a plain answer is a plain completion, which can stream.
+    structured = service._wants_structured(ctx.message_text)
     prompt, citations = service._build_prompt(
         ctx.history_text,
         ctx.message_text,
         chunks,
         attachment_sections=attachment_sections,
+        structured=structured,
     )
 
     pre = _with_identity(
@@ -455,9 +472,14 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
         ctx.llm,
     )
     prompt = f"{pre.strip()}\n\n{prompt}"
-    completion = ctx.llm.generate_structured(prompt, ChatCompletion)
-    chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
-    content = completion.response.strip()
+    chart_data = None
+    if structured:
+        completion = ctx.llm.generate_structured(prompt, ChatCompletion)
+        if completion.chart:
+            chart_data = completion.chart.model_dump(mode="json")
+        content = completion.response.strip()
+    else:
+        content = ctx.llm.complete([{"role": "user", "content": prompt}]).strip()
     # With a chart, keep the text to a short caption (data is in the chart)
     # unless the user explicitly asked for the numbers/table too.
     if chart_data is not None:
@@ -478,7 +500,9 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
 
     service = ChatService()
     turns = list(ctx.conversation.turns.order_by("created_at"))
-    conversation_context = service._build_conversation_context(turns)
+    conversation_context = service._build_conversation_context(
+        turns, recent_limit=ChatService._SUMMARY_RECENT_TURNS
+    )
     # In a multi-step pipeline the summary should also cover prior-step output.
     conversation_context = _with_pipeline_context(conversation_context, ctx)
 
