@@ -199,6 +199,19 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
         return _file_chart_reply(ctx, target, tool_slug=tool_slug)
 
     service = ChatService()
+    # A knowledge-base dataset named in the request is charted from its rows,
+    # never from general knowledge.
+    if ChatService._named_library_csvs(ctx.conversation, ctx.message_text):
+        local = service._build_csv_distribution_chart(
+            ctx.conversation, ctx.message_text
+        )
+        if local is not None:
+            response_text, chart = local
+            return ToolResult(
+                content=response_text,
+                chart_data=chart.model_dump(mode="json"),
+                tool_used=tool_slug,
+            )
     prompt, _ = service._build_prompt(
         ctx.history_text,
         ctx.message_text,
@@ -456,15 +469,23 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
         attachment_ids=attachment_ids or None,
         skip_chunks=False,
     )
+    # A knowledge-base CSV named in the question comes in as its rows, so row
+    # counts and "top N rows" are read from the data, not from a few chunks.
+    attachment_sections = list(attachment_sections or []) + service.csv_sections(
+        ctx.conversation, ctx.message_text
+    )
     # Structured output (the chart field) only when the message may want a
     # chart; a plain answer is a plain completion, which can stream.
     structured = service._wants_structured(ctx.message_text)
+    from chat.services.kb import knowledge_base_overview
+
     prompt, citations = service._build_prompt(
         ctx.history_text,
         ctx.message_text,
         chunks,
         attachment_sections=attachment_sections,
         structured=structured,
+        kb_overview=knowledge_base_overview(company=ctx.company),
     )
 
     pre = _with_identity(
