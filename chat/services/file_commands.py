@@ -355,7 +355,7 @@ def _company_status(session, message) -> CommandReply:
     return CommandReply(content, {"live_status_document_ids": track} if track else {})
 
 
-def _status_line(f) -> str:
+def _status_text(f) -> str:
     state = f.state
     doc = f.document
     if state == "not_started":
@@ -383,11 +383,45 @@ def _status_line(f) -> str:
         text = "completed"
     else:
         text = "removed from Documents"
-    return f"- {f.title}: {text}"
+    return text
+
+
+def _display_titles(files) -> dict:
+    """Entry id -> title, with “(copy N)” on repeats of the same title."""
+    seen = {}
+    titles = {}
+    for f in files:
+        seen[f.title] = seen.get(f.title, 0) + 1
+        n = seen[f.title]
+        titles[f.id] = f"{f.title} (copy {n})" if n > 1 else f.title
+    return titles
+
+
+def _status_summary(targets) -> list:
+    """A direct answer first; only files that aren't completed get a line.
+
+    The tracker panel under the reply shows every row, so the text does not
+    repeat the completed ones.
+    """
+    total = len(targets)
+    done = sum(1 for f in targets if f.state == "processed")
+    noun = "file" if total == 1 else "files"
+    if done == total:
+        if total == 1:
+            return [f"{_q(targets[0].title)} is processed."]
+        return [f"All {total} {noun} in this chat are processed."]
+    titles = _display_titles(targets)
+    lines = [f"{done} of {total} {noun} are processed. Not processed yet:"]
+    lines += [
+        f"- {titles[f.id]}: {_status_text(f)}"
+        for f in targets
+        if f.state != "processed"
+    ]
+    return lines
 
 
 def _status_reply(targets, lines, entry_ids) -> CommandReply:
-    body = [STATUS_HEADER, *(_status_line(f) for f in targets)] if targets else []
+    body = _status_summary(targets) if targets else []
     content = "\n".join([*lines, *body]) if (lines or body) else STATUS_HEADER
     return CommandReply(content, {"file_panel": _panel("tracker", entry_ids)})
 
