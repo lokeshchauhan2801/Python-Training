@@ -49,6 +49,9 @@ class ToolContext:
     # Composer picker selection (already validated SessionFile entry ULIDs) for
     # an ACTION_PROCESS request; empty for every other intent.
     selected_entry_ids: list = field(default_factory=list)
+    # A planned sub-task that builds on earlier tasks' output (in
+    # ``pipeline_context``), e.g. "make a pie chart of those statuses".
+    uses_prior_results: bool = False
 
 
 @dataclass
@@ -192,6 +195,10 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     """
     from chat.services.chat_service import ChatCompletion, ChatService
 
+    # A planned sub-task charting an earlier task's answer uses that answer.
+    if ctx.uses_prior_results and (ctx.pipeline_context or "").strip():
+        return _prior_results_chart_reply(ctx, tool_slug)
+
     # A chat file the request targets (D7) is charted from that file, even
     # when the router picked a general-knowledge tool (F.4).
     target = ChatService._chart_target(ctx.conversation, ctx.message_text)
@@ -256,6 +263,55 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
             "Here is the chart you requested."
             if chart_data is not None
             else "I could not produce a chart for that request."
+        )
+    return ToolResult(
+        content=content,
+        chart_data=chart_data,
+        tool_used=tool_slug,
+        llm_generated=True,
+    )
+
+
+def _prior_results_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
+    """Chart the figures found in earlier tasks' output (``pipeline_context``).
+
+    Used for a planned sub-task such as "make a pie chart of the document
+    statuses" after a status task: the data is in the previous answer, not in
+    a file or the model's general knowledge.
+    """
+    from chat.services.chat_service import ChatCompletion, ChatService
+
+    service = ChatService()
+    prompt, _ = service._build_prompt(
+        ctx.history_text,
+        ctx.message_text,
+        chunks=[],
+        has_file_context=False,
+        attachment_sections=[],
+    )
+    pre = _with_identity(
+        _with_pipeline_context(_system_prompt(ctx, "tool_general_assistant"), ctx),
+        ctx.llm,
+    )
+    prompt = (
+        "Important: build the chart ONLY from the data in the '[Pipeline "
+        "context from previous steps]' block (the answers of the earlier tasks "
+        "in this request). Count or read the values from it exactly (e.g. how "
+        "many documents are in each status); never invent values. If that "
+        "block has no data that can be charted, set chart to null and say "
+        "so.\n\n"
+        f"{pre.strip()}\n\n{prompt}"
+    )
+    completion = ctx.llm.generate_structured(prompt, ChatCompletion)
+    chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
+    content = ChatService._strip_chart_json_blocks(completion.response).strip()
+    if chart_data is not None:
+        content = _chart_caption_only(content, ctx.message_text)
+    if not content:
+        content = (
+            "Here is the chart you requested."
+            if chart_data is not None
+            else "I could not produce a chart from the earlier results."
         )
     return ToolResult(
         content=content,
@@ -436,6 +492,9 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     # the file's real values by the local builder, not the LLM. This is the
     # reliable path for "create a pie chart" on a CSV like county_uk.csv.
     if service._is_chart_request(ctx.message_text):
+        # A planned sub-task charting an earlier task's answer uses that answer.
+        if ctx.uses_prior_results and (ctx.pipeline_context or "").strip():
+            return _prior_results_chart_reply(ctx, "document_search")
         # A chart request with a D7 file target charts only that file.
         target = ChatService._chart_target(ctx.conversation, ctx.message_text)
         if target is not None and target.kind == "file":

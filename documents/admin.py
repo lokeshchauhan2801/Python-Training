@@ -412,7 +412,7 @@ class DocumentAdmin(BaseModelAdmin):
         remove the link live when a reprocess switches the backend away from
         Temporal (otherwise the stale link would linger until a page reload).
         """
-        from chat.services.kb import temporal_ui_url, workflow_id_for
+        from chat.services.kb import temporal_sso_ui_url as temporal_ui_url, workflow_id_for
 
         if obj.processing_backend != "temporal":
             return "—"
@@ -608,7 +608,7 @@ class DocumentAdmin(BaseModelAdmin):
 
         if request.method != "GET":
             return JsonResponse({"detail": "Method not allowed."}, status=405)
-        from chat.services.kb import temporal_ui_url, workflow_id_for
+        from chat.services.kb import temporal_sso_ui_url as temporal_ui_url, workflow_id_for
 
         since = timezone.now() - timezone.timedelta(
             seconds=_STATUS_POLL_WINDOW_SECONDS
@@ -694,7 +694,7 @@ class DocumentAdmin(BaseModelAdmin):
                 }
             )
 
-        from chat.services.kb import temporal_ui_url
+        from chat.services.kb import temporal_sso_ui_url as temporal_ui_url
 
         workflow_id = f"doc-{document.pk}"
         backend = document.processing_backend or ""
@@ -830,7 +830,7 @@ class DocumentAdmin(BaseModelAdmin):
         _job_id, resolved = enqueue_document_processing(
             str(document.pk), backend=backend
         )
-        from chat.services.kb import temporal_ui_url, workflow_id_for
+        from chat.services.kb import temporal_sso_ui_url as temporal_ui_url, workflow_id_for
 
         return JsonResponse(
             {
@@ -878,7 +878,7 @@ class DocumentAdmin(BaseModelAdmin):
                 status=400,
             )
         enqueue_document_processing(str(document.pk), backend="temporal")
-        from chat.services.kb import temporal_ui_url, workflow_id_for
+        from chat.services.kb import temporal_sso_ui_url as temporal_ui_url, workflow_id_for
 
         return JsonResponse(
             {
