@@ -112,6 +112,7 @@ class AgentSerializer(
             "id",
             "slug",
             "name",
+            "description",
             "order",
             "company",
             "created_at",
