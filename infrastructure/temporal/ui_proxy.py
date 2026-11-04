@@ -1,11 +1,13 @@
 """Reverse proxy for the Temporal Web UI at /temporal/ — active staff only.
 
 Temporal UI has no auth of its own and no host port; the only host entry is
-the nginx gate on 127.0.0.1:8080 (TEMPORAL_UI_URL), which returns 403 unless
+the nginx gate on 127.0.0.1:8081 (TEMPORAL_UI_URL), which returns 403 unless
 the request carries TEMPORAL_UI_PROXY_SECRET. This view is the only caller
 that adds it, and only after the login + staff check, so it is the only way
-in. The UI runs with TEMPORAL_UI_PUBLIC_PATH=/temporal, so the path is
-forwarded unchanged. Django's own session/CSRF cookies, any Authorization
+into this UI instance. Chat workflow links use it; the documents admin links
+to a separate Keycloak-protected UI instead (temporal-ui-sso, 127.0.0.1:8080,
+TEMPORAL_UI_SSO_URL). The UI runs with TEMPORAL_UI_PUBLIC_PATH=/temporal, so
+the path is forwarded unchanged. Django's own session/CSRF cookies, any Authorization
 header and any browser-sent gate header are stripped before forwarding; every
 Set-Cookie from Temporal UI is passed back. csrf_exempt applies to this view
 only: Temporal UI enforces its own CSRF check on the forwarded requests.

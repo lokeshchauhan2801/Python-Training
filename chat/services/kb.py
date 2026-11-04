@@ -85,6 +85,21 @@ def temporal_ui_url(workflow_id: str) -> str:
     return f"{base}/namespaces/default/workflows/{workflow_id}"
 
 
+def temporal_sso_ui_url(workflow_id: str) -> str:
+    """Deep link to a workflow in the Keycloak-protected Temporal UI.
+
+    An absolute link to ``settings.TEMPORAL_UI_SSO_URL`` (temporal-ui-sso,
+    which asks for a Keycloak login itself). Used by the documents admin;
+    chat keeps ``temporal_ui_url`` (the staff-only proxy).
+    """
+    from django.conf import settings
+
+    base = (getattr(settings, "TEMPORAL_UI_SSO_URL", "") or "").rstrip("/")
+    if not base:
+        return ""
+    return f"{base}/namespaces/default/workflows/{workflow_id}"
+
+
 def retry_document_processing(*, document_id, company, actor) -> dict:
     """Back the legacy chat Retry button (``<sid>/reprocess/``).
 

@@ -79,18 +79,59 @@ services:
 
   temporal-ui-gate:
     # Loopback only. Returns 403 unless the request carries the secret that
-    # only Django's proxy sends, so opening :8080 directly does not work.
+    # only Django's proxy sends, so opening :8081 directly does not work.
+    # Used by chat workflow links (http://localhost:8000/temporal/).
     image: nginx:1.27-alpine
     restart: unless-stopped
     depends_on:
       - temporal-ui
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8080"
     environment:
       TEMPORAL_UI_PROXY_SECRET: ${TEMPORAL_UI_PROXY_SECRET:?set TEMPORAL_UI_PROXY_SECRET in .env}
     volumes:
       - ./infrastructure/temporal/ui_gate.conf.template:/etc/nginx/templates/default.conf.template:ro
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    # Listens on 8180 inside Docker too, so http://keycloak:8180 is the same
+    # address for the browser (via "127.0.0.1 keycloak" in /etc/hosts) and for
+    # temporal-ui-sso. Admin console: http://keycloak:8180.
+    ports:
+      - "127.0.0.1:8180:8180"
+    environment:
+      KC_HTTP_PORT: 8180
+      KC_HOSTNAME: http://keycloak:8180
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      TEMPORAL_UI_CLIENT_SECRET: ${TEMPORAL_UI_CLIENT_SECRET:?set TEMPORAL_UI_CLIENT_SECRET in .env}
+    volumes:
+      - ./infrastructure/keycloak/realm-agentic-flow.json:/opt/keycloak/data/import/realm-agentic-flow.json:ro
+      - keycloak-data:/opt/keycloak/data
+
+  temporal-ui-sso:
+    # Opened directly by the browser; Temporal UI's own OIDC login (Keycloak).
+    # Used by documents admin workflow links. Chat keeps the proxy + gate.
+    image: temporalio/ui:2.34.0
+    restart: unless-stopped
+    depends_on:
+      - temporal
+      - keycloak
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_AUTH_ENABLED: "true"
+      TEMPORAL_AUTH_PROVIDER_URL: http://keycloak:8180/realms/agentic-flow
+      TEMPORAL_AUTH_CLIENT_ID: temporal-ui
+      TEMPORAL_AUTH_CLIENT_SECRET: ${TEMPORAL_UI_CLIENT_SECRET:?set TEMPORAL_UI_CLIENT_SECRET in .env}
+      TEMPORAL_AUTH_CALLBACK_URL: http://localhost:8080/auth/sso/callback
+      TEMPORAL_AUTH_SCOPES: openid,profile,email
+      TEMPORAL_DISABLE_WRITE_ACTIONS: "true"
+
 volumes:
   kafka-data:
   temporal-pg-data:
+  keycloak-data:
