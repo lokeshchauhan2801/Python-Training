@@ -10,13 +10,58 @@ shared actor-stamping ``save_model``.
 MRO: AuditAdminMixin -> SoftDeleteAdminMixin -> UnfoldModelAdmin -> DjangoUserAdmin
 """
 
+from django import forms
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.contrib.auth.forms import AdminUserCreationForm, UserChangeForm
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 
 from basics.admin import AuditAdminMixin, SoftDeleteAdminMixin
 
 from .models import CompanyMembership, User
+
+
+class UniqueAcrossDeletedMixin:
+    """Check username/email uniqueness against soft-deleted users too.
+
+    Django's checks use ``User.objects`` (the default manager), which hides
+    soft-deleted rows, so a deleted user's username/email passes validation and
+    then hits the DB unique constraint as an IntegrityError.
+    """
+
+    def _check_unique(self, field):
+        value = self.cleaned_data.get(field)
+        if not value:
+            return value
+        clash = User.all_objects.filter(**{f"{field}__iexact": value})
+        if self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+        clash = clash.first()
+        if clash is None:
+            return value
+        if clash.is_deleted:
+            raise forms.ValidationError(
+                f"A deleted user ({clash.email}) already has this {field}. "
+                "Restore that user or choose another value."
+            )
+        raise forms.ValidationError(f"A user with this {field} already exists.")
+
+    def clean_username(self):
+        return self._check_unique("username")
+
+    def clean_email(self):
+        return self._check_unique("email")
+
+
+class UserCreationAdminForm(UniqueAcrossDeletedMixin, AdminUserCreationForm):
+    class Meta(AdminUserCreationForm.Meta):
+        model = User
+        fields = ("email", "username")
+
+
+class UserChangeAdminForm(UniqueAcrossDeletedMixin, UserChangeForm):
+    class Meta(UserChangeForm.Meta):
+        model = User
 
 
 class CompanyMembershipInline(admin.TabularInline):
@@ -36,6 +81,8 @@ class UserAdmin(
     UnfoldModelAdmin,
     DjangoUserAdmin,
 ):
+    add_form = UserCreationAdminForm
+    form = UserChangeAdminForm
     inlines = [CompanyMembershipInline]
     list_display = (
         "email",

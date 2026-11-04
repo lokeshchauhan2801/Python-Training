@@ -504,6 +504,68 @@ def _name_targets(message, files) -> _NameTargets:
     return found
 
 
+_ORDINAL_WORDS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+    "last": -1,
+}
+_ORD = r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|\d+(?:st|nd|rd|th))"
+_FILE_NOUN = r"(?:files?|documents?|docs?|attachments?|ones?)"
+_JOIN = r"\s*(?:,|and|&)\s*(?:the\s+)?"
+# "second file", "the 2nd and 4th files", "last one"
+ORDINAL_RE = re.compile(rf"\b({_ORD}(?:{_JOIN}{_ORD})*)\s+{_FILE_NOUN}\b", _I)
+# "file 2", "files 2 and 3", "file number 2", "file #2"
+NUMBERED_RE = re.compile(
+    rf"\b{_FILE_NOUN}\s*(?:number|no\.?|#)?\s*(\d+(?:{_JOIN}\d+)*)\b", _I
+)
+
+
+def _positions(message) -> list:
+    """1-based file positions the message asks for (-1 = last), in order."""
+    found = []
+    for m in ORDINAL_RE.finditer(message):
+        for token in re.findall(_ORD, m.group(1), _I):
+            token = token.lower()
+            found.append(_ORDINAL_WORDS.get(token) or int(re.sub(r"\D", "", token)))
+    for m in NUMBERED_RE.finditer(message):
+        found += [int(n) for n in re.findall(r"\d+", m.group(1))]
+    return list(dict.fromkeys(found))
+
+
+def _position_reply(session, kind, message, files, actor):
+    """Targets picked by position (“process the second file”), or ``None``.
+
+    Positions follow the table order (oldest attach first). A number past the
+    end gets a line saying how many files the chat has.
+    """
+    positions = _positions(message)
+    if not positions:
+        return None
+    total = len(files)
+    targets, outside = [], []
+    for n in positions:
+        if n == -1:
+            targets.append(files[-1])
+        elif 1 <= n <= total:
+            targets.append(files[n - 1])
+        else:
+            outside.append(n)
+    targets = list({f.id: f for f in targets}.values())
+    lines = []
+    if outside:
+        noun = "file" if total == 1 else "files"
+        asked = ", ".join(str(n) for n in outside)
+        lines.append(
+            f"There {'is' if total == 1 else 'are'} only {total} {noun} in this "
+            f"chat, so there is no file {asked}. Pick a number from 1 to {total}."
+        )
+    if not targets:
+        return CommandReply(
+            "\n".join(lines), {"file_panel": _panel("picker", None, lines[0])}
+        )
+    return _act(session, kind, targets, actor, entry_ids=_ids(targets), lines=lines)
+
+
 def handle_file_command(
     *, session, kind, message, attachment_ids=None, entry_ids=None, actor=None
 ) -> CommandReply:
@@ -524,8 +586,12 @@ def handle_file_command(
         targets = [by_id[i] for i in dict.fromkeys(entry_ids) if i in by_id]
         return _act(session, kind, targets, actor, entry_ids=_ids(targets))
 
-    # 2. Names in the message.
+    # 2. Names in the message; positions when no file name matched.
     names = _name_targets(message, files)
+    if not names.files and not names.ambiguous:
+        by_position = _position_reply(session, kind, message, files, actor)
+        if by_position is not None:
+            return by_position
     if names.named:
         return _named_reply(session, kind, names, actor)
 
