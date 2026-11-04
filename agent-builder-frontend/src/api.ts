@@ -52,6 +52,7 @@ export interface Step {
   connected_from_start: boolean;
   connected_to_end: boolean;
   next_step: string | null; // nullable Step ULID string (same agent only)
+  delegate_agent: string | null; // another Agent that runs this step's work (sub-agent)
   position_x: number;
   position_y: number;
   order: number;

@@ -1544,13 +1544,18 @@
         general_assistant: "General assistant",
         document_search: "Document search",
         chat_summarise: "Chat summary",
-        web_search: "Web search"
+        web_search: "Web search",
+        add_to_knowledge_base: "Add to knowledge base",
+        document_processing_status: "Document status"
       };
 
       function methodLabel(message) {
         const meta = message.metadata || {};
         if (meta.tool_used) {
-          return TOOL_LABELS[meta.tool_used] || meta.tool_used;
+          // A multi-task turn lists every tool it used ("a,b,c").
+          return meta.tool_used.split(",").map(function (slug) {
+            return TOOL_LABELS[slug] || slug;
+          }).join(" + ");
         }
         if (message.citations && message.citations.length) {
           return "Document reference";

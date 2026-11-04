@@ -39,6 +39,11 @@ The flow is an **Agent container** whose ordered **Step nodes** form a linear ch
 - Each step carries its own tools (M2M to the flat `Tool` table) — the step holds the tools.
 - A company can hold many live `Agent` containers side by side; none is implicitly the default. Each is independently selectable (in the builder for editing, and per Chat session for execution).
 
+### Multi-agent flows
+
+- A step can set `delegate_agent` ("Run by agent" in the step editor; PATCH `/step/{id}/` with `delegate_agent: <agent id | null>`). That agent's whole flow then runs in place of the step's own tools, and it gets the earlier steps' output as context. The delegate must be another agent of the same company, and delegation can't loop back (validated server-side, up to 3 agents deep at run time).
+- When a chat message asks for several things at once ("give the status of report.pdf, reprocess it and make a pie chart of the statuses"), `chat/services/task_planner.py` splits it into ordered sub-tasks. Each sub-task goes to one reachable step (its own tools or its sub-agent), and they run as a LangGraph chain, so a later task can use an earlier task's result. The turn saves one numbered answer, plus `metadata.tasks` with the worker, agent and tool for each task. Settings `CHAT_MULTI_TASK_ENABLED` (default on) and `CHAT_MULTI_TASK_MAX` (default 5) control it.
+
 The canvas renders:
 - One React Flow node per `Step` row (styled `.ab-node ab-node-step`).
 - Two **synthetic** anchor nodes `__start__` / `__end__` — client-only visual anchors derived from `connected_from_start` / `connected_to_end`; they are never backend rows and never sent in writes.

@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 
 from chat.services import file_commands, session_files
+from chat.services.task_planner import looks_multi_task
 
 _I = re.IGNORECASE
 
@@ -177,14 +178,16 @@ def _reachable_enabled_slugs(agent) -> set:
     """Built-in slugs enabled on the Agent's REACHABLE Steps.
 
     Uses the shared walker so orphan/unreachable Steps (which never execute)
-    cannot satisfy a capability. A built-in slug counts even when its Tool row
-    is type ``langfuse`` because ``_enabled_for`` resolves a registered slug to
-    its handler; the decisive contract is the registered slug.
+    cannot satisfy a capability. A delegating Step contributes its sub-agent's
+    reachable tools (``walk_tool_steps``), since that flow runs in its place.
+    A built-in slug counts even when its Tool row is type ``langfuse`` because
+    ``_enabled_for`` resolves a registered slug to its handler; the decisive
+    contract is the registered slug.
     """
-    from agents.services.flow import walk_reachable_steps
+    from agents.services.flow import walk_tool_steps
 
     slugs: set = set()
-    for step in walk_reachable_steps(agent):
+    for step in walk_tool_steps(agent):
         for tool in step.tools.filter(is_enabled=True):
             if tool.slug in _BUILTIN_SLUGS:
                 slugs.add(tool.slug)
@@ -263,6 +266,11 @@ def preflight(agent, session, message_text, attachment_ids, selected_entry_ids=(
         )
     available = _reachable_enabled_slugs(agent)
     outcome, required, reason, reply = _policy_for_intent(intent, available)
+    # A message asking for several things is split into sub-tasks inside the
+    # pipeline, so one missing READ tool must not send the WHOLE message to
+    # Normal RAG. A missing WRITE tool (blocked) still blocks.
+    if outcome == "fallback" and looks_multi_task(message_text):
+        outcome, reason = "pipeline", ""
     return PolicyDecision(
         outcome=outcome,
         intent=intent,
