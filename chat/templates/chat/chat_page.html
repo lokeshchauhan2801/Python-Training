@@ -715,6 +715,61 @@
       color: var(--color-font-subtle-dark);
     }
 
+    /* "How this was answered" (selected-Agent turns) */
+    .chat-ui-trace {
+      margin-top: .625rem;
+      border: 1px solid var(--color-base-200, #e5e7eb);
+      border-radius: .5rem;
+      padding: .375rem .625rem;
+      font-size: .75rem;
+    }
+
+    html.dark .chat-ui-trace {
+      border-color: var(--color-base-700, #374151);
+    }
+
+    .chat-ui-trace summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-trace summary {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-trace-list {
+      list-style: none;
+      margin: .5rem 0 .125rem;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: .5rem;
+    }
+
+    .chat-ui-trace-item {
+      border-left: 2px solid var(--color-primary-500, #8b5cf6);
+      padding-left: .5rem;
+    }
+
+    .chat-ui-trace-title {
+      font-weight: 600;
+    }
+
+    .chat-ui-trace-who,
+    .chat-ui-trace-note {
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-trace-who,
+    html.dark .chat-ui-trace-note {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-trace-note {
+      font-style: italic;
+    }
+
     .chat-ui-chip--muted {
       color: var(--color-font-subtle-light);
     }
@@ -1546,7 +1601,13 @@
         chat_summarise: "Chat summary",
         web_search: "Web search",
         add_to_knowledge_base: "Add to knowledge base",
-        document_processing_status: "Document status"
+        document_processing_status: "Document status",
+        report_writer: "Write report",
+        action_items: "Action items",
+        email_drafter: "Draft email",
+        translator: "Translate",
+        chart_builder: "Chart from results",
+        llm_answer: "Answered itself (LLM)"
       };
 
       function methodLabel(message) {
@@ -1582,6 +1643,99 @@
 
       function formatSeconds(ms) {
         return (ms / 1000).toFixed(1) + "s";
+      }
+
+      // "How this was answered": for a selected-Agent turn, which step and
+      // agent answered each part of the message, with which tool, and whose
+      // earlier answers it built on (metadata.tasks / metadata.steps).
+      const CIRCLED = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨"];
+
+      function circled(n) { return CIRCLED[n - 1] || "(" + n + ")"; }
+
+      function toolLabel(slug) { return TOOL_LABELS[slug] || slug || "answered directly"; }
+
+      function traceRow(list, head, who, note) {
+        const item = document.createElement("li");
+        item.className = "chat-ui-trace-item";
+        const title = document.createElement("div");
+        title.className = "chat-ui-trace-title";
+        title.textContent = head;
+        const meta = document.createElement("div");
+        meta.className = "chat-ui-trace-who";
+        meta.textContent = who;
+        item.appendChild(title);
+        item.appendChild(meta);
+        if (note) {
+          const extra = document.createElement("div");
+          extra.className = "chat-ui-trace-note";
+          extra.textContent = note;
+          item.appendChild(extra);
+        }
+        list.appendChild(item);
+      }
+
+      function renderAgentTrace(container, message) {
+        const meta = message.metadata || {};
+        const selection = meta.agent_selection || {};
+        if (selection.outcome !== "pipeline") { return; }
+        const tasks = Array.isArray(meta.tasks) ? meta.tasks : [];
+        const steps = Array.isArray(meta.steps) ? meta.steps : [];
+        if (!tasks.length && !steps.length) { return; }
+
+        const box = document.createElement("details");
+        box.className = "mt-2 chat-ui-trace";
+        box.open = tasks.length > 1;
+        const summary = document.createElement("summary");
+        const agents = new Set((tasks.length ? tasks : steps).map(function (row) {
+          return row.agent_name || row.agent || selection.agent_slug;
+        }));
+        summary.textContent = "How this was answered · " +
+          (tasks.length > 1
+            ? "the supervisor split it into " + tasks.length + " parts, "
+            : "the supervisor sent it to ") +
+          agents.size + (agents.size === 1 ? " agent" : " agents");
+        box.appendChild(summary);
+
+        const list = document.createElement("ol");
+        list.className = "chat-ui-trace-list";
+        if (tasks.length) {
+          tasks.forEach(function (task, i) {
+            const step = task.step_name || task.worker;
+            const tool = toolLabel(task.tool);
+            const who = task.handed_off
+              ? "Sent to " + (task.agent_name || task.agent) + " (via worker “" + step + "”) · " + tool
+              : "Sent to worker “" + step + "” · " + tool;
+            const used = task.used_tasks || [];
+            // Parts in the same "wave" started together; a later wave waited.
+            const together = tasks
+              .map(function (other, j) { return j !== i && other.wave === task.wave ? j + 1 : 0; })
+              .filter(Boolean);
+            let note = "";
+            if (used.length) {
+              note = "Waited for " + used.map(circled).join(", ") + " and used " +
+                (used.length > 1 ? "their answers" : "its answer");
+            } else if (tasks.length > 1) {
+              note = "Started right away" + (together.length
+                ? ", at the same time as " + together.map(circled).join(", ")
+                : "");
+            }
+            traceRow(list, (tasks.length > 1 ? circled(i + 1) + " " : "") + (task.title || task.instruction), who, note);
+          });
+        } else {
+          // No plan: every step ran in order and the last one gave the reply.
+          steps.forEach(function (step, i) {
+            const name = step.via_name || step.step_name || step.via || step.step;
+            const who = step.agent_name
+              ? "Handed to " + step.agent_name + " · " + toolLabel(step.tool)
+              : toolLabel(step.tool);
+            const note = i === steps.length - 1
+              ? "This step's answer is the reply" + (i ? " (it saw the steps before it)" : "")
+              : "Its answer was passed on to the next step";
+            traceRow(list, "Step " + (i + 1) + " · " + name, who, note);
+          });
+        }
+        box.appendChild(list);
+        container.appendChild(box);
       }
 
       function renderTiming(container, message) {
@@ -2169,6 +2323,7 @@
           renderCitations(bubble, message.citations);
           renderChart(bubble, message.chart_data);
           renderToolBadge(bubble, message);
+          renderAgentTrace(bubble, message);
           renderTiming(bubble, message);
           renderRetry(bubble, message);
           renderTemporalLinks(bubble, message);

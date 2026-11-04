@@ -677,7 +677,8 @@ def _named_reply(session, kind, names: _NameTargets, actor) -> CommandReply:
 
     lines = []
     if kind == Kind.STATUS:
-        targets = list(dict.fromkeys([*targets, *candidates]))  # report matches
+        # Report every match once (SessionFile holds a dict, so dedupe by id).
+        targets = list({f.id: f for f in [*targets, *candidates]}.values())
     else:
         button = "Stop" if kind == Kind.STOP else "Resume"
         for tokens, group in names.ambiguous:

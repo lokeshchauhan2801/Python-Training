@@ -21,6 +21,20 @@ _FUNCTION_DESCRIPTIONS = {
     "web_search": "Answer from the model's general knowledge (no live web).",
     "add_to_knowledge_base": "Add an attached file to the knowledge base (background processing).",
     "document_processing_status": "Report the status of documents being processed.",
+    "report_writer": "Turn the earlier steps' output into a short report (summary, findings, next steps).",
+    "action_items": "List the tasks, owners and deadlines found in the earlier steps' output.",
+    "email_drafter": "Draft an email that shares the earlier steps' output.",
+    "translator": "Translate the earlier steps' output into the language the user asks for.",
+    "chart_builder": "Chart the numbers found in the earlier steps' output.",
+}
+
+# Display names for the canvas list (slug titles read badly for these).
+_FUNCTION_NAMES = {
+    "report_writer": "Write report",
+    "action_items": "Extract action items",
+    "email_drafter": "Draft email",
+    "translator": "Translate",
+    "chart_builder": "Chart from results",
 }
 
 # Slugs that exist in the registry but are internal plumbing, not user-facing
@@ -44,12 +58,39 @@ def _function_catalog():
         catalog.append(
             {
                 "slug": slug,
-                "name": slug.replace("_", " ").title(),
+                "name": _FUNCTION_NAMES.get(slug) or slug.replace("_", " ").title(),
                 "type": slug,
                 "description": _FUNCTION_DESCRIPTIONS.get(slug, ""),
             }
         )
     return catalog
+
+
+def _agent_flows(agents):
+    """``{agent id: [worker summary, ...]}`` for every agent.
+
+    Lets the canvas show what a hand-off worker will actually run (the other
+    agent's workers and their tools) without loading that agent.
+    """
+    from agents.services.flow import agent_workers
+
+    flows = {}
+    for agent in agents:
+        flows[str(agent.pk)] = [
+            {
+                "id": str(step.pk),
+                "name": step.name or step.slug,
+                "tools": [
+                    t.name or t.slug
+                    for t in step.tools.filter(is_enabled=True).order_by("name")
+                ],
+                "delegate_agent": (
+                    str(step.delegate_agent_id) if step.delegate_agent_id else None
+                ),
+            }
+            for step in agent_workers(agent)
+        ]
+    return flows
 
 
 class ToolViewSet(ScopedModelViewSet):
@@ -212,6 +253,7 @@ class AgentViewSet(ScopedModelViewSet):
                 "selected_agent_id": str(selected.pk) if selected else None,
                 "steps": steps_data,
                 "tools": tools_data,
+                "agent_flows": _agent_flows(all_agents),
             },
             status=status.HTTP_200_OK,
         )

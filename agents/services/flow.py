@@ -1,64 +1,31 @@
-"""The single authoritative reachable-Step walker.
+"""Which Steps (workers) an Agent has, and how delegation between Agents nests.
 
-``walk_reachable_steps(agent)`` is the ONE source of truth for which Steps an
-Agent's pipeline will execute. Both the LangGraph runtime
-(``chat.services.langgraph_service``) and the capability preflight
-(``chat.services.agent_capabilities``) call it directly, so a reachability
-change can never let a policy allow an action that execution would not traverse.
+An Agent is a supervisor over its Steps: every live Step is a worker the
+supervisor can give part of a message to (there is no fixed order to walk).
+``agent_workers(agent)`` is the ONE source of truth for that list. Both the
+LangGraph runtime (``chat.services.langgraph_service``) and the capability
+preflight (``chat.services.agent_capabilities``) use it, so policy can never
+allow an action the runtime could not route to.
 
-The walk is dependency-light and read-only:
-
-* It imports ``Step`` locally to avoid an app-import cycle.
-* It uses the soft-delete-aware default manager (``Step.objects``), never an FK
-  descriptor, so a soft-deleted / missing / foreign entry or hop terminates the
-  chain.
-* It is cycle- and cap-guarded, so any malformed graph still terminates.
-* It performs no writes.
+Everything here is read-only and imports models locally (no app-import cycle).
+It uses the soft-delete-aware default managers, never FK descriptors, so a
+soft-deleted worker or delegate simply drops out.
 """
 
 from __future__ import annotations
 
 
-def walk_reachable_steps(agent) -> list:
-    """Return the ordered, unique list of Steps the ``agent`` pipeline runs.
+def agent_workers(agent) -> list:
+    """The live Steps of ``agent`` (its workers), ``order`` then oldest first.
 
-    ``[]`` when ``agent`` is ``None`` or has no live entry Step. Otherwise the
-    chain starts at the lowest-``order`` (then oldest ``created_at``) Step with
-    ``connected_from_start=True`` and follows ``next_step`` within the same
-    Agent. A ``connected_to_end`` Step is appended and terminates the chain even
-    if it still has a next pointer. The walk otherwise stops before a duplicate
-    primary key (cycle), a missing / foreign / soft-deleted next hop, or after
-    ``2 * <live step count> + 1`` appended hops.
+    ``[]`` when ``agent`` is ``None`` or has no live Step.
     """
     if agent is None:
         return []
 
     from agents.models import Step
 
-    entry = (
-        Step.objects.filter(agent=agent, connected_from_start=True)
-        .order_by("order", "created_at")
-        .first()
-    )
-    if entry is None:
-        return []
-
-    cap = 2 * Step.objects.filter(agent=agent).count() + 1
-    chain: list = []
-    seen: set = set()
-    current = entry
-    while current is not None and len(chain) < cap:
-        if current.pk in seen:
-            break
-        chain.append(current)
-        seen.add(current.pk)
-        if current.connected_to_end:
-            break
-        next_id = current.next_step_id
-        if next_id is None:
-            break
-        current = Step.objects.filter(pk=next_id, agent=agent).first()
-    return chain
+    return list(Step.objects.filter(agent=agent).order_by("order", "created_at"))
 
 
 # How many agents deep a delegation chain may go (agent -> sub-agent -> ...).
@@ -81,7 +48,7 @@ def delegate_of(step):
 
 
 def walk_tool_steps(agent, *, _depth=0, _seen=None) -> list:
-    """The reachable Steps that actually run tools, delegation expanded.
+    """The workers that actually run tools, delegation expanded.
 
     A delegating step is replaced by its delegate Agent's own tool steps
     (recursively, cycle- and ``MAX_DELEGATION_DEPTH``-guarded). Read-only; the
@@ -89,7 +56,7 @@ def walk_tool_steps(agent, *, _depth=0, _seen=None) -> list:
     """
     seen = set(_seen or ()) | {getattr(agent, "pk", None)}
     steps: list = []
-    for step in walk_reachable_steps(agent):
+    for step in agent_workers(agent):
         sub = delegate_of(step)
         if sub is None:
             steps.append(step)
@@ -101,8 +68,8 @@ def walk_tool_steps(agent, *, _depth=0, _seen=None) -> list:
 def delegation_reaches(agent, target, *, _depth=0, _seen=None) -> bool:
     """True when ``agent``'s steps delegate (directly or not) to ``target``.
 
-    Looks at EVERY live step (reachable or not) so wiring a step later can
-    never complete a cycle the validation missed.
+    Looks at EVERY live step, so no later change can complete a cycle the
+    validation missed.
     """
     if agent is None or target is None:
         return False

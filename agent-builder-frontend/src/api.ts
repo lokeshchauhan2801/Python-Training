@@ -9,6 +9,11 @@ export type ToolType =
   | "web_search"
   | "add_to_knowledge_base"
   | "document_processing_status"
+  | "report_writer"
+  | "action_items"
+  | "email_drafter"
+  | "translator"
+  | "chart_builder"
   | "langfuse";
 
 export interface Tool {
@@ -27,11 +32,12 @@ export interface Tool {
   deleted_at: string | null;
 }
 
-/** A flow CONTAINER. Its ordered Steps are the canvas nodes. */
+/** An agent: a supervisor over its Steps (the workers on the canvas). */
 export interface Agent {
   id: string; // ULID string
   slug: string;
   name: string;
+  description: string; // what the agent does: the supervisor routes by it
   order: number;
   company: string | number | null;
   created_at: string;
@@ -65,11 +71,20 @@ export interface Step {
   deleted_at: string | null;
 }
 
+/** One step of an agent's flow, in run order (``agent_flows`` in load). */
+export interface FlowStepSummary {
+  id: string;
+  name: string;
+  tools: string[]; // enabled tool names
+  delegate_agent: string | null;
+}
+
 export interface LoadFlowResponse {
   agents: Agent[];
   selected_agent_id: string | null;
   steps: Step[];
   tools: Tool[];
+  agent_flows: Record<string, FlowStepSummary[]>; // agent id -> its steps in run order
 }
 
 /** A registered handler function the canvas can attach as a tool. */
@@ -101,6 +116,25 @@ export function companyName(): string {
   return queryParam("company_name");
 }
 
+/** A DRF error body as plain sentences: ``{"field": ["msg"]}`` -> "Msg." */
+function readableError(body: any): string {
+  if (!body) return "";
+  if (typeof body === "string") return body;
+  if (Array.isArray(body)) return body.map(readableError).join(" ");
+  if (typeof body === "object") {
+    return Object.values(body)
+      .map(readableError)
+      .filter(Boolean)
+      .map((m) => {
+        const s = m.trim();
+        const sentence = s.charAt(0).toUpperCase() + s.slice(1);
+        return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+      })
+      .join(" ");
+  }
+  return String(body);
+}
+
 async function request<T>(method: string, path: string, body?: any): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   const opts: RequestInit = { method, headers, credentials: "same-origin" };
@@ -119,11 +153,11 @@ async function request<T>(method: string, path: string, body?: any): Promise<T> 
   if (!res.ok) {
     let detail = "";
     try {
-      detail = JSON.stringify(await res.json());
+      detail = readableError(await res.json());
     } catch (_e) {
       detail = res.statusText;
     }
-    const err: any = new Error(`${method} ${path} failed (${res.status}): ${detail}`);
+    const err: any = new Error(detail || `Request failed (${res.status}).`);
     err.status = res.status;
     throw err;
   }

@@ -299,3 +299,264 @@ body {
   border-radius: 8px;
   padding: 8px 10px;
 }
+
+/* --- Flow wiring ---------------------------------------------------------- */
+.ab-edge-live .react-flow__edge-path {
+  stroke: var(--ab-accent);
+  stroke-width: 2;
+}
+
+.ab-edge-idle .react-flow__edge-path {
+  stroke: var(--ab-muted);
+  stroke-dasharray: 6 4;
+  opacity: 0.6;
+}
+
+.ab-node-handoff-step {
+  border-color: #0ea5e9;
+}
+
+.ab-node-handoff {
+  font-style: normal;
+  font-weight: 600;
+  color: #0ea5e9;
+  margin-bottom: 2px;
+}
+
+.ab-node-orphan {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+/* --- Sidebar: overview + editor -------------------------------------------- */
+.ab-flow-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ab-flow-anchor {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ab-muted);
+  padding-left: 4px;
+}
+
+.ab-flow-item,
+.ab-flow-meta-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--ab-border);
+  border-radius: 8px;
+  background: var(--ab-panel);
+  color: var(--ab-text);
+  font-size: 13px;
+}
+
+.ab-flow-item {
+  cursor: pointer;
+}
+
+.ab-flow-item:hover {
+  border-color: var(--ab-accent);
+}
+
+.ab-flow-loose {
+  border-style: dashed;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+
+.ab-flow-num {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--ab-accent) 20%, transparent);
+  color: var(--ab-text);
+}
+
+.ab-flow-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--ab-muted);
+  margin-top: 2px;
+}
+
+.ab-help {
+  margin-top: 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ab-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ab-editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.ab-link {
+  background: none;
+  border: none;
+  padding: 4px 0;
+  color: var(--ab-accent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ab-position {
+  font-size: 12px;
+  color: var(--ab-muted);
+  margin: -4px 0 8px;
+}
+
+.ab-position-warn {
+  color: #d97706;
+  font-size: 12px;
+}
+
+.ab-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ab-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px;
+  border: 1px solid var(--ab-border);
+  border-radius: 10px;
+  background: var(--ab-panel);
+  color: var(--ab-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ab-mode-card span {
+  font-size: 11px;
+  color: var(--ab-muted);
+}
+
+.ab-mode-card.active {
+  border-color: var(--ab-accent);
+  background: color-mix(in srgb, var(--ab-accent) 12%, var(--ab-panel));
+}
+
+.ab-mode-card:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ab-preview {
+  border: 1px solid var(--ab-border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+
+.ab-preview-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.ab-btn-danger {
+  width: 100%;
+  margin-top: 20px;
+  color: #dc2626;
+}
+
+.ab-node-step {
+  min-width: 200px;
+  max-width: 240px;
+}
+
+.ab-minimap {
+  background: var(--ab-panel);
+  border: 1px solid var(--ab-border);
+  border-radius: 8px;
+}
+
+.ab-inline-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0 4px;
+}
+
+.ab-inline-name strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.ab-inline-name-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.ab-inline-name-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ab-inline-name .ab-link {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* --- Supervisor layout ---------------------------------------------------- */
+.ab-node-supervisor {
+  border-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 12%, var(--ab-panel));
+  min-width: 220px;
+  max-width: 240px;
+}
+
+.ab-edge-answer .react-flow__edge-path {
+  stroke: var(--ab-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.ab-about {
+  font-size: 12px;
+  color: var(--ab-muted);
+  margin: 4px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ab-about-empty {
+  font-style: italic;
+}
+
+.ab-about .ab-link {
+  flex: none;
+  white-space: nowrap;
+}

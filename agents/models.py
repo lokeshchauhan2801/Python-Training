@@ -19,6 +19,12 @@ class Tool(BaseModel, SoftDeleteModel):
     TYPE_WEB_SEARCH = "web_search"
     TYPE_ADD_TO_KB = "add_to_knowledge_base"
     TYPE_DOC_STATUS = "document_processing_status"
+    # Tools that work on the earlier steps' output (multi-agent hand-offs).
+    TYPE_REPORT_WRITER = "report_writer"
+    TYPE_ACTION_ITEMS = "action_items"
+    TYPE_EMAIL_DRAFTER = "email_drafter"
+    TYPE_TRANSLATOR = "translator"
+    TYPE_CHART_BUILDER = "chart_builder"
     TYPE_LANGFUSE = "langfuse"
     TYPE_CHOICES = [
         (TYPE_GENERAL_ASSISTANT, "General assistant"),
@@ -27,6 +33,11 @@ class Tool(BaseModel, SoftDeleteModel):
         (TYPE_WEB_SEARCH, "Web search"),
         (TYPE_ADD_TO_KB, "Add to knowledge base"),
         (TYPE_DOC_STATUS, "Document processing status"),
+        (TYPE_REPORT_WRITER, "Write report"),
+        (TYPE_ACTION_ITEMS, "Extract action items"),
+        (TYPE_EMAIL_DRAFTER, "Draft email"),
+        (TYPE_TRANSLATOR, "Translate"),
+        (TYPE_CHART_BUILDER, "Chart from results"),
         (TYPE_LANGFUSE, "Langfuse prompt"),
     ]
 
@@ -94,12 +105,13 @@ class Tool(BaseModel, SoftDeleteModel):
 
 
 class Agent(BaseModel, SoftDeleteModel):
-    """A named, independently-usable chat flow (container).
+    """A named, independently-usable chat agent (a supervisor + its workers).
 
-    An Agent groups an ordered set of Steps (its nodes) into a runnable
-    START -> Step ... -> END pipeline. Multiple live Agents may coexist in a
-    company; none is implicitly chosen for chat. A user selects one per
-    ConversationSession (or Normal RAG) in the chat header.
+    Its Steps are the workers. For each message a supervisor (LLM) splits the
+    request into parts and gives each part to the worker that fits; a worker
+    runs its own tools, hands the part to another Agent, or (no tools) answers
+    with the LLM itself. Multiple live Agents may coexist in a company; a user
+    selects one per ConversationSession (or Normal RAG) in the chat header.
     """
 
     id = ULIDField()
@@ -113,6 +125,9 @@ class Agent(BaseModel, SoftDeleteModel):
     )
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
+    # What this agent does: the supervisor reads it to route work here, and a
+    # worker without tools answers with it as its instructions.
+    description = models.TextField(blank=True)
     order = models.IntegerField(default=0, db_index=True)
 
     objects = SoftDeleteManager()

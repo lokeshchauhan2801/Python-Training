@@ -52,6 +52,9 @@ class ToolContext:
     # A planned sub-task that builds on earlier tasks' output (in
     # ``pipeline_context``), e.g. "make a pie chart of those statuses".
     uses_prior_results: bool = False
+    # Who the answering worker is ("You are the 'chat summary' agent. ..."),
+    # used when a worker with no tools answers with the LLM in its role.
+    persona: str = ""
 
 
 @dataclass
@@ -172,9 +175,18 @@ def _with_pipeline_context(base_text: str, ctx: "ToolContext") -> str:
     pc = (getattr(ctx, "pipeline_context", "") or "").strip()
     if not pc:
         return base_text
-    block = f"[Pipeline context from previous steps]\n{pc}"
+    block = f"[Answers from the other agents for this message]\n{pc}"
     base_text = (base_text or "").strip()
     return f"{block}\n\n{base_text}" if base_text else block
+
+
+def _with_persona(base_text: str, ctx: "ToolContext") -> str:
+    """Put the answering worker's role first (when it has one)."""
+    persona = (getattr(ctx, "persona", "") or "").strip()
+    if not persona:
+        return base_text
+    base_text = (base_text or "").strip()
+    return f"{persona}\n\n{base_text}" if base_text else persona
 
 
 def _wants_chart(message_text: str) -> bool:
@@ -195,7 +207,8 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     """
     from chat.services.chat_service import ChatCompletion, ChatService
 
-    # A planned sub-task charting an earlier task's answer uses that answer.
+    # A planned sub-task charting an earlier task's answer uses that answer
+    # (the planner marks it; a task that names its own file is not marked).
     if ctx.uses_prior_results and (ctx.pipeline_context or "").strip():
         return _prior_results_chart_reply(ctx, tool_slug)
 
@@ -294,12 +307,14 @@ def _prior_results_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResul
         ctx.llm,
     )
     prompt = (
-        "Important: build the chart ONLY from the data in the '[Pipeline "
-        "context from previous steps]' block (the answers of the earlier tasks "
-        "in this request). Count or read the values from it exactly (e.g. how "
+        "Important: build the chart ONLY from the data in the '[Answers from "
+        "the other agents for this message]' block (the answers this part "
+        "depends on). Count or read the values from it exactly (e.g. how "
         "many documents are in each status); never invent values. If that "
         "block has no data that can be charted, set chart to null and say "
-        "so.\n\n"
+        "so. Call that data 'the results above'; never mention 'pipeline "
+        "context' or 'previous steps' to the user. Keep the text to one short "
+        "caption.\n\n"
         f"{pre.strip()}\n\n{prompt}"
     )
     completion = ctx.llm.generate_structured(prompt, ChatCompletion)
@@ -419,7 +434,9 @@ def _general_assistant(ctx: "ToolContext") -> "ToolResult":
 
     messages = _history_messages(ctx.conversation, ctx.message_text)
     sys = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, "tool_general_assistant"), ctx),
+        _with_pipeline_context(
+            _with_persona(_system_prompt(ctx, "tool_general_assistant"), ctx), ctx
+        ),
         ctx.llm,
     )
     messages.insert(0, {"role": "system", "content": sys})
@@ -583,8 +600,23 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     conversation_context = service._build_conversation_context(
         turns, recent_limit=ChatService._SUMMARY_RECENT_TURNS
     )
-    # In a multi-step pipeline the summary should also cover prior-step output.
-    conversation_context = _with_pipeline_context(conversation_context, ctx)
+    # In a multi-step pipeline the summary also covers what earlier steps of
+    # this same request answered (labelled plainly, so it is not called a
+    # "pipeline note" in the summary).
+    earlier = _earlier_output(ctx)
+    if earlier:
+        conversation_context = (
+            f"{conversation_context}\n\n"
+            "Answers already given in the current message (part of this chat; "
+            f"ignore the bracketed labels):\n{earlier}"
+        ).strip()
+    if not conversation_context.strip():
+        # Nothing to summarise: an empty prompt made the model summarise its
+        # own instructions instead.
+        return ToolResult(
+            content="There is nothing to summarise yet: this chat has no earlier messages.",
+            tool_used="chat_summarise",
+        )
 
     name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
     sys = (
@@ -708,3 +740,107 @@ def _file_command_tool(ctx, *, allowed, default, tool_used) -> "ToolResult":
     return ToolResult(
         content=reply.content, metadata=dict(reply.metadata), tool_used=tool_used
     )
+
+
+# --------------------------------------------------------------------------- #
+# Tools that work on the EARLIER steps' output (multi-agent hand-offs)
+# --------------------------------------------------------------------------- #
+# Each one turns what earlier steps / agents produced (``ctx.pipeline_context``)
+# into something new. Used alone (no earlier output) it works on the user's
+# message and the conversation instead. A Langfuse prompt named
+# ``tool_<slug>`` overrides the built-in instructions.
+_EARLIER_OUTPUT_TASKS = {
+    "report_writer": (
+        "You are a report writer. Turn the earlier results into a short, clear "
+        "report with three parts: Summary (2-3 sentences), Key findings (bullet "
+        "points with the important facts and figures), and Next steps (only if "
+        "they follow from the results). Use only facts from the earlier results "
+        "and the conversation; never invent figures."
+    ),
+    "action_items": (
+        "You extract action items. List every concrete task found in the "
+        "earlier results as numbered items: what must be done, who owns it and "
+        "the deadline when the text says so (write 'owner not stated' / 'no "
+        "deadline' otherwise). If there are no tasks, say so in one sentence."
+    ),
+    "email_drafter": (
+        "You draft emails. Write a ready-to-send email that shares the earlier "
+        "results with the recipient the user names (or a neutral 'Hi team' "
+        "when none is named). Give a Subject line, then a short body: greeting, "
+        "the key points from the earlier results, and a polite closing. Keep "
+        "facts exactly as in the earlier results."
+    ),
+    "translator": (
+        "You are a translator. Translate the earlier results into the language "
+        "the user asks for (English if none is named). Keep names, numbers, file "
+        "names and the structure (lists, headings) unchanged. Reply with the "
+        "translation only."
+    ),
+}
+
+
+def _earlier_output(ctx: "ToolContext") -> str:
+    return (getattr(ctx, "pipeline_context", "") or "").strip()
+
+
+def _earlier_output_reply(ctx: "ToolContext", slug: str) -> "ToolResult":
+    """Run one of the ``_EARLIER_OUTPUT_TASKS`` on the earlier steps' output."""
+    sys = _system_prompt(ctx, f"tool_{slug}", fallback=_EARLIER_OUTPUT_TASKS[slug])
+    sys = _with_identity(sys or _EARLIER_OUTPUT_TASKS[slug], ctx.llm)
+    earlier = _earlier_output(ctx)
+    if earlier:
+        # The step labels ("[Step 'x' used tool 'y']") are routing notes, not
+        # content; the model is told to ignore them.
+        messages = [
+            {"role": "system", "content": sys},
+            {
+                "role": "user",
+                "content": (
+                    "Earlier results from the other steps and agents (ignore "
+                    "the bracketed step labels):\n"
+                    f"{earlier}\n\n"
+                    f"User request:\n{ctx.message_text}"
+                ),
+            },
+        ]
+    else:
+        messages = _history_messages(ctx.conversation, ctx.message_text)
+        messages.insert(0, {"role": "system", "content": sys})
+    content = ctx.llm.complete(messages)
+    return ToolResult(content=content, tool_used=slug, llm_generated=True)
+
+
+@register("report_writer")
+def _report_writer(ctx: "ToolContext") -> "ToolResult":
+    """``report_writer`` — a short report (summary, findings, next steps)."""
+    return _earlier_output_reply(ctx, "report_writer")
+
+
+@register("action_items")
+def _action_items(ctx: "ToolContext") -> "ToolResult":
+    """``action_items`` — the tasks / owners / deadlines in the earlier output."""
+    return _earlier_output_reply(ctx, "action_items")
+
+
+@register("email_drafter")
+def _email_drafter(ctx: "ToolContext") -> "ToolResult":
+    """``email_drafter`` — an email sharing the earlier output."""
+    return _earlier_output_reply(ctx, "email_drafter")
+
+
+@register("translator")
+def _translator(ctx: "ToolContext") -> "ToolResult":
+    """``translator`` — the earlier output in the language the user asks for."""
+    return _earlier_output_reply(ctx, "translator")
+
+
+@register("chart_builder")
+def _chart_builder(ctx: "ToolContext") -> "ToolResult":
+    """``chart_builder`` — a chart of the numbers in the earlier output.
+
+    Without earlier output it charts like ``general_assistant`` (a named chat
+    file, a knowledge-base dataset, or general knowledge).
+    """
+    if _earlier_output(ctx):
+        return _prior_results_chart_reply(ctx, "chart_builder")
+    return _knowledge_chart_reply(ctx, "chart_builder")

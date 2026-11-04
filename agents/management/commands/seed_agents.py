@@ -24,6 +24,11 @@ _TOOL_SPECS = [
         "Document processing status",
         "document_processing_status",
     ),
+    ("report_writer", "Write report", "report_writer"),
+    ("action_items", "Extract action items", "action_items"),
+    ("email_drafter", "Draft email", "email_drafter"),
+    ("translator", "Translate", "translator"),
+    ("chart_builder", "Chart from results", "chart_builder"),
 ]
 
 _AGENT_SLUG = "chat_agent"

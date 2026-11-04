@@ -6,9 +6,12 @@ This file holds ONLY the graph implementation: the router prompt, the
 ``langgraph`` ``StateGraph``, routes each message to one tool, and persists the
 resulting conversation turn.
 
-Multi-agent: a Step may delegate to another Agent (its sub-agent's chain runs
-in its place), and a message asking for several things is split by
-``chat.services.task_planner`` into ordered sub-tasks, each run by one Step.
+Multi-agent (supervisor): an Agent's Steps are its workers. For each message
+the supervisor (``chat.services.task_planner``) splits the request into parts
+and gives each part to one worker; a worker runs its own tools, hands the part
+to another Agent (which supervises its own workers), or, with no tools,
+answers with the LLM in its role. Parts that need nothing from each other run
+at the same time; a part that needs another's answer waits for it.
 
 The tools themselves (and the registry) live in ``chat/services/llm_tools.py``.
 They are imported here and the registry symbols are re-exported so existing
@@ -20,9 +23,10 @@ import contextvars
 import logging
 import queue
 import re
+import operator
 import threading
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from django.db import connection, transaction
 from pydantic import BaseModel as PydanticBaseModel
@@ -44,16 +48,13 @@ logger = logging.getLogger(__name__)
 
 
 class GraphState(TypedDict, total=False):
-    message_text: str
-    history_text: str  # ORIGINAL conversation history (never mutated)
-    pipeline_context: str  # accumulated prior-step output text
-    selected_tool: str | None  # last node's router pick (debug/trace only)
-    route_reason: str  # last node's reason (debug/trace only)
-    visited: list[str]
-    hops: int
+    # Numbers of the finished parts; parts running in parallel append at once.
+    done: Annotated[list, operator.add]
 
 
 DIRECT = "__direct__"
+# ``tool_used`` of a worker with no tools that answered with the LLM itself.
+LLM_ANSWER = "llm_answer"
 _DIRECT_HANDLER_SLUG = "general_assistant"
 _WEB_SOURCE_REQUEST = re.compile(
     r"\b(?:web\s*search|online|external\s+(?:source|data|information)|"
@@ -111,6 +112,33 @@ _ROUTER_RULES = {
     ),
 }
 
+# Tools that work on what earlier steps / agents produced.
+_ROUTER_RULES.update({
+    "report_writer": (
+        "Choose 'report_writer' when the user asks to write up, report on or "
+        "turn results into a report."
+    ),
+    "action_items": (
+        "Choose 'action_items' when the user asks for action items, tasks, "
+        "to-dos or next steps from some content."
+    ),
+    "email_drafter": (
+        "Choose 'email_drafter' when the user asks to write, draft or compose an "
+        "email or message to someone."
+    ),
+    "translator": (
+        "Choose 'translator' when the user asks to translate something into "
+        "another language."
+    ),
+    "chart_builder": (
+        "Choose 'chart_builder' when the user asks for a chart or graph of "
+        "results or figures from earlier in this request."
+    ),
+})
+
+# Tools with side effects (they start background processing).
+_ACTION_SLUGS = frozenset({"add_to_knowledge_base"})
+
 # Tools that only make sense against this chat's files / processing; they are
 # dropped from routing when the chat has files but the message references none.
 _FILE_ONLY_SLUGS = frozenset(
@@ -143,7 +171,7 @@ class _StreamingLLM:
     Each text piece goes to ``on_delta`` and the joined text is returned, so
     callers see the same result as ``complete()``. Everything else
     (``generate_structured``, embeddings, ``provider`` / ``model``) goes
-    straight to the wrapped client. Handed only to the chain's last step.
+    straight to the wrapped client. Handed only to a single-part turn's worker.
     """
 
     def __init__(self, llm, on_delta):
@@ -239,7 +267,7 @@ class LangGraphChatService:
     ):
         """Streaming ``process_message``: a generator of ``(event, value)``.
 
-        The graph runs in a worker thread. Only the chain's last step gets a
+        The graph runs in a worker thread. A single-part turn's worker gets a
         streaming LLM, so ``("delta", text)`` items are that step's answer
         pieces (the router and earlier steps never stream); a multi-task turn
         sends each finished sub-task's answer as one piece. Ends with
@@ -424,6 +452,7 @@ class LangGraphChatService:
                     "agent_selection": {
                         "agent_id": str(self._agent.pk),
                         "agent_slug": self._agent.slug,
+                        "agent_name": self._agent.name or self._agent.slug,
                         "outcome": "pipeline",
                     },
                 }, timing),
@@ -457,19 +486,17 @@ class LangGraphChatService:
         timing=None,
         on_delta=None,
     ):
-        """Run one turn through ``agent``'s flow -> the outcome ``_persist`` saves.
+        """Run one turn with ``agent`` as supervisor -> the outcome ``_persist`` saves.
 
-        A message that asks for several things is split by the task planner
-        into ordered sub-tasks, each run by one worker Step (its own tools or a
-        delegated sub-agent). Any other message runs the Step chain. Streamed
-        answer text goes to ``on_delta``.
+        The supervisor splits the message into parts, gives each to a worker
+        and runs them (independent parts in parallel). Streamed answer text
+        goes to ``on_delta``.
         """
-        from agents.services.flow import walk_reachable_steps
-        from chat.services import task_planner
+        from agents.services.flow import agent_workers
 
-        chain = walk_reachable_steps(agent)
-        if not chain:
-            raise ValueError("Selected agent has no runnable flow.")
+        steps = agent_workers(agent)
+        if not steps:
+            raise ValueError("Selected agent has no workers.")
 
         runner = _TurnRunner(
             self,
@@ -479,8 +506,8 @@ class LangGraphChatService:
             attachment_ids=list(attachment_ids or []),
             model_name=model_name,
             history_text=history_text,
-            # The router sees only the last CHAT_ROUTER_TURNS turns; the tool
-            # handlers still get the full (capped) history.
+            # The supervisor and router see only the last CHAT_ROUTER_TURNS
+            # turns; the tool handlers still get the full (capped) history.
             router_history_text=(
                 history_text if router_history_text is None else router_history_text
             ),
@@ -488,98 +515,8 @@ class LangGraphChatService:
             selected_entry_ids=list(selected_entry_ids or []),
             timing=timing,
         )
-
-        tasks = []
-        picker_only = runner.selected_entry_ids and not (message_text or "").strip()
-        if not picker_only and task_planner.looks_multi_task(message_text):
-            with timed(timing, "planner"):
-                tasks = task_planner.plan_tasks(
-                    llm=llm,
-                    langfuse=self._langfuse,
-                    message_text=message_text,
-                    history_text=runner.router_history_text,
-                    workers=runner.workers(chain),
-                    file_titles=[f.title for f in runner.session_file_list()],
-                )
-        if tasks:
-            return runner.run_tasks(agent, tasks, on_delta=on_delta)
-
-        # Only the chain's last step gets a streaming LLM (``run_chain``).
-        stream_llm = _StreamingLLM(llm, on_delta) if on_delta is not None else None
-        run = runner.run_chain(
-            agent, message_text, "", stream_llm=stream_llm, chain=chain
-        )
-        # The walk is non-empty (validated above) and the orchestrator gate +
-        # policy preflight guarantee a runnable chain, so a node always runs.
-        return {
-            "tool_result": run.result,
-            "tool_used": run.result.tool_used,
-            "entry_slug": chain[0].slug,
-            "route_reason": run.reason,
-            "trace_id": run.trace_id,
-            "steps": run.records,
-        }
-
-    def _build_graph(self, *, chain, entry_slug, make_node):
-        """Compile a ``StateGraph`` from the linear Step chain.
-
-        Each Step row is a node (ALL run the router — no pass-through nodes);
-        edges are START -> entry, step -> next in the chain, and the final step
-        -> END (forced for a ``connected_to_end`` step). ``langgraph`` is
-        imported HERE (lazily) so importing this module stays SDK-free. The
-        chooser's visited check + ``max_hops`` cap guarantee termination even
-        under an accidental cycle.
-        """
-        from langgraph.graph import END, START, StateGraph
-
-        slugs = [s.slug for s in chain]
-        node_count = max(len(slugs), 1)
-        max_hops = 2 * node_count + 1
-
-        # Linear adjacency from the chain order (deterministic). A
-        # connected_to_end step forces END regardless of its position.
-        next_of = {}
-        for i, step in enumerate(chain):
-            nxt = slugs[i + 1] if i + 1 < len(slugs) else END
-            next_of[step.slug] = END if step.connected_to_end else nxt
-
-        builder = StateGraph(GraphState)
-
-        for step in chain:
-            builder.add_node(step.slug, make_node(step))
-
-        # START -> entry (never route INTO start; entry is a real step).
-        entry = entry_slug if entry_slug in slugs else (slugs[0] if slugs else END)
-        builder.add_edge(START, entry)
-
-        def _make_choice(slug):
-            target = next_of.get(slug, END)
-
-            def _choose(state):
-                # Checks in THIS exact precedence:
-                #   1. hop cap exceeded       -> END
-                #   2. target is END          -> END   (never route OUT of end)
-                #   3. target already visited -> END   (drop a cyclic edge)
-                #   4. otherwise              -> target (advance one hop)
-                if state.get("hops", 0) > max_hops:
-                    return END
-                if target == END:
-                    return END
-                if target in (state.get("visited") or []):
-                    return END
-                return target
-
-            return _choose
-
-        for slug in slugs:
-            target = next_of.get(slug, END)
-            mapping = {END: END}
-            if target in slugs:
-                mapping[target] = target
-            builder.add_conditional_edges(slug, _make_choice(slug), mapping)
-
-        return builder.compile()
-
+        tasks = runner.supervise(message_text, steps)
+        return runner.run_tasks(agent, tasks, on_delta=on_delta)
 
     def _route(
         self,
@@ -743,7 +680,7 @@ class LangGraphChatService:
 
 @dataclass
 class _StepRun:
-    """What running one Step (or a whole chain) produced."""
+    """What running one worker (or a supervised agent) produced."""
 
     result: ToolResult
     selected: str = ""
@@ -849,7 +786,7 @@ class _TurnRunner:
     """One turn's inputs plus the Step, sub-agent and task executors.
 
     A delegated sub-agent and a planned sub-task run the very same Step
-    precedence as the selected Agent's own chain; only the message text and
+    precedence as the selected Agent's own workers; only the message text and
     the pipeline context differ.
     """
 
@@ -905,110 +842,132 @@ class _TurnRunner:
             )
         return self._signals[key]
 
-    def workers(self, chain):
-        """The planner's workers: each chain Step with the tools it can run
-        (a delegating Step offers its sub-agent's tools)."""
+    def tool_rules(self, workers):
+        """The router rules for every tool the supervisor's workers can run."""
+        slugs = {slug for w in workers for slug in w.tools}
+        return {s: _ROUTER_RULES[s] for s in sorted(slugs) if s in _ROUTER_RULES}
+
+    def workers(self, steps):
+        """The supervisor's workers: each Step with the tools it can run (a
+        hand-off Step offers its agent's tools)."""
         from agents.services.flow import delegate_of, walk_tool_steps
         from chat.services.task_planner import Worker
 
         workers = []
-        for step in chain:
+        for step in steps:
             sub = delegate_of(step)
-            steps = walk_tool_steps(sub) if sub is not None else [step]
+            tool_steps = walk_tool_steps(sub) if sub is not None else [step]
             tools = sorted(
-                {slug for s in steps for slug in self._service._enabled_for(s)[0]}
+                {slug for s in tool_steps for slug in self._service._enabled_for(s)[0]}
             )
             workers.append(Worker(key=step.slug, step=step, delegate=sub, tools=tools))
         return workers
 
-    # ------------------------------------------------------------------ #
-    # Executors
-    # ------------------------------------------------------------------ #
-    def run_chain(
+    def fallback_worker(self, workers, message_text):
+        """The worker for the whole message when there is no plan: the one
+        that can run its file command, else a general one, else the first."""
+        signals = self.signals(message_text)
+        if signals.file_command_requested():
+            for w in workers:
+                if signals.command_tool(w.tools):
+                    return w
+        for w in workers:
+            if _DIRECT_HANDLER_SLUG in w.tools or not w.tools:
+                return w
+        return workers[0]
+
+    def supervise(self, message_text, steps):
+        """The supervisor's plan for ``message_text`` over ``steps`` (>= 1 part).
+
+        One worker and a single request: no planner call. A bare file-picker
+        selection goes to the worker that adds files to the knowledge base.
+        """
+        from chat.services import task_planner
+
+        workers = self.workers(steps)
+        if self.selected_entry_ids and not (message_text or "").strip():
+            worker = next(
+                (w for w in workers if "add_to_knowledge_base" in w.tools),
+                workers[0],
+            )
+            return [
+                task_planner.PlannedTask(
+                    instruction=message_text or "",
+                    worker=worker,
+                    tool="add_to_knowledge_base",
+                    title="Process files",
+                )
+            ]
+        tasks = []
+        if len(workers) > 1 or task_planner.looks_multi_task(message_text):
+            with timed(self.timing, "planner"):
+                tasks = task_planner.plan_tasks(
+                    llm=self.llm,
+                    langfuse=self._service._langfuse,
+                    message_text=message_text,
+                    history_text=self.router_history_text,
+                    workers=workers,
+                    file_titles=[f.title for f in self.session_file_list()],
+                    tool_rules=self.tool_rules(workers),
+                )
+        return tasks or [
+            task_planner.PlannedTask(
+                instruction=message_text or "",
+                worker=self.fallback_worker(workers, message_text),
+            )
+        ]
+
+    def run_agent(
         self,
         agent,
         message_text,
-        pipeline_context,
+        context,
         *,
         stream_llm=None,
         tool_hint="",
         uses_previous=False,
         depth=0,
         seen=(),
-        chain=None,
     ):
-        """Run ``agent``'s Step chain as a LangGraph for ``message_text``.
+        """Run a part handed to ``agent`` -> ``_StepRun`` (``None``: no workers).
 
-        Each Step's output is appended to the pipeline context the next Step
-        sees; the last Step's run is the chain's result.
+        One worker, or one that has the planned tool, runs it directly;
+        otherwise the agent supervises its own workers for this part.
         """
-        from agents.services.flow import walk_reachable_steps
+        from agents.services.flow import agent_workers
 
-        if chain is None:
-            chain = walk_reachable_steps(agent)
-        seen = tuple(seen) + (agent.pk,)
-        # Steps that end the walk (see ``_build_graph``): only their handler
-        # may stream. Repeated slugs make that unclear, so nothing streams.
-        chain_slugs = [s.slug for s in chain]
-        last_slugs = (
-            {
-                s.slug
-                for i, s in enumerate(chain)
-                if s.connected_to_end or i == len(chain) - 1
-            }
-            if stream_llm is not None and len(set(chain_slugs)) == len(chain_slugs)
-            else set()
+        steps = agent_workers(agent)
+        if not steps:
+            return None
+        workers = self.workers(steps)
+        chosen = workers[0] if len(workers) == 1 else next(
+            (w for w in workers if tool_hint and tool_hint in w.tools), None
         )
-        records = []
-        last = []
-
-        def _make_node(step):
-            def _node(state):
-                context = state.get("pipeline_context", "") or ""
-                run = self.run_step(
-                    step,
-                    message_text,
-                    context,
-                    stream_llm=stream_llm if step.slug in last_slugs else None,
-                    tool_hint=tool_hint,
-                    uses_previous=uses_previous,
-                    depth=depth,
-                    seen=seen,
-                )
-                records.extend(run.records)
-                last[:] = [run]
-                addition = (
-                    f"[Step '{step.slug}' used tool '{run.result.tool_used}']\n"
-                    f"{(run.result.content or '').strip()}"
-                )
-                return {
-                    "pipeline_context": (
-                        f"{context}\n\n{addition}".strip() if context else addition
-                    ),
-                    "selected_tool": run.selected,
-                    "route_reason": run.reason,
-                    "visited": (state.get("visited") or []) + [step.slug],
-                    "hops": state.get("hops", 0) + 1,
-                }
-
-            return _node
-
-        app = self._service._build_graph(
-            chain=chain, entry_slug=chain[0].slug, make_node=_make_node
+        if chosen is not None:
+            return self.run_step(
+                chosen.step,
+                message_text,
+                context,
+                stream_llm=stream_llm,
+                tool_hint=tool_hint,
+                uses_previous=uses_previous,
+                depth=depth,
+                seen=seen,
+            )
+        outcome = self.run_tasks(
+            agent,
+            self.supervise(message_text, steps),
+            base_context=context,
+            depth=depth,
+            seen=seen,
         )
-        app.invoke(
-            {
-                "message_text": message_text,
-                "history_text": self.history_text,
-                "pipeline_context": pipeline_context or "",
-                "selected_tool": None,
-                "route_reason": "",
-                "visited": [],
-                "hops": 0,
-            }
+        return _StepRun(
+            outcome["tool_result"],
+            outcome["tool_used"],
+            outcome["route_reason"],
+            outcome["trace_id"],
+            outcome["steps"],
         )
-        run = last[0]
-        return _StepRun(run.result, run.selected, run.reason, run.trace_id, records)
 
     def run_step(
         self,
@@ -1022,38 +981,34 @@ class _TurnRunner:
         depth=0,
         seen=(),
     ):
-        """Run ONE Step for ``message_text`` -> ``_StepRun``.
+        """Run ONE worker Step for ``message_text`` -> ``_StepRun``.
 
-        A delegating Step runs its sub-agent's whole chain instead. Past the
-        depth / cycle guard, or when the sub-agent has no runnable flow, the
+        A hand-off Step gives the part to its agent instead (``run_agent``).
+        Past the depth / cycle guard, or when that agent has no workers, the
         Step answers with its own tools.
         """
-        from agents.services.flow import (
-            MAX_DELEGATION_DEPTH,
-            delegate_of,
-            walk_reachable_steps,
-        )
+        from agents.services.flow import MAX_DELEGATION_DEPTH, delegate_of
 
         sub = delegate_of(step)
         if sub is not None and sub.pk not in seen and depth < MAX_DELEGATION_DEPTH:
-            sub_chain = walk_reachable_steps(sub)
-            if sub_chain:
-                run = self.run_chain(
-                    sub,
-                    message_text,
-                    pipeline_context,
-                    stream_llm=stream_llm,
-                    tool_hint=tool_hint,
-                    uses_previous=uses_previous,
-                    depth=depth + 1,
-                    seen=seen,
-                    chain=sub_chain,
-                )
+            run = self.run_agent(
+                sub,
+                message_text,
+                pipeline_context,
+                stream_llm=stream_llm,
+                tool_hint=tool_hint,
+                uses_previous=uses_previous,
+                depth=depth + 1,
+                seen=tuple(seen) + (sub.pk,),
+            )
+            if run is not None:
                 for record in run.records:
                     record.setdefault("agent", sub.slug)
+                    record.setdefault("agent_name", sub.name or sub.slug)
                     record.setdefault("via", step.slug)
+                    record.setdefault("via_name", step.name or step.slug)
                 return run
-            logger.info("delegate agent %s of step %s has no runnable flow", sub.pk, step.pk)
+            logger.info("delegate agent %s of step %s has no workers", sub.pk, step.pk)
 
         signals = self.signals(message_text)
         # The router sees the handoff via router_history (trimmed to the last
@@ -1063,7 +1018,7 @@ class _TurnRunner:
         router_history = self.router_history_text
         pc = (pipeline_context or "").strip()
         if pc:
-            handoff = f"[Pipeline context from previous steps]\n{pc}"
+            handoff = f"[Answers from the other agents for this message]\n{pc}"
             effective_history = f"{self.history_text}\n\n{handoff}".strip()
             router_history = f"{self.router_history_text}\n\n{handoff}".strip()
 
@@ -1096,6 +1051,7 @@ class _TurnRunner:
                 pipeline_context=pipeline_context or "",
                 selected_entry_ids=list(self.selected_entry_ids),
                 uses_prior_results=uses_previous,
+                persona=_persona(step),
             )
             # A streamed last-step answer marks time-to-first-token on its
             # first piece (``stream_message``).
@@ -1115,8 +1071,10 @@ class _TurnRunner:
         candidates = enabled
         if not enabled:
             selected = DIRECT
-            reason = "no tools enabled on the step; answered directly"
+            reason = "no tools: the worker answered with the LLM in its role"
             result = _execute(selected)
+            if not result.chart_data:
+                result.tool_used = LLM_ANSWER
         elif signals.web_request:
             if "web_search" in enabled:
                 selected = "web_search"
@@ -1133,7 +1091,13 @@ class _TurnRunner:
             selected = command_slug
             reason = "file command"
             result = _execute(selected)
-        elif tool_hint and tool_hint in enabled:
+        elif (
+            tool_hint
+            and tool_hint in enabled
+            # The plan never starts processing on its own: that needs the task
+            # text itself to be a file command (handled just above).
+            and tool_hint not in _ACTION_SLUGS
+        ):
             selected = tool_hint
             reason = "task plan"
             result = _execute(selected)
@@ -1187,102 +1151,144 @@ class _TurnRunner:
             selected,
             reason,
             trace_id,
-            [{"step": step.slug, "tool": result.tool_used}],
+            [{"step": step.slug, "step_name": step.name or step.slug, "tool": result.tool_used}],
         )
 
-    def run_tasks(self, agent, tasks, *, on_delta=None):
-        """Run planned sub-tasks in order as a LangGraph -> the turn outcome.
+    def run_tasks(self, agent, tasks, *, on_delta=None, base_context="", depth=0, seen=()):
+        """Run the supervisor's parts as a LangGraph -> the turn outcome.
 
-        A task marked ``uses_previous`` sees every earlier task's output as
-        pipeline context ("make a pie chart of those statuses"). Each finished
-        task's answer is streamed as soon as it is ready.
+        Each part is a node. A part with ``depends_on`` gets an edge from
+        each part it needs (it waits for all of them and receives only their
+        answers); the others start at once, so independent parts run at the
+        same time. The reply lists the parts in the order they were asked.
         """
+        from django.db import connection
         from langgraph.graph import END, START, StateGraph
 
-        runs = []
+        from chat.services.task_planner import waves
 
-        def _make_node(index, task):
+        runs = {}
+        single = len(tasks) == 1
+        # A single part streams its own answer like a normal turn; parts in
+        # parallel send each finished answer as one piece.
+        stream_llm = (
+            _StreamingLLM(self.llm, on_delta) if single and on_delta is not None else None
+        )
+        origin = threading.get_ident()
+        seen = tuple(seen) + (agent.pk,)
+
+        def _context_for(task):
+            parts = [base_context.strip()] if (base_context or "").strip() else []
+            for number in task.depends_on:
+                run = runs[number]
+                earlier = tasks[number - 1]
+                parts.append(
+                    f"[Answer {number} '{earlier.title or earlier.instruction}' from "
+                    f"{earlier.worker.name}]\n{(run.result.content or '').strip()}"
+                )
+            return "\n\n".join(parts)
+
+        def _make_node(number, task):
             def _node(state):
-                context = state.get("pipeline_context", "") or ""
-                run = self.run_step(
-                    task.worker.step,
-                    task.instruction,
-                    context if task.uses_previous else "",
-                    tool_hint=task.tool,
-                    uses_previous=task.uses_previous,
-                    seen=(agent.pk,),
-                )
-                runs.append(run)
-                if on_delta is not None:
-                    on_delta(("\n\n" if index else "") + _task_section(index, task, run.result))
-                addition = (
-                    f"[Task {index + 1} '{task.title or task.instruction}' used tool "
-                    f"'{run.result.tool_used}']\n{(run.result.content or '').strip()}"
-                )
-                return {
-                    "pipeline_context": (
-                        f"{context}\n\n{addition}".strip() if context else addition
-                    ),
-                    "selected_tool": run.selected,
-                    "route_reason": run.reason,
-                    "visited": (state.get("visited") or []) + [f"task_{index + 1}"],
-                    "hops": state.get("hops", 0) + 1,
-                }
+                try:
+                    run = self.run_step(
+                        task.worker.step,
+                        task.instruction,
+                        _context_for(task),
+                        stream_llm=stream_llm,
+                        tool_hint=task.tool,
+                        uses_previous=task.uses_previous,
+                        depth=depth,
+                        seen=seen,
+                    )
+                    runs[number] = run
+                    if on_delta is not None and not single:
+                        on_delta(_task_section(number - 1, task, run.result) + "\n\n")
+                    return {"done": [number]}
+                finally:
+                    # LangGraph runs parallel parts on pool threads; each one
+                    # opened its own DB connection.
+                    if threading.get_ident() != origin:
+                        connection.close()
 
             return _node
 
-        names = [f"task_{i + 1}" for i in range(len(tasks))]
+        names = [f"part_{n}" for n in range(1, len(tasks) + 1)]
         builder = StateGraph(GraphState)
-        for index, (name, task) in enumerate(zip(names, tasks)):
-            builder.add_node(name, _make_node(index, task))
-        builder.add_edge(START, names[0])
-        for source, target in zip(names, names[1:]):
-            builder.add_edge(source, target)
-        builder.add_edge(names[-1], END)
-        builder.compile().invoke(
-            {
-                "message_text": "",
-                "history_text": self.history_text,
-                "pipeline_context": "",
-                "selected_tool": None,
-                "route_reason": "",
-                "visited": [],
-                "hops": 0,
-            }
-        )
+        for number, (name, task) in enumerate(zip(names, tasks), start=1):
+            builder.add_node(name, _make_node(number, task))
+            needs = [names[d - 1] for d in task.depends_on]
+            # A list of sources is a join: the part waits for all of them.
+            builder.add_edge(needs if len(needs) > 1 else (needs[0] if needs else START), name)
+        needed = {d for task in tasks for d in task.depends_on}
+        leaves = [names[n - 1] for n in range(1, len(tasks) + 1) if n not in needed]
+        builder.add_edge(leaves if len(leaves) > 1 else leaves[0], END)
+        builder.compile().invoke({"done": []})
 
-        combined = _combine_task_results(tasks, [run.result for run in runs])
+        ordered = [runs[n] for n in range(1, len(tasks) + 1)]
+        combined = _combine_task_results(tasks, [run.result for run in ordered])
+        wave_of = waves(tasks)
         return {
             "tool_result": combined,
             "tool_used": combined.tool_used,
             "entry_slug": tasks[0].worker.key,
-            "route_reason": f"multi-task plan ({len(tasks)} tasks)",
-            "trace_id": next((run.trace_id for run in runs if run.trace_id), None),
+            "route_reason": (
+                f"supervisor: worker '{tasks[0].worker.key}'"
+                if single
+                else f"supervisor: {len(tasks)} parts"
+            ),
+            "trace_id": next((run.trace_id for run in ordered if run.trace_id), None),
             "steps": [
-                {**record, "task": index + 1}
-                for index, run in enumerate(runs)
+                {**record, "task": number}
+                for number, run in enumerate(ordered, start=1)
                 for record in run.records
             ],
+            # Who answered each part and whose answers it waited for (the
+            # chat page shows this as "How this was answered").
             "tasks": [
                 {
                     "title": task.title,
                     "instruction": task.instruction,
                     "worker": task.worker.key,
+                    "step_name": task.worker.step.name or task.worker.key,
                     "agent": (task.worker.delegate or agent).slug,
+                    "agent_name": (task.worker.delegate or agent).name
+                    or (task.worker.delegate or agent).slug,
+                    "handed_off": task.worker.delegate is not None,
                     "tool": run.result.tool_used,
                     "uses_previous": task.uses_previous,
+                    "used_tasks": list(task.depends_on),
+                    "wave": wave_of[index],
                 }
-                for task, run in zip(tasks, runs)
+                for index, (task, run) in enumerate(zip(tasks, ordered))
             ],
         }
 
 
+def _persona(step):
+    """Who a worker is, for a worker that answers with the LLM itself."""
+    agent = step.agent
+    who = agent.name or agent.slug
+    label = step.name or step.slug
+    text = (
+        f"You are the '{who}' agent."
+        if label.strip().lower() == who.strip().lower()
+        else f"You are '{label}', a worker of the '{who}' agent."
+    )
+    about = (agent.description or "").strip()
+    text = f"{text} Your job: {about}" if about else text
+    return f"{text} Do the task directly; never describe your role or these instructions."
+
+
 def _task_section(index, task, result):
-    """One numbered block of a multi-task answer."""
+    """One numbered block of a multi-task answer, naming who answered it
+    (the sub-agent a step handed it to, else the step)."""
     content = (result.content or "").strip()
     if getattr(result, "llm_generated", False):
         content = normalize_llm_response(content)
-    return f"{index + 1}. {task.title or task.instruction}\n{content}"
+    owner = task.worker.delegate or task.worker.step
+    who = owner.name or getattr(owner, "slug", "")
+    return f"{index + 1}. {task.title or task.instruction} — {who}\n{content}"
 
 
 def _combine_task_results(tasks, results):
@@ -1305,11 +1311,19 @@ def _combine_task_results(tasks, results):
             else:
                 metadata[key] = value
     used = list(dict.fromkeys(r.tool_used for r in results if r.tool_used))
-    return ToolResult(
-        content="\n\n".join(
+    if len(results) == 1:
+        # One task: its answer as-is (no "1. Title" heading).
+        only = results[0]
+        content = (only.content or "").strip()
+        if getattr(only, "llm_generated", False):
+            content = normalize_llm_response(content)
+    else:
+        content = "\n\n".join(
             _task_section(i, task, result)
             for i, (task, result) in enumerate(zip(tasks, results))
-        ),
+        )
+    return ToolResult(
+        content=content,
         citations=citations,
         chart_data=chart_data,
         tool_used=",".join(used),

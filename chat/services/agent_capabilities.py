@@ -10,13 +10,13 @@ fall back to the normal path, or must block the request:
   handler. It reads session file state only through
   ``session_files.list_files(session)`` and the read-only
   ``file_commands.effective_kind_from_files()`` helper.
-* It consumes the single shared reachable-Step walker
-  (``agents.services.flow.walk_reachable_steps``), so a reachability change can
+* It consumes the single shared worker list
+  (``agents.services.flow.agent_workers``), so a change to the workers can
   never let policy allow an action execution would not traverse.
 
 ``classify_intent`` mirrors the existing ``file_commands`` gates and the current
 router prompt precedence rather than guessing with an LLM. ``preflight`` and
-``preflight_for_intent`` map the classified intent against the Agent's reachable
+``preflight_for_intent`` map the classified intent against the Agent's workers' 
 ENABLED built-in tool slugs using the fixed policy table.
 """
 
@@ -67,6 +67,10 @@ _BUILTIN_SLUGS = frozenset(
         "document_processing_status",
     }
 )
+
+
+# A worker with no tools answers with the LLM itself (it has the chat history).
+LLM_WORKER = "__llm_worker__"
 
 
 # --------------------------------------------------------------------------- #
@@ -175,11 +179,11 @@ def classify_intent(message_text, session, attachment_ids, selected_entry_ids=()
 # Capability aggregation
 # --------------------------------------------------------------------------- #
 def _reachable_enabled_slugs(agent) -> set:
-    """Built-in slugs enabled on the Agent's REACHABLE Steps.
+    """Built-in slugs enabled on the Agent's workers (``LLM_WORKER`` too).
 
-    Uses the shared walker so orphan/unreachable Steps (which never execute)
-    cannot satisfy a capability. A delegating Step contributes its sub-agent's
-    reachable tools (``walk_tool_steps``), since that flow runs in its place.
+    A delegating worker contributes its sub-agent's tools (``walk_tool_steps``),
+    since that agent runs in its place. A worker with no enabled tool answers
+    with the LLM itself and adds ``LLM_WORKER``.
     A built-in slug counts even when its Tool row is type ``langfuse`` because
     ``_enabled_for`` resolves a registered slug to its handler; the decisive
     contract is the registered slug.
@@ -188,7 +192,10 @@ def _reachable_enabled_slugs(agent) -> set:
 
     slugs: set = set()
     for step in walk_tool_steps(agent):
-        for tool in step.tools.filter(is_enabled=True):
+        enabled = list(step.tools.filter(is_enabled=True))
+        if not enabled:
+            slugs.add(LLM_WORKER)
+        for tool in enabled:
             if tool.slug in _BUILTIN_SLUGS:
                 slugs.add(tool.slug)
     return slugs
@@ -217,27 +224,28 @@ def _policy_for_intent(intent, available):
         required = ("document_processing_status",)
         if "document_processing_status" in available:
             return "pipeline", required, "", ""
-        return "fallback", required, "missing enabled document_processing_status on reachable steps", ""
+        return "fallback", required, "missing enabled document_processing_status on the agent's workers", ""
     if intent == Intent.READ_LIST:
         required = ("document_processing_status", "add_to_knowledge_base")
         if available & set(required):
             return "pipeline", required, "", ""
-        return "fallback", required, "missing enabled document list capability on reachable steps", ""
+        return "fallback", required, "missing enabled document list capability on the agent's workers", ""
     if intent == Intent.READ_SUMMARY:
         required = ("chat_summarise",)
-        if "chat_summarise" in available:
+        # A no-tools worker summarises with the LLM itself (it sees the chat).
+        if "chat_summarise" in available or LLM_WORKER in available:
             return "pipeline", required, "", ""
-        return "fallback", required, "missing enabled chat_summarise on reachable steps", ""
+        return "fallback", required, "missing enabled chat_summarise on the agent's workers", ""
     if intent == Intent.READ_DOCUMENT:
         required = ("document_search",)
         if "document_search" in available:
             return "pipeline", required, "", ""
-        return "fallback", required, "missing enabled document_search on reachable steps", ""
+        return "fallback", required, "missing enabled document_search on the agent's workers", ""
     if intent == Intent.READ_EXTERNAL:
         required = ("web_search",)
         if "web_search" in available:
             return "pipeline", required, "", ""
-        return "fallback", required, "missing enabled web_search on reachable steps", ""
+        return "fallback", required, "missing enabled web_search on the agent's workers", ""
     # Intent.NONE: the selected Agent runs its own Step routers normally.
     return "pipeline", (), "", ""
 
@@ -246,9 +254,9 @@ def _policy_for_intent(intent, available):
 # Preflight entry points
 # --------------------------------------------------------------------------- #
 def _no_runnable_flow(agent) -> bool:
-    from agents.services.flow import walk_reachable_steps
+    from agents.services.flow import agent_workers
 
-    return not walk_reachable_steps(agent)
+    return not agent_workers(agent)
 
 
 def preflight(agent, session, message_text, attachment_ids, selected_entry_ids=()):
@@ -284,7 +292,7 @@ def preflight_for_intent(agent, session, intent):
     """Capability check for an endpoint action intent (no lexical classify).
 
     Accepts only ``ACTION_PROCESS`` or ``ACTION_STOP_RESUME``; any other value
-    raises ``ValueError`` for programmer misuse. Uses the same reachable-chain
+    raises ``ValueError`` for programmer misuse. Uses the same worker
     check and action-row mapping as :func:`preflight`, returning only
     ``pipeline`` or ``blocked``.
     """

@@ -115,17 +115,45 @@ start_worker() {
     "$name" "$(<"$STATE_DIR/$name.pid")" "$STATE_DIR/$name.log"
 }
 
-# Browser and temporal-ui-sso must both reach Keycloak as http://keycloak:8180.
-if ! grep -Eq '^[^#]*[[:space:]]keycloak([[:space:]]|$)' /etc/hosts; then
-  printf 'Warning: no "keycloak" entry in /etc/hosts; documents admin workflow links will fail.\n' >&2
-  printf 'Add it with: echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts\n' >&2
-fi
+ensure_keycloak_host() {
+  # Browser and temporal-ui-sso must both reach Keycloak as http://keycloak:8180
+  # (KC_HOSTNAME), so the name has to resolve on this machine too.
+  if grep -Eq '^[^#]*[[:space:]]keycloak([[:space:]]|$)' /etc/hosts; then
+    return 0
+  fi
+  printf 'Adding "127.0.0.1 keycloak" to /etc/hosts (needs sudo)...\n'
+  if echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts >/dev/null; then
+    printf 'Added keycloak to /etc/hosts.\n'
+  else
+    printf 'Warning: could not edit /etc/hosts; documents admin workflow links will fail.\n' >&2
+    printf 'Add it with: echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts\n' >&2
+  fi
+}
+
+wait_for_keycloak() {
+  local attempts=90
+  local url="http://127.0.0.1:8180/realms/agentic-flow/.well-known/openid-configuration"
+  for ((i = 0; i < attempts; i++)); do
+    if curl -fsS -o /dev/null "$url" 2>/dev/null; then
+      printf 'Keycloak is ready (realm agentic-flow).\n'
+      return 0
+    fi
+    sleep 2
+  done
+
+  "${COMPOSE[@]}" logs --tail=80 keycloak >&2
+  printf 'Timed out waiting for Keycloak on localhost:8180.\n' >&2
+  return 1
+}
+
+ensure_keycloak_host
 
 "${COMPOSE[@]}" up -d kafka temporal-postgresql temporal \
   temporal-ui temporal-ui-gate keycloak temporal-ui-sso
 wait_for_service_health kafka
 wait_for_service_health temporal-postgresql
 wait_for_temporal_port
+wait_for_keycloak
 start_worker kafka_worker
 start_worker temporal_worker
 
