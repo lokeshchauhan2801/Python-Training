@@ -6,6 +6,10 @@ This file holds ONLY the graph implementation: the router prompt, the
 ``langgraph`` ``StateGraph``, routes each message to one tool, and persists the
 resulting conversation turn.
 
+Multi-agent: a Step may delegate to another Agent (its sub-agent's chain runs
+in its place), and a message asking for several things is split by
+``chat.services.task_planner`` into ordered sub-tasks, each run by one Step.
+
 The tools themselves (and the registry) live in ``chat/services/llm_tools.py``.
 They are imported here and the registry symbols are re-exported so existing
 imports of ``chat.services.langgraph_service.available_slugs`` /
@@ -17,6 +21,7 @@ import logging
 import queue
 import re
 import threading
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 from django.db import connection, transaction
@@ -236,7 +241,8 @@ class LangGraphChatService:
 
         The graph runs in a worker thread. Only the chain's last step gets a
         streaming LLM, so ``("delta", text)`` items are that step's answer
-        pieces (the router and earlier steps never stream). Ends with
+        pieces (the router and earlier steps never stream); a multi-task turn
+        sends each finished sub-task's answer as one piece. Ends with
         ``("done", turn)``; the saved turn and the errors raised are the same
         as ``process_message``.
         """
@@ -269,7 +275,7 @@ class LangGraphChatService:
                         router_history_text=router_history_text,
                         agent=self._agent,
                         llm=llm,
-                        stream_llm=_StreamingLLM(llm, _on_delta),
+                        on_delta=_on_delta,
                         selected_entry_ids=selected_entry_ids,
                         timing=timing,
                     ),
@@ -409,6 +415,8 @@ class LangGraphChatService:
                     "node_slug": result["entry_slug"],
                     "route_reason": result["route_reason"],
                     "steps": result["steps"],
+                    # Multi-task turns: one entry per planned sub-task.
+                    **({"tasks": result["tasks"]} if result.get("tasks") else {}),
                     "source": "langgraph",
                     "trace_id": result["trace_id"],
                     # Selected-Agent pipeline provenance (merged last so it wins
@@ -447,313 +455,70 @@ class LangGraphChatService:
         selected_entry_ids=None,
         router_history_text=None,
         timing=None,
-        stream_llm=None,
+        on_delta=None,
     ):
+        """Run one turn through ``agent``'s flow -> the outcome ``_persist`` saves.
+
+        A message that asks for several things is split by the task planner
+        into ordered sub-tasks, each run by one worker Step (its own tools or a
+        delegated sub-agent). Any other message runs the Step chain. Streamed
+        answer text goes to ``on_delta``.
+        """
         from agents.services.flow import walk_reachable_steps
+        from chat.services import task_planner
 
-        # The router sees only the last CHAT_ROUTER_TURNS turns; the tool
-        # handlers still get the full (capped) history.
-        if router_history_text is None:
-            router_history_text = history_text
-
-        selected_entry_ids = list(selected_entry_ids or [])
         chain = walk_reachable_steps(agent)
         if not chain:
             raise ValueError("Selected agent has no runnable flow.")
-        entry_slug = chain[0].slug if chain else ""
-        # Steps that end the walk (see ``_build_graph``): only their handler
-        # may stream. Repeated slugs make that unclear, so nothing streams.
-        chain_slugs = [s.slug for s in chain]
-        last_slugs = (
-            {
-                s.slug
-                for i, s in enumerate(chain)
-                if s.connected_to_end or i == len(chain) - 1
-            }
-            if stream_llm is not None and len(set(chain_slugs)) == len(chain_slugs)
-            else set()
+
+        runner = _TurnRunner(
+            self,
+            user=user,
+            conversation=conversation,
+            company=company,
+            attachment_ids=list(attachment_ids or []),
+            model_name=model_name,
+            history_text=history_text,
+            # The router sees only the last CHAT_ROUTER_TURNS turns; the tool
+            # handlers still get the full (capped) history.
+            router_history_text=(
+                history_text if router_history_text is None else router_history_text
+            ),
+            llm=llm,
+            selected_entry_ids=list(selected_entry_ids or []),
+            timing=timing,
         )
 
-        outcome = {
-            "tool_result": None,
-            "tool_used": "",
-            "entry_slug": entry_slug,
-            "route_reason": "",
-            "trace_id": None,
-            "steps": [],
-        }
-
-        has_attachment = bool(attachment_ids)
-        from chat.services.chat_service import ChatService
-
-        is_chart = ChatService._is_chart_request(message_text or "")
-        _files = []
-        _file_command = []
-
-        def session_file_list():
-            if not _files:
-                from chat.services import session_files
-
-                _files.append(
-                    session_files.list_files(conversation)
-                    if conversation is not None
-                    else []
+        tasks = []
+        picker_only = runner.selected_entry_ids and not (message_text or "").strip()
+        if not picker_only and task_planner.looks_multi_task(message_text):
+            with timed(timing, "planner"):
+                tasks = task_planner.plan_tasks(
+                    llm=llm,
+                    langfuse=self._langfuse,
+                    message_text=message_text,
+                    history_text=runner.router_history_text,
+                    workers=runner.workers(chain),
+                    file_titles=[f.title for f in runner.session_file_list()],
                 )
-            return _files[0]
+        if tasks:
+            return runner.run_tasks(agent, tasks, on_delta=on_delta)
 
-        def has_files():
-            return has_attachment or bool(session_file_list())
-
-        def command_kind():
-            """The message's file-command kind (``Kind.PROCESS`` for a bare
-            picker selection), or ``Kind.NONE``."""
-            if not _file_command:
-                from chat.services import file_commands
-
-                kind = file_commands.classify(message_text).kind
-                if selected_entry_ids and not (message_text or "").strip():
-                    kind = file_commands.Kind.PROCESS
-                _file_command.append(kind)
-            return _file_command[0]
-
-        def file_command_requested():
-            from chat.services import file_commands
-
-            return command_kind() != file_commands.Kind.NONE
-
-        def command_tool(enabled):
-            """The single enabled tool that can run this message's file command,
-            or None (no command, or more than one candidate: the router picks).
-
-            PROCESS runs only on ``add_to_knowledge_base`` and STATUS only on
-            ``document_processing_status``; STOP / RESUME / LIST run on either.
-            The effective kind is used, so a bare "continue" with nothing
-            stopped is not a command.
-            """
-            from chat.services import file_commands
-
-            Kind = file_commands.Kind
-            kind = command_kind()
-            if kind != Kind.PROCESS and conversation is not None:
-                kind = file_commands.effective_kind(
-                    file_commands.classify(message_text), conversation
-                ) or Kind.NONE
-            capable = {
-                Kind.PROCESS: ("add_to_knowledge_base",),
-                Kind.STATUS: ("document_processing_status",),
-                Kind.STOP: ("add_to_knowledge_base", "document_processing_status"),
-                Kind.RESUME: ("add_to_knowledge_base", "document_processing_status"),
-                Kind.LIST: ("add_to_knowledge_base", "document_processing_status"),
-            }.get(kind, ())
-            available = [slug for slug in capable if slug in enabled]
-            return available[0] if len(available) == 1 else None
-
-        _follow_up = []
-
-        def follows_file_turn():
-            """The previous turn was answered from a file (router decides
-            whether this message is a follow-up about it)."""
-            if not _follow_up:
-                _follow_up.append(
-                    ChatService._follows_file_turn(conversation, message_text)
-                )
-            return _follow_up[0]
-
-        def file_referenced():
-            from chat.services import file_matching
-
-            return file_matching.references_file(
-                message_text, session_file_list()
-            ) or follows_file_turn()
-
-        def _make_node(step):
-            """Build a FULL router-executing node for ``step``.
-
-            The closure captures only the IMMUTABLE step row, the ORIGINAL
-            history, and the per-turn inputs — NOT pipeline_context /
-            effective_history, which are read from ``state`` inside the body at
-            run time (capturing them would bake a stale history into the node).
-            """
-
-            def _node(state):
-                pipeline_context = state.get("pipeline_context", "") or ""
-                # The router sees the handoff via router_history (trimmed to the
-                # last CHAT_ROUTER_TURNS turns); the handler sees it via
-                # effective_history + ctx.pipeline_context (same source).
-                effective_history = history_text
-                router_history = router_history_text
-                pc = pipeline_context.strip()
-                if pc:
-                    handoff = f"[Pipeline context from previous steps]\n{pc}"
-                    effective_history = (
-                        f"{history_text}\n\n{handoff}"
-                    ).strip()
-                    router_history = (
-                        f"{router_history_text}\n\n{handoff}"
-                    ).strip()
-
-                enabled, tool_rows = self._enabled_for(step)
-                # The router always gets ``llm`` (never streams); a final
-                # step's handler gets the streaming proxy when streaming.
-                step_llm = stream_llm if step.slug in last_slugs else llm
-
-                def _execute(slug):
-                    """Run the handler for ``slug`` -> ToolResult (keying verbatim)."""
-                    handler_slug = _DIRECT_HANDLER_SLUG if slug == DIRECT else slug
-                    handler = get_handler(handler_slug)
-                    tool_row = tool_rows.get(handler_slug)
-                    if handler is None:
-                        prompt_only = (
-                            tool_row is not None and tool_row.type == "langfuse"
-                        )
-                        handler = get_handler(
-                            "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
-                        )
-                    ctx = ToolContext(
-                        user=user,
-                        company=company,
-                        conversation=conversation,
-                        message_text=message_text,
-                        history_text=effective_history,
-                        attachment_ids=list(attachment_ids or []),
-                        model_name=model_name,
-                        tool=tool_row,
-                        llm=step_llm,
-                        langfuse=self._langfuse,
-                        pipeline_context=pipeline_context,
-                        selected_entry_ids=list(selected_entry_ids),
-                    )
-                    # A streamed last-step answer marks time-to-first-token
-                    # on its first piece (``stream_message``).
-                    with timed(timing, "llm"):
-                        result = handler(ctx)
-                    if not result.tool_used:
-                        result.tool_used = handler_slug
-                    return result
-
-                # Precedence: an empty Step answers directly; an explicit web
-                # request needs web_search; a file command runs the Step's
-                # command tool; a chart naming a chat file reads it
-                # with document_search; files that the message does not
-                # reference never steer routing; else the strict router picks
-                # one of THIS Step's enabled tools.
-                trace_id = None
-                candidates = enabled
-                if not enabled:
-                    selected = DIRECT
-                    reason = "no tools enabled on the step; answered directly"
-                    result = _execute(selected)
-                elif _requests_web_source(message_text):
-                    if "web_search" in enabled:
-                        selected = "web_search"
-                        reason = "explicit web-source request"
-                        result = _execute(selected)
-                    else:
-                        selected = "web_search_unavailable"
-                        reason = "explicit web-source request but web_search is disabled"
-                        result = ToolResult(
-                            content="Web search is unavailable for this assistant.",
-                            tool_used=selected,
-                        )
-                elif (command_slug := command_tool(enabled)) is not None:
-                    selected = command_slug
-                    reason = "file command"
-                    result = _execute(selected)
-                elif (
-                    is_chart
-                    and "document_search" in enabled
-                    and file_referenced()
-                    and not file_command_requested()
-                ):
-                    selected = "document_search"
-                    reason = "explicit file reference"
-                    result = _execute(selected)
-                elif (
-                    has_attachment
-                    and "document_search" in enabled
-                    and not file_command_requested()
-                ):
-                    # A file attached on THIS turn is referenced by the message
-                    # itself (as on the Normal chat path), even when the text
-                    # never says "file" ("can you recheck and give the PAN").
-                    selected = "document_search"
-                    reason = "file attached on this turn"
-                    result = _execute(selected)
-                else:
-                    unreferenced_files = (
-                        has_files()
-                        and not file_referenced()
-                        and not file_command_requested()
-                    )
-                    if unreferenced_files:
-                        candidates = [
-                            s for s in enabled if s not in _FILE_ONLY_SLUGS
-                        ] or enabled
-                    if unreferenced_files and candidates == [_DIRECT_HANDLER_SLUG]:
-                        selected = _DIRECT_HANDLER_SLUG
-                        reason = "general request without an explicit file reference"
-                    else:
-                        selected, reason, trace_id = self._route(
-                            message_text=message_text,
-                            history_text=router_history,
-                            enabled_tools=candidates,
-                            step=step,
-                            tool_rows=tool_rows,
-                            llm=llm,
-                            has_attachment=has_attachment,
-                            follows_file_turn=follows_file_turn(),
-                            timing=timing,
-                        )
-                    result = _execute(selected)
-
-                outcome["steps"].append(
-                    {"step": step.slug, "tool": result.tool_used}
-                )
-                outcome["tool_result"] = result
-                outcome["tool_used"] = result.tool_used
-                outcome["route_reason"] = reason
-                outcome["trace_id"] = trace_id
-
-                addition = (
-                    f"[Step '{step.slug}' used tool '{result.tool_used}']\n"
-                    f"{(result.content or '').strip()}"
-                )
-                new_context = (
-                    f"{pipeline_context}\n\n{addition}".strip()
-                    if pipeline_context
-                    else addition
-                )
-                return {
-                    "pipeline_context": new_context,
-                    "selected_tool": selected,
-                    "route_reason": reason,
-                    "visited": (state.get("visited") or []) + [step.slug],
-                    "hops": state.get("hops", 0) + 1,
-                }
-
-            return _node
-
-        app = self._build_graph(
-            chain=chain,
-            entry_slug=entry_slug,
-            make_node=_make_node,
+        # Only the chain's last step gets a streaming LLM (``run_chain``).
+        stream_llm = _StreamingLLM(llm, on_delta) if on_delta is not None else None
+        run = runner.run_chain(
+            agent, message_text, "", stream_llm=stream_llm, chain=chain
         )
-
-        app.invoke(
-            {
-                "message_text": message_text,
-                "history_text": history_text,
-                "pipeline_context": "",
-                "selected_tool": None,
-                "route_reason": "",
-                "visited": [],
-                "hops": 0,
-            }
-        )
-
         # The walk is non-empty (validated above) and the orchestrator gate +
         # policy preflight guarantee a runnable chain, so a node always runs.
-        return outcome
+        return {
+            "tool_result": run.result,
+            "tool_used": run.result.tool_used,
+            "entry_slug": chain[0].slug,
+            "route_reason": run.reason,
+            "trace_id": run.trace_id,
+            "steps": run.records,
+        }
 
     def _build_graph(self, *, chain, entry_slug, make_node):
         """Compile a ``StateGraph`` from the linear Step chain.
@@ -974,3 +739,579 @@ class LangGraphChatService:
             if isinstance(value, str) and value:
                 return value
         return None
+
+
+@dataclass
+class _StepRun:
+    """What running one Step (or a whole chain) produced."""
+
+    result: ToolResult
+    selected: str = ""
+    reason: str = ""
+    trace_id: str | None = None
+    records: list = field(default_factory=list)
+
+
+class _MessageSignals:
+    """Cached facts about ONE message that the Step precedence reads.
+
+    The message is the turn's own text, or a planned sub-task's instruction.
+    """
+
+    def __init__(
+        self,
+        message_text,
+        *,
+        conversation,
+        attachment_ids,
+        selected_entry_ids,
+        session_file_list,
+    ):
+        from chat.services.chat_service import ChatService
+
+        self.message_text = message_text or ""
+        self.has_attachment = bool(attachment_ids)
+        self.is_chart = ChatService._is_chart_request(self.message_text)
+        self.web_request = _requests_web_source(self.message_text)
+        self._conversation = conversation
+        self._selected_entry_ids = selected_entry_ids
+        self._session_file_list = session_file_list
+        self._kind = None
+        self._follow_up = None
+
+    def has_files(self):
+        return self.has_attachment or bool(self._session_file_list())
+
+    def command_kind(self):
+        """The message's file-command kind (``Kind.PROCESS`` for a bare
+        picker selection), or ``Kind.NONE``."""
+        if self._kind is None:
+            from chat.services import file_commands
+
+            kind = file_commands.classify(self.message_text).kind
+            if self._selected_entry_ids and not self.message_text.strip():
+                kind = file_commands.Kind.PROCESS
+            self._kind = kind
+        return self._kind
+
+    def file_command_requested(self):
+        from chat.services import file_commands
+
+        return self.command_kind() != file_commands.Kind.NONE
+
+    def command_tool(self, enabled):
+        """The single enabled tool that can run this message's file command,
+        or None (no command, or more than one candidate: the router picks).
+
+        PROCESS runs only on ``add_to_knowledge_base`` and STATUS only on
+        ``document_processing_status``; STOP / RESUME / LIST run on either.
+        The effective kind is used, so a bare "continue" with nothing
+        stopped is not a command.
+        """
+        from chat.services import file_commands
+
+        Kind = file_commands.Kind
+        kind = self.command_kind()
+        if kind != Kind.PROCESS and self._conversation is not None:
+            kind = file_commands.effective_kind(
+                file_commands.classify(self.message_text), self._conversation
+            ) or Kind.NONE
+        capable = {
+            Kind.PROCESS: ("add_to_knowledge_base",),
+            Kind.STATUS: ("document_processing_status",),
+            Kind.STOP: ("add_to_knowledge_base", "document_processing_status"),
+            Kind.RESUME: ("add_to_knowledge_base", "document_processing_status"),
+            Kind.LIST: ("add_to_knowledge_base", "document_processing_status"),
+        }.get(kind, ())
+        available = [slug for slug in capable if slug in enabled]
+        return available[0] if len(available) == 1 else None
+
+    def follows_file_turn(self):
+        """The previous turn was answered from a file (router decides
+        whether this message is a follow-up about it)."""
+        if self._follow_up is None:
+            from chat.services.chat_service import ChatService
+
+            self._follow_up = ChatService._follows_file_turn(
+                self._conversation, self.message_text
+            )
+        return self._follow_up
+
+    def file_referenced(self):
+        from chat.services import file_matching
+
+        return file_matching.references_file(
+            self.message_text, self._session_file_list()
+        ) or self.follows_file_turn()
+
+
+class _TurnRunner:
+    """One turn's inputs plus the Step, sub-agent and task executors.
+
+    A delegated sub-agent and a planned sub-task run the very same Step
+    precedence as the selected Agent's own chain; only the message text and
+    the pipeline context differ.
+    """
+
+    def __init__(
+        self,
+        service,
+        *,
+        user,
+        conversation,
+        company,
+        attachment_ids,
+        model_name,
+        history_text,
+        router_history_text,
+        llm,
+        selected_entry_ids,
+        timing,
+    ):
+        self._service = service
+        self.user = user
+        self.conversation = conversation
+        self.company = company
+        self.attachment_ids = attachment_ids
+        self.model_name = model_name
+        self.history_text = history_text
+        self.router_history_text = router_history_text
+        self.llm = llm
+        self.selected_entry_ids = selected_entry_ids
+        self.timing = timing
+        self._files = None
+        self._signals = {}
+
+    def session_file_list(self):
+        if self._files is None:
+            from chat.services import session_files
+
+            self._files = (
+                session_files.list_files(self.conversation)
+                if self.conversation is not None
+                else []
+            )
+        return self._files
+
+    def signals(self, message_text):
+        key = message_text or ""
+        if key not in self._signals:
+            self._signals[key] = _MessageSignals(
+                key,
+                conversation=self.conversation,
+                attachment_ids=self.attachment_ids,
+                selected_entry_ids=self.selected_entry_ids,
+                session_file_list=self.session_file_list,
+            )
+        return self._signals[key]
+
+    def workers(self, chain):
+        """The planner's workers: each chain Step with the tools it can run
+        (a delegating Step offers its sub-agent's tools)."""
+        from agents.services.flow import delegate_of, walk_tool_steps
+        from chat.services.task_planner import Worker
+
+        workers = []
+        for step in chain:
+            sub = delegate_of(step)
+            steps = walk_tool_steps(sub) if sub is not None else [step]
+            tools = sorted(
+                {slug for s in steps for slug in self._service._enabled_for(s)[0]}
+            )
+            workers.append(Worker(key=step.slug, step=step, delegate=sub, tools=tools))
+        return workers
+
+    # ------------------------------------------------------------------ #
+    # Executors
+    # ------------------------------------------------------------------ #
+    def run_chain(
+        self,
+        agent,
+        message_text,
+        pipeline_context,
+        *,
+        stream_llm=None,
+        tool_hint="",
+        uses_previous=False,
+        depth=0,
+        seen=(),
+        chain=None,
+    ):
+        """Run ``agent``'s Step chain as a LangGraph for ``message_text``.
+
+        Each Step's output is appended to the pipeline context the next Step
+        sees; the last Step's run is the chain's result.
+        """
+        from agents.services.flow import walk_reachable_steps
+
+        if chain is None:
+            chain = walk_reachable_steps(agent)
+        seen = tuple(seen) + (agent.pk,)
+        # Steps that end the walk (see ``_build_graph``): only their handler
+        # may stream. Repeated slugs make that unclear, so nothing streams.
+        chain_slugs = [s.slug for s in chain]
+        last_slugs = (
+            {
+                s.slug
+                for i, s in enumerate(chain)
+                if s.connected_to_end or i == len(chain) - 1
+            }
+            if stream_llm is not None and len(set(chain_slugs)) == len(chain_slugs)
+            else set()
+        )
+        records = []
+        last = []
+
+        def _make_node(step):
+            def _node(state):
+                context = state.get("pipeline_context", "") or ""
+                run = self.run_step(
+                    step,
+                    message_text,
+                    context,
+                    stream_llm=stream_llm if step.slug in last_slugs else None,
+                    tool_hint=tool_hint,
+                    uses_previous=uses_previous,
+                    depth=depth,
+                    seen=seen,
+                )
+                records.extend(run.records)
+                last[:] = [run]
+                addition = (
+                    f"[Step '{step.slug}' used tool '{run.result.tool_used}']\n"
+                    f"{(run.result.content or '').strip()}"
+                )
+                return {
+                    "pipeline_context": (
+                        f"{context}\n\n{addition}".strip() if context else addition
+                    ),
+                    "selected_tool": run.selected,
+                    "route_reason": run.reason,
+                    "visited": (state.get("visited") or []) + [step.slug],
+                    "hops": state.get("hops", 0) + 1,
+                }
+
+            return _node
+
+        app = self._service._build_graph(
+            chain=chain, entry_slug=chain[0].slug, make_node=_make_node
+        )
+        app.invoke(
+            {
+                "message_text": message_text,
+                "history_text": self.history_text,
+                "pipeline_context": pipeline_context or "",
+                "selected_tool": None,
+                "route_reason": "",
+                "visited": [],
+                "hops": 0,
+            }
+        )
+        run = last[0]
+        return _StepRun(run.result, run.selected, run.reason, run.trace_id, records)
+
+    def run_step(
+        self,
+        step,
+        message_text,
+        pipeline_context,
+        *,
+        stream_llm=None,
+        tool_hint="",
+        uses_previous=False,
+        depth=0,
+        seen=(),
+    ):
+        """Run ONE Step for ``message_text`` -> ``_StepRun``.
+
+        A delegating Step runs its sub-agent's whole chain instead. Past the
+        depth / cycle guard, or when the sub-agent has no runnable flow, the
+        Step answers with its own tools.
+        """
+        from agents.services.flow import (
+            MAX_DELEGATION_DEPTH,
+            delegate_of,
+            walk_reachable_steps,
+        )
+
+        sub = delegate_of(step)
+        if sub is not None and sub.pk not in seen and depth < MAX_DELEGATION_DEPTH:
+            sub_chain = walk_reachable_steps(sub)
+            if sub_chain:
+                run = self.run_chain(
+                    sub,
+                    message_text,
+                    pipeline_context,
+                    stream_llm=stream_llm,
+                    tool_hint=tool_hint,
+                    uses_previous=uses_previous,
+                    depth=depth + 1,
+                    seen=seen,
+                    chain=sub_chain,
+                )
+                for record in run.records:
+                    record.setdefault("agent", sub.slug)
+                    record.setdefault("via", step.slug)
+                return run
+            logger.info("delegate agent %s of step %s has no runnable flow", sub.pk, step.pk)
+
+        signals = self.signals(message_text)
+        # The router sees the handoff via router_history (trimmed to the last
+        # CHAT_ROUTER_TURNS turns); the handler sees it via effective_history +
+        # ctx.pipeline_context (same source).
+        effective_history = self.history_text
+        router_history = self.router_history_text
+        pc = (pipeline_context or "").strip()
+        if pc:
+            handoff = f"[Pipeline context from previous steps]\n{pc}"
+            effective_history = f"{self.history_text}\n\n{handoff}".strip()
+            router_history = f"{self.router_history_text}\n\n{handoff}".strip()
+
+        enabled, tool_rows = self._service._enabled_for(step)
+        # The router always gets ``llm`` (never streams); a final step's
+        # handler gets the streaming proxy when streaming.
+        step_llm = stream_llm or self.llm
+
+        def _execute(slug):
+            """Run the handler for ``slug`` -> ToolResult (keying verbatim)."""
+            handler_slug = _DIRECT_HANDLER_SLUG if slug == DIRECT else slug
+            handler = get_handler(handler_slug)
+            tool_row = tool_rows.get(handler_slug)
+            if handler is None:
+                prompt_only = tool_row is not None and tool_row.type == "langfuse"
+                handler = get_handler(
+                    "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
+                )
+            ctx = ToolContext(
+                user=self.user,
+                company=self.company,
+                conversation=self.conversation,
+                message_text=message_text,
+                history_text=effective_history,
+                attachment_ids=list(self.attachment_ids),
+                model_name=self.model_name,
+                tool=tool_row,
+                llm=step_llm,
+                langfuse=self._service._langfuse,
+                pipeline_context=pipeline_context or "",
+                selected_entry_ids=list(self.selected_entry_ids),
+                uses_prior_results=uses_previous,
+            )
+            # A streamed last-step answer marks time-to-first-token on its
+            # first piece (``stream_message``).
+            with timed(self.timing, "llm"):
+                result = handler(ctx)
+            if not result.tool_used:
+                result.tool_used = handler_slug
+            return result
+
+        # Precedence: an empty Step answers directly; an explicit web request
+        # needs web_search; a file command runs the Step's command tool; a
+        # planned task's tool runs when this Step has it; a chart naming a chat
+        # file reads it with document_search; files that the message does not
+        # reference never steer routing; else the strict router picks one of
+        # THIS Step's enabled tools.
+        trace_id = None
+        candidates = enabled
+        if not enabled:
+            selected = DIRECT
+            reason = "no tools enabled on the step; answered directly"
+            result = _execute(selected)
+        elif signals.web_request:
+            if "web_search" in enabled:
+                selected = "web_search"
+                reason = "explicit web-source request"
+                result = _execute(selected)
+            else:
+                selected = "web_search_unavailable"
+                reason = "explicit web-source request but web_search is disabled"
+                result = ToolResult(
+                    content="Web search is unavailable for this assistant.",
+                    tool_used=selected,
+                )
+        elif (command_slug := signals.command_tool(enabled)) is not None:
+            selected = command_slug
+            reason = "file command"
+            result = _execute(selected)
+        elif tool_hint and tool_hint in enabled:
+            selected = tool_hint
+            reason = "task plan"
+            result = _execute(selected)
+        elif (
+            signals.is_chart
+            and "document_search" in enabled
+            and signals.file_referenced()
+            and not signals.file_command_requested()
+        ):
+            selected = "document_search"
+            reason = "explicit file reference"
+            result = _execute(selected)
+        elif (
+            signals.has_attachment
+            and "document_search" in enabled
+            and not signals.file_command_requested()
+        ):
+            # A file attached on THIS turn is referenced by the message itself
+            # (as on the Normal chat path), even when the text never says
+            # "file" ("can you recheck and give the PAN").
+            selected = "document_search"
+            reason = "file attached on this turn"
+            result = _execute(selected)
+        else:
+            unreferenced_files = (
+                signals.has_files()
+                and not signals.file_referenced()
+                and not signals.file_command_requested()
+            )
+            if unreferenced_files:
+                candidates = [s for s in enabled if s not in _FILE_ONLY_SLUGS] or enabled
+            if unreferenced_files and candidates == [_DIRECT_HANDLER_SLUG]:
+                selected = _DIRECT_HANDLER_SLUG
+                reason = "general request without an explicit file reference"
+            else:
+                selected, reason, trace_id = self._service._route(
+                    message_text=message_text,
+                    history_text=router_history,
+                    enabled_tools=candidates,
+                    step=step,
+                    tool_rows=tool_rows,
+                    llm=self.llm,
+                    has_attachment=signals.has_attachment,
+                    follows_file_turn=signals.follows_file_turn(),
+                    timing=self.timing,
+                )
+            result = _execute(selected)
+
+        return _StepRun(
+            result,
+            selected,
+            reason,
+            trace_id,
+            [{"step": step.slug, "tool": result.tool_used}],
+        )
+
+    def run_tasks(self, agent, tasks, *, on_delta=None):
+        """Run planned sub-tasks in order as a LangGraph -> the turn outcome.
+
+        A task marked ``uses_previous`` sees every earlier task's output as
+        pipeline context ("make a pie chart of those statuses"). Each finished
+        task's answer is streamed as soon as it is ready.
+        """
+        from langgraph.graph import END, START, StateGraph
+
+        runs = []
+
+        def _make_node(index, task):
+            def _node(state):
+                context = state.get("pipeline_context", "") or ""
+                run = self.run_step(
+                    task.worker.step,
+                    task.instruction,
+                    context if task.uses_previous else "",
+                    tool_hint=task.tool,
+                    uses_previous=task.uses_previous,
+                    seen=(agent.pk,),
+                )
+                runs.append(run)
+                if on_delta is not None:
+                    on_delta(("\n\n" if index else "") + _task_section(index, task, run.result))
+                addition = (
+                    f"[Task {index + 1} '{task.title or task.instruction}' used tool "
+                    f"'{run.result.tool_used}']\n{(run.result.content or '').strip()}"
+                )
+                return {
+                    "pipeline_context": (
+                        f"{context}\n\n{addition}".strip() if context else addition
+                    ),
+                    "selected_tool": run.selected,
+                    "route_reason": run.reason,
+                    "visited": (state.get("visited") or []) + [f"task_{index + 1}"],
+                    "hops": state.get("hops", 0) + 1,
+                }
+
+            return _node
+
+        names = [f"task_{i + 1}" for i in range(len(tasks))]
+        builder = StateGraph(GraphState)
+        for index, (name, task) in enumerate(zip(names, tasks)):
+            builder.add_node(name, _make_node(index, task))
+        builder.add_edge(START, names[0])
+        for source, target in zip(names, names[1:]):
+            builder.add_edge(source, target)
+        builder.add_edge(names[-1], END)
+        builder.compile().invoke(
+            {
+                "message_text": "",
+                "history_text": self.history_text,
+                "pipeline_context": "",
+                "selected_tool": None,
+                "route_reason": "",
+                "visited": [],
+                "hops": 0,
+            }
+        )
+
+        combined = _combine_task_results(tasks, [run.result for run in runs])
+        return {
+            "tool_result": combined,
+            "tool_used": combined.tool_used,
+            "entry_slug": tasks[0].worker.key,
+            "route_reason": f"multi-task plan ({len(tasks)} tasks)",
+            "trace_id": next((run.trace_id for run in runs if run.trace_id), None),
+            "steps": [
+                {**record, "task": index + 1}
+                for index, run in enumerate(runs)
+                for record in run.records
+            ],
+            "tasks": [
+                {
+                    "title": task.title,
+                    "instruction": task.instruction,
+                    "worker": task.worker.key,
+                    "agent": (task.worker.delegate or agent).slug,
+                    "tool": run.result.tool_used,
+                    "uses_previous": task.uses_previous,
+                }
+                for task, run in zip(tasks, runs)
+            ],
+        }
+
+
+def _task_section(index, task, result):
+    """One numbered block of a multi-task answer."""
+    content = (result.content or "").strip()
+    if getattr(result, "llm_generated", False):
+        content = normalize_llm_response(content)
+    return f"{index + 1}. {task.title or task.instruction}\n{content}"
+
+
+def _combine_task_results(tasks, results):
+    """Merge the per-task ToolResults into the one turn the chat saves.
+
+    Text is numbered per task (each LLM answer already normalized), citations
+    are concatenated, the last chart wins and metadata merges in task order
+    (list values are concatenated, e.g. ``temporal_links``).
+    """
+    citations = []
+    chart_data = None
+    metadata = {}
+    for result in results:
+        citations.extend(result.citations or [])
+        if result.chart_data is not None:
+            chart_data = result.chart_data
+        for key, value in (result.metadata or {}).items():
+            if isinstance(value, list) and isinstance(metadata.get(key), list):
+                metadata[key] = metadata[key] + value
+            else:
+                metadata[key] = value
+    used = list(dict.fromkeys(r.tool_used for r in results if r.tool_used))
+    return ToolResult(
+        content="\n\n".join(
+            _task_section(i, task, result)
+            for i, (task, result) in enumerate(zip(tasks, results))
+        ),
+        citations=citations,
+        chart_data=chart_data,
+        tool_used=",".join(used),
+        metadata=metadata,
+    )

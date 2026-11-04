@@ -73,7 +73,7 @@ class StepAdmin(BaseModelAdmin):
     )
     search_fields = ("slug", "name")
     filter_horizontal = ("tools",)
-    raw_id_fields = ("agent", "next_step")
+    raw_id_fields = ("agent", "next_step", "delegate_agent")
     date_hierarchy = "created_at"
 
     @admin.display(description="ID")

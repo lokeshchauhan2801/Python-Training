@@ -835,6 +835,12 @@ def _pipeline_direct_reply(
         )
     if file_commands.classify(question).kind != file_commands.Kind.NONE:
         return None
+    # A multi-task message's chart may chart an earlier task's answer, so its
+    # target is not a chat file to clarify.
+    from chat.services.task_planner import looks_multi_task
+
+    if looks_multi_task(question):
+        return None
     return _chart_target_reply(
         request, session, question, attachment_ids,
         selection_metadata=pipeline_metadata,
