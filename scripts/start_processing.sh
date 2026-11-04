@@ -115,7 +115,14 @@ start_worker() {
     "$name" "$(<"$STATE_DIR/$name.pid")" "$STATE_DIR/$name.log"
 }
 
-"${COMPOSE[@]}" up -d kafka temporal-postgresql temporal temporal-ui
+# Browser and temporal-ui-sso must both reach Keycloak as http://keycloak:8180.
+if ! grep -Eq '^[^#]*[[:space:]]keycloak([[:space:]]|$)' /etc/hosts; then
+  printf 'Warning: no "keycloak" entry in /etc/hosts; documents admin workflow links will fail.\n' >&2
+  printf 'Add it with: echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts\n' >&2
+fi
+
+"${COMPOSE[@]}" up -d kafka temporal-postgresql temporal \
+  temporal-ui temporal-ui-gate keycloak temporal-ui-sso
 wait_for_service_health kafka
 wait_for_service_health temporal-postgresql
 wait_for_temporal_port
@@ -124,5 +131,7 @@ start_worker temporal_worker
 
 printf '\nKafka:       localhost:9093\n'
 printf 'Temporal:    localhost:7234\n'
-printf 'Temporal UI: http://localhost:8081\n'
+printf 'Temporal UI: http://localhost:8000/temporal/ (chat links; Django staff)\n'
+printf 'Temporal UI: http://localhost:8080/ (documents admin links; Keycloak login)\n'
+printf 'Keycloak:    http://keycloak:8180/ (realm agentic-flow)\n'
 printf 'Worker logs: %s\n' "$STATE_DIR"

@@ -154,6 +154,7 @@ class StepSerializer(
             "slug",
             "name",
             "tools",
+            "delegate_agent",
             "connected_from_start",
             "connected_to_end",
             "next_step",
@@ -263,6 +264,25 @@ class StepSerializer(
             if next_step.agent_id != agent.pk:
                 raise serializers.ValidationError(
                     {"next_step": "next_step must belong to the same agent"}
+                )
+
+        # A delegate is another agent of the same company that never delegates
+        # back here (no agent -> sub-agent cycles).
+        delegate = attrs.get("delegate_agent")
+        if delegate is not None and agent is not None:
+            from agents.services.flow import delegation_reaches
+
+            if delegate.pk == agent.pk:
+                raise serializers.ValidationError(
+                    {"delegate_agent": "a step cannot delegate to its own agent"}
+                )
+            if delegate.company_id != agent_company_id:
+                raise serializers.ValidationError(
+                    {"delegate_agent": "delegate_agent must belong to the agent's company"}
+                )
+            if delegation_reaches(delegate, agent):
+                raise serializers.ValidationError(
+                    {"delegate_agent": "this delegation would create an agent cycle"}
                 )
 
         tools = attrs.get("tools")

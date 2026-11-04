@@ -1,0 +1,31 @@
+{
+  "realm": "agentic-flow",
+  "enabled": true,
+  "registrationAllowed": false,
+  "verifyEmail": true,
+  "editUsernameAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "sslRequired": "external",
+  "clients": [
+    {
+      "clientId": "temporal-ui",
+      "name": "Temporal UI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${TEMPORAL_UI_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8080/auth/sso/callback"],
+      "webOrigins": ["http://localhost:8080"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8080/"
+      }
+    }
+  ]
+}

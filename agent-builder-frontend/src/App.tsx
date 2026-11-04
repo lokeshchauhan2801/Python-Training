@@ -37,17 +37,29 @@ interface AnchorNodeData {
 
 type CanvasNode = FlowNode<StepNodeData | AnchorNodeData>;
 
-function toStepNode(step: Step, toolNameById: Record<string, string>): CanvasNode {
+function toStepNode(
+  step: Step,
+  toolNameById: Record<string, string>,
+  agentNameById: Record<string, string>
+): CanvasNode {
   const toolNames = (step.tools || [])
     .map((id) => toolNameById[String(id)])
     .filter(Boolean);
+  // A delegating step runs another agent's flow instead of its own tools.
+  const delegateName = step.delegate_agent
+    ? agentNameById[String(step.delegate_agent)] || "another agent"
+    : "";
 
   const content = (
     <div>
-      <div className="ab-node-kind">step</div>
+      <div className="ab-node-kind">{delegateName ? "step · sub-agent" : "step"}</div>
       <div className="ab-node-label">{step.name || step.slug}</div>
-      {toolNames.length > 0 && (
-        <div className="ab-node-tools">{toolNames.join(", ")}</div>
+      {delegateName ? (
+        <div className="ab-node-tools">Run by agent: {delegateName}</div>
+      ) : (
+        toolNames.length > 0 && (
+          <div className="ab-node-tools">{toolNames.join(", ")}</div>
+        )
       )}
     </div>
   );
@@ -110,13 +122,17 @@ export default function App() {
   // Rebuild the React Flow canvas (step nodes + synthetic START/END anchors +
   // derived edges) from the selected agent's steps.
   const renderFlow = useCallback(
-    (flowSteps: Step[], flowTools: Tool[]) => {
+    (flowSteps: Step[], flowTools: Tool[], flowAgents: Agent[]) => {
       const names: Record<string, string> = {};
       flowTools.forEach((t) => {
         names[String(t.id)] = t.name || t.slug;
       });
+      const agentNames: Record<string, string> = {};
+      flowAgents.forEach((a) => {
+        agentNames[String(a.id)] = a.name || a.slug;
+      });
 
-      const stepNodes = flowSteps.map((s) => toStepNode(s, names));
+      const stepNodes = flowSteps.map((s) => toStepNode(s, names, agentNames));
 
       // Place the START/END anchors relative to the spread of step nodes so
       // every node (including unwired, freshly created ones) is on screen.
@@ -179,7 +195,7 @@ export default function App() {
       setTools(flowTools);
       setSteps(flowSteps);
       setSelectedAgentId(payload.selected_agent_id);
-      renderFlow(flowSteps, flowTools);
+      renderFlow(flowSteps, flowTools, allAgents);
     },
     [company, renderFlow]
   );
@@ -414,6 +430,21 @@ export default function App() {
     [refresh, selectedAgentId, showError]
   );
 
+  // Hand this step's work to another agent (sub-agent), or back to its tools.
+  const setStepDelegate = useCallback(
+    async (step: Step, agentId: string | null) => {
+      if ((step.delegate_agent || null) === agentId) return;
+      try {
+        await api.updateStep(String(step.id), { delegate_agent: agentId });
+        await refresh(selectedAgentId);
+        showSuccess(agentId ? "Step now runs another agent" : "Step uses its own tools");
+      } catch (e) {
+        showError(e);
+      }
+    },
+    [refresh, selectedAgentId, showError, showSuccess]
+  );
+
   const toggleStepTool = useCallback(
     async (step: Step, toolId: string, checked: boolean) => {
       const next = new Set((step.tools || []).map(String));
@@ -590,8 +621,10 @@ export default function App() {
             key={selectedStep.id}
             step={selectedStep}
             tools={tools}
+            agents={agents.filter((a) => String(a.id) !== selectedAgentId)}
             company={company}
             onRename={(name) => renameStep(selectedStep, name)}
+            onSetDelegate={(agentId) => setStepDelegate(selectedStep, agentId)}
             onToggleTool={(id, checked) => toggleStepTool(selectedStep, id, checked)}
             onToggleFlag={(field, value) => toggleFlag(selectedStep, field, value)}
             onAttachFunction={(slug) => attachFunction(selectedStep, slug)}
@@ -625,8 +658,10 @@ export default function App() {
 interface StepEditorProps {
   step: Step;
   tools: Tool[];
+  agents: Agent[];
   company: string;
   onRename: (name: string) => void;
+  onSetDelegate: (agentId: string | null) => void;
   onToggleTool: (toolId: string, checked: boolean) => void;
   onToggleFlag: (field: "connected_from_start" | "connected_to_end", value: boolean) => void;
   onAttachFunction: (slug: string) => void;
@@ -636,8 +671,10 @@ interface StepEditorProps {
 function StepEditor({
   step,
   tools,
+  agents,
   company,
   onRename,
+  onSetDelegate,
   onToggleTool,
   onToggleFlag,
   onAttachFunction,
@@ -693,6 +730,27 @@ function StepEditor({
         />
         <span>Connected to END (final)</span>
       </div>
+
+      <div className="ab-section-title" title="Let another agent do this step's work">
+        Run by agent
+      </div>
+      <div className="ab-empty" style={{ marginBottom: "8px", fontSize: "12px" }}>
+        Pick another agent to run this step (multi-agent flow). Its whole flow
+        runs in place of this step's tools, and it gets the earlier steps'
+        output.
+      </div>
+      <select
+        className="ab-input"
+        value={step.delegate_agent ? String(step.delegate_agent) : ""}
+        onChange={(e) => onSetDelegate(e.target.value || null)}
+      >
+        <option value="">This step's own tools</option>
+        {agents.map((a) => (
+          <option key={`delegate-${a.id}`} value={String(a.id)}>
+            {a.name || a.slug}
+          </option>
+        ))}
+      </select>
 
       <button
         className="ab-btn"

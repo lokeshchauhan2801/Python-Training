@@ -247,13 +247,19 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 # Temporal Web UI is never opened directly: Django proxies /temporal/ to it for
 # active staff only (infrastructure/temporal/ui_proxy.py). TEMPORAL_UI_URL is
-# the nginx gate (temporal-ui-gate, 127.0.0.1:8080); Temporal UI itself has no
+# the nginx gate (temporal-ui-gate, 127.0.0.1:8081); Temporal UI itself has no
 # host port. The UI runs with TEMPORAL_UI_PUBLIC_PATH=/temporal so its paths
-# match the proxied ones. Full flow: TEMPORAL_FLOW.md.
-TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8080").rstrip("/")
+# match the proxied ones. Chat workflow links use this path. Full flow:
+# TEMPORAL_FLOW.md.
+TEMPORAL_UI_URL = os.getenv("TEMPORAL_UI_URL", "http://localhost:8081").rstrip("/")
 TEMPORAL_UI_PUBLIC_PATH = "/temporal"
+# Keycloak-protected Temporal UI (temporal-ui-sso), opened directly by the
+# browser. Documents admin workflow links go here; chat links keep the proxy.
+TEMPORAL_UI_SSO_URL = os.getenv(
+    "TEMPORAL_UI_SSO_URL", "http://localhost:8080"
+).rstrip("/")
 # Shared with the temporal-ui-gate container, which refuses any request
-# without it, so :8080 cannot be opened directly. Never commit it.
+# without it, so :8081 cannot be opened directly. Never commit it.
 TEMPORAL_UI_PROXY_SECRET = os.getenv("TEMPORAL_UI_PROXY_SECRET", "")
 TEMPORAL_UI_PROXY_CONNECT_TIMEOUT_SECONDS = 5
 TEMPORAL_UI_PROXY_TIMEOUT_SECONDS = float(
