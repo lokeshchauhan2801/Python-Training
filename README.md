@@ -284,10 +284,13 @@ Kafka and Temporal need their infrastructure and a worker running:
 sudo docker compose -f docker-compose.processing.yml up -d kafka
 venv/bin/python manage.py kafka_worker
 
-# Temporal: start the server + its Postgres + Web UI, then the worker
-sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal temporal-ui
+# Temporal: start the server + its Postgres + both Web UIs + Keycloak, then the worker
+# (once per machine: echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts)
+sudo docker compose -f docker-compose.processing.yml up -d temporal-postgresql temporal \
+     temporal-ui temporal-ui-gate keycloak temporal-ui-sso
 venv/bin/python manage.py temporal_worker
-# Temporal Web UI: http://localhost:8000/temporal/ (staff only, via Django; direct 127.0.0.1:8080 is blocked by a gate)   (server :7234, Kafka :9093)
+# Temporal Web UI for chat links: http://localhost:8000/temporal/ (staff only, via Django; direct 127.0.0.1:8081 is blocked by a gate)
+# Temporal Web UI for documents admin links: http://localhost:8080/ (Keycloak login)   (server :7234, Kafka :9093)
 
 # Stop the workers and this project's containers (preserves data volumes)
 ./scripts/stop_processing.sh
@@ -298,8 +301,10 @@ starts the workers. It writes worker logs and PID files under
 `~/.local/state/agentic-flow-processing/`.
 
 `docker-compose.processing.yml` provides a project-scoped, single-broker KRaft
-Kafka (`:9093`), Temporal auto-setup (`:7234`) with its own Postgres, and the
-Temporal Web UI (`127.0.0.1:8080`, opened through Django at `/temporal/`). These dedicated ports and generated container names let
+Kafka (`:9093`), Temporal auto-setup (`:7234`) with its own Postgres, the
+Temporal Web UI behind an nginx gate (`127.0.0.1:8081`, opened through Django at
+`/temporal/`), and a second Temporal Web UI with Keycloak login (`127.0.0.1:8080`,
+Keycloak on `127.0.0.1:8180`). These dedicated ports and generated container names let
 this stack run alongside other Kafka/Temporal containers. See `START_PROCESSING.txt`
 for the full local walkthrough.
 
@@ -700,7 +705,7 @@ DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py kafka_worker
 ```bash
 # Terminal 1 — server + UI (wait until healthy)
 sudo docker compose -f docker-compose.processing.yml up -d \
-     temporal-postgresql temporal temporal-ui
+     temporal-postgresql temporal temporal-ui temporal-ui-gate keycloak temporal-ui-sso
 sudo docker compose -f docker-compose.processing.yml ps
 
 # Terminal 2 — worker (from the project root, key exported)
@@ -708,7 +713,8 @@ DJANGO_SETTINGS_MODULE=base.settings venv/bin/python manage.py temporal_worker
 #   or simply:  python manage.py temporal_worker
 ```
 
-- Temporal Web UI: http://localhost:8000/temporal/ (staff only; proxied by Django through the gate on 127.0.0.1:8080, which refuses direct access)
+- Temporal Web UI for chat links: http://localhost:8000/temporal/ (staff only; proxied by Django through the gate on 127.0.0.1:8081, which refuses direct access)
+- Temporal Web UI for documents admin links: http://localhost:8080/ (Keycloak login; needs `127.0.0.1 keycloak` in `/etc/hosts`)
 
 #### Shutting down the brokers
 
@@ -743,13 +749,22 @@ Django starts the workflow `doc-<document id>` and `python manage.py
 temporal_worker` runs its seven stages. **Stop** terminates it; **Retry**
 resumes at the stage that failed.
 
-The Temporal Web UI is only reachable through Django at `/temporal/`, for
-active staff users (normal Django admin login; tick **Staff status** to grant
-access). Temporal UI has no host port; an nginx gate on `127.0.0.1:8080`
-returns 403 unless the request carries the secret only Django's proxy adds.
+The Temporal Web UI runs twice, both view only, on the same Temporal server:
+
+- **Chat links** go through Django at `/temporal/`, for active staff users
+  (normal Django admin login; tick **Staff status** to grant access). This UI
+  has no host port; an nginx gate on `127.0.0.1:8081` returns 403 unless the
+  request carries the secret only Django's proxy adds.
+- **Documents admin links** open `http://localhost:8080/` directly, which logs
+  in through Keycloak (`http://keycloak:8180`, realm `agentic-flow`). Any user
+  in that realm sees every workflow, so only add people who should. Needs
+  `127.0.0.1 keycloak` in `/etc/hosts`.
 
 | Variable | Meaning |
 |---|---|
 | `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | default `True`; set `False` only for plain-http local dev |
-| `TEMPORAL_UI_URL` | internal Temporal UI gate address, `http://localhost:8080` |
+| `TEMPORAL_UI_URL` | internal Temporal UI gate address, `http://localhost:8081` |
 | `TEMPORAL_UI_PROXY_SECRET` | shared by the Django proxy and the nginx gate; never commit it |
+| `TEMPORAL_UI_SSO_URL` | Keycloak-protected Temporal UI used by documents admin links, `http://localhost:8080` |
+| `TEMPORAL_UI_CLIENT_SECRET` | Keycloak client `temporal-ui` secret, shared by Keycloak and `temporal-ui-sso`; never commit it |
+| `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin console password (user `admin`) |
