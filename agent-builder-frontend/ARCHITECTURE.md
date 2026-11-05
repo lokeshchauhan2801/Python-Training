@@ -60,7 +60,7 @@ Each Agent has a **role** (what it is for, which tasks it can do), stored only i
   - `/tool/` and `/tool/{id}/` — Tool CRUD
   - `/agent/` and `/agent/{id}/` — Agent (container) CRUD
   - `/step/` and `/step/{id}/` — Step (node) CRUD
-  - `/agent/load/?company=<id>&agent=<id>` — bootstrap payload `{ agents, selected_agent_id, steps, tools }` (`selected_agent_id` is the in-scope `?agent=`, else the first Agent by `order, created_at`, else `null`; `steps` are the selected Agent's Steps only)
+  - `/agent/load/?company=<id>&agent=<id>` — bootstrap payload `{ agents, selected_agent_id, steps, tools }` (`selected_agent_id` is the in-scope `?agent=`, else the oldest Agent (`created_at`), else `null`; `steps` are the selected Agent's Steps only)
   - List endpoints handle both `{results:[]}` and `[]`.
 
 The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat helper were removed.

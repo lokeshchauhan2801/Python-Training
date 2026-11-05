@@ -81,14 +81,13 @@ class Agent(BaseModel, SoftDeleteModel):
     )
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
-    order = models.IntegerField(default=0, db_index=True)
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
 
     class Meta:
         db_table = "agents_agent"
-        ordering = ["order", "-created_at"]
+        ordering = ["-created_at"]
         constraints = [
             models.UniqueConstraint(
                 fields=["company", "slug"],

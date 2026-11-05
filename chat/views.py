@@ -436,7 +436,7 @@ def agents_json(request):
     agents = [
         {"id": str(agent.pk), "name": agent.name, "slug": agent.slug}
         for agent in Agent.objects.filter(company=company).order_by(
-            "order", "created_at"
+            "created_at"
         )
     ]
     return JsonResponse({"agents": agents})

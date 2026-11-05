@@ -103,7 +103,6 @@ class AgentSerializer(
             "slug",
             "name",
             "prompt",
-            "order",
             "company",
             "created_at",
             "updated_at",

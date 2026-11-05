@@ -143,7 +143,7 @@ class AgentViewSet(ScopedModelViewSet):
 
         - ``agents`` = every agent for the company (dropdown).
         - ``selected_agent_id`` = the ``?agent=`` selector if in scope, else the
-          first agent ordered by ``order, created_at``, else null (NEVER 404 on
+          oldest agent (``created_at``), else null (NEVER 404 on
           a stale or foreign id).
         - ``steps`` = ALL of the selected agent's steps (incl. orphans, so a
           freshly created step is visible immediately).
@@ -169,7 +169,7 @@ class AgentViewSet(ScopedModelViewSet):
         tools_data = ToolSerializer(tools_qs, many=True, context=context).data
 
         all_agents = list(
-            Agent.objects.filter(company=company).order_by("order", "created_at")
+            Agent.objects.filter(company=company).order_by("created_at")
         )
 
         # Resolve the selected agent, falling back silently (never 404).

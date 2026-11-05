@@ -23,7 +23,6 @@ export interface Agent {
   slug: string;
   name: string;
   prompt: string; // the agent's role + tasks; stored in Langfuse, leads every step's prompt
-  order: number;
   company: string | number | null;
   created_at: string;
   updated_at: string;

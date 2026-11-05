@@ -84,7 +84,6 @@ class Command(BaseCommand):
             slug=_AGENT_SLUG,
             defaults={
                 "name": "Chat agent",
-                "order": 0,
             },
         )
         if created:

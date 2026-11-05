@@ -33,7 +33,6 @@ class AgentAdmin(BaseModelAdmin):
         "id_short",
         "slug",
         "name",
-        "order",
         "company",
         "created_at",
     )
