@@ -2,25 +2,10 @@
 
 const API_ROOT = "/api/v1/agents";
 
-export type ToolType =
-  | "general_assistant"
-  | "document_search"
-  | "chat_summarise"
-  | "web_search"
-  | "add_to_knowledge_base"
-  | "document_processing_status"
-  | "report_writer"
-  | "action_items"
-  | "email_drafter"
-  | "translator"
-  | "chart_builder"
-  | "langfuse";
-
 export interface Tool {
   id: string; // ULID string
   slug: string;
   name: string;
-  type: ToolType;
   description: string;
   is_enabled: boolean;
   company: string | number | null;
@@ -91,7 +76,6 @@ export interface LoadFlowResponse {
 export interface AvailableFunction {
   slug: string;
   name: string;
-  type: ToolType;
   description: string;
   tool_id: string | null; // set when a backing Tool row already exists
 }

@@ -115,7 +115,7 @@ class Command(BaseCommand):
             tools[slug], _ = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
-                defaults={"name": name, "type": slug, "is_enabled": True},
+                defaults={"name": name, "is_enabled": True},
             )
 
         agents = {}

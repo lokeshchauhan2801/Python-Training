@@ -68,7 +68,6 @@ class ToolSerializer(
             "id",
             "slug",
             "name",
-            "type",
             "description",
             "is_enabled",
             "company",
@@ -79,24 +78,6 @@ class ToolSerializer(
             "is_deleted",
             "deleted_at",
         ]
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-
-        slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        tool_type = attrs.get("type") or (self.instance and self.instance.type)
-
-        from chat.services.langgraph_service import available_slugs
-
-        if (
-            tool_type != Tool.TYPE_LANGFUSE
-            and slug
-            and slug not in available_slugs()
-        ):
-            raise serializers.ValidationError(
-                {"slug": f"Unknown tool slug '{slug}' (no handler registered)."}
-            )
-        return attrs
 
 
 class AgentSerializer(

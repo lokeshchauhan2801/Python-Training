@@ -50,9 +50,9 @@ The canvas renders:
 
 The toolbar has `New agent`, `+ Worker`, `Tidy layout` and the agent dropdown. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
 
-## Tool Types
+## Tools
 
-`Tool.type` is one of: `general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `report_writer`, `action_items`, `email_drafter`, `translator`, `chart_builder`, `langfuse`. The last five built-ins work on the answers of the parts a part depends on. For non-`langfuse` tools the `slug` must be a registered handler slug; `langfuse` tools are prompt-only. The sidebar shows each tool's `type` next to its name so langfuse tools are distinguishable.
+A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `report_writer`, `action_items`, `email_drafter`, `translator`, `chart_builder`); the last five work on the answers of the parts a part depends on. Any other slug is a prompt-only tool whose instructions are the Langfuse prompt of that name. The sidebar shows each tool's slug next to its name.
 
 ## API Client Pattern
 

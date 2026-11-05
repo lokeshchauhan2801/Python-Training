@@ -184,9 +184,8 @@ def _reachable_enabled_slugs(agent) -> set:
     A delegating worker contributes its sub-agent's tools (``walk_tool_steps``),
     since that agent runs in its place. A worker with no enabled tool answers
     with the LLM itself and adds ``LLM_WORKER``.
-    A built-in slug counts even when its Tool row is type ``langfuse`` because
-    ``_enabled_for`` resolves a registered slug to its handler; the decisive
-    contract is the registered slug.
+    A registered slug always runs its handler (``_enabled_for``); the
+    decisive contract is the registered slug.
     """
     from agents.services.flow import walk_tool_steps
 

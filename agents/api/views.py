@@ -43,11 +43,9 @@ _HIDDEN_FUNCTION_SLUGS = {"prompt_tool"}
 
 
 def _function_catalog():
-    """The attachable handler functions: (slug, name, type, description).
+    """The attachable handler functions: (slug, name, description).
 
     Sourced from the live registry (``available_slugs``) minus internal slugs.
-    ``type`` mirrors the slug (the Tool.type choices are the handler slugs), so
-    a created Tool row is valid under Tool.clean()/the serializer.
     """
     from chat.services.langgraph_service import available_slugs
 
@@ -59,7 +57,6 @@ def _function_catalog():
             {
                 "slug": slug,
                 "name": _FUNCTION_NAMES.get(slug) or slug.replace("_", " ").title(),
-                "type": slug,
                 "description": _FUNCTION_DESCRIPTIONS.get(slug, ""),
             }
         )
@@ -163,7 +160,6 @@ class ToolViewSet(ScopedModelViewSet):
                 slug=slug,
                 defaults={
                     "name": fn["name"],
-                    "type": fn["type"],
                     "description": fn["description"],
                     "is_enabled": True,
                     "created_by": request.user,

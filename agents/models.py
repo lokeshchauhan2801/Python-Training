@@ -10,36 +10,12 @@ from basics.ulid import ULIDField
 
 
 class Tool(BaseModel, SoftDeleteModel):
-    """A tool the registry can resolve (or a Langfuse-prompt-only tool),
-    admin-togglable per company."""
+    """A tool attached to agent steps, admin-togglable per company.
 
-    TYPE_GENERAL_ASSISTANT = "general_assistant"
-    TYPE_DOCUMENT_SEARCH = "document_search"
-    TYPE_CHAT_SUMMARISE = "chat_summarise"
-    TYPE_WEB_SEARCH = "web_search"
-    TYPE_ADD_TO_KB = "add_to_knowledge_base"
-    TYPE_DOC_STATUS = "document_processing_status"
-    # Tools that work on the earlier steps' output (multi-agent hand-offs).
-    TYPE_REPORT_WRITER = "report_writer"
-    TYPE_ACTION_ITEMS = "action_items"
-    TYPE_EMAIL_DRAFTER = "email_drafter"
-    TYPE_TRANSLATOR = "translator"
-    TYPE_CHART_BUILDER = "chart_builder"
-    TYPE_LANGFUSE = "langfuse"
-    TYPE_CHOICES = [
-        (TYPE_GENERAL_ASSISTANT, "General assistant"),
-        (TYPE_DOCUMENT_SEARCH, "Document search"),
-        (TYPE_CHAT_SUMMARISE, "Chat summarise"),
-        (TYPE_WEB_SEARCH, "Web search"),
-        (TYPE_ADD_TO_KB, "Add to knowledge base"),
-        (TYPE_DOC_STATUS, "Document processing status"),
-        (TYPE_REPORT_WRITER, "Write report"),
-        (TYPE_ACTION_ITEMS, "Extract action items"),
-        (TYPE_EMAIL_DRAFTER, "Draft email"),
-        (TYPE_TRANSLATOR, "Translate"),
-        (TYPE_CHART_BUILDER, "Chart from results"),
-        (TYPE_LANGFUSE, "Langfuse prompt"),
-    ]
+    A slug with a registered handler runs that built-in tool; any other slug
+    is a prompt-only tool whose instructions are the Langfuse prompt of that
+    name.
+    """
 
     id = ULIDField()
     company = models.ForeignKey(
@@ -52,7 +28,6 @@ class Tool(BaseModel, SoftDeleteModel):
     )
     slug = models.SlugField(max_length=64)
     name = models.CharField(max_length=120)
-    type = models.CharField(max_length=32, choices=TYPE_CHOICES)
     description = models.TextField(blank=True)
     is_enabled = models.BooleanField(default=True, db_index=True)
 
@@ -74,34 +49,21 @@ class Tool(BaseModel, SoftDeleteModel):
         return f"{self.name} ({self.slug})"
 
     @property
-    def prompt_name(self) -> str:
-        """Compat shim for llm_tools handlers (which read ``tool.prompt_name``).
-
-        For a Langfuse-type tool the ``slug`` IS the Langfuse prompt pointer, so
-        return it. For every other type return "" so ``_system_prompt`` falls
-        back to the handler's built-in ``default_name`` (e.g.
-        ``tool_general_assistant``). This keeps ``llm_tools.py`` untouched after
-        the ``prompt_name`` column is dropped.
-        """
-        return self.slug if self.type == self.TYPE_LANGFUSE else ""
-
-    def clean(self):
-        super().clean()
-        # Lazy import avoids a module-scope chat<-agents cycle and keeps the
-        # registry the source of truth for handler-backed tools.
+    def is_prompt_only(self) -> bool:
+        """True when no built-in handler has this slug (a Langfuse prompt)."""
+        # Lazy import avoids a module-scope chat<-agents cycle.
         from chat.services.langgraph_service import available_slugs
 
-        # type == "langfuse" is prompt-only: no registered handler is needed
-        # (the slug is a Langfuse prompt pointer). Every other type's slug MUST
-        # resolve in the registry.
-        if self.type != self.TYPE_LANGFUSE and self.slug not in available_slugs():
-            raise ValidationError(
-                {"slug": f"Unknown tool slug '{self.slug}' (no handler registered)."}
-            )
+        return self.slug not in available_slugs()
 
-    def save(self, *args, **kwargs):
-        self.clean()
-        super().save(*args, **kwargs)
+    @property
+    def prompt_name(self) -> str:
+        """The Langfuse prompt the llm_tools handlers read for this tool.
+
+        A prompt-only tool's slug IS its prompt name. A built-in tool returns
+        "" so ``_system_prompt`` uses the handler's ``tool_<slug>`` name.
+        """
+        return self.slug if self.is_prompt_only else ""
 
 
 class Agent(BaseModel, SoftDeleteModel):

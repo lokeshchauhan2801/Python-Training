@@ -13,13 +13,12 @@ class ToolAdmin(BaseModelAdmin):
         "id_short",
         "name",
         "slug",
-        "type",
         "is_enabled",
         "company",
         "created_by",
         "created_at",
     )
-    list_filter = ("type", "is_enabled", "company", "is_deleted", "created_at")
+    list_filter = ("is_enabled", "company", "is_deleted", "created_at")
     search_fields = ("name", "slug", "description")
     date_hierarchy = "created_at"
 

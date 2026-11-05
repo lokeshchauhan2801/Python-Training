@@ -621,18 +621,16 @@ class LangGraphChatService:
     def _enabled_for(self, step):
         """Return ``(enabled, tool_rows)`` for a single step.
 
-        ``enabled`` is the intersection of the step's attached ``is_enabled``
-        tools with slugs that are registry-resolvable OR ``type == "langfuse"``
-        (prompt-only). ``tool_rows`` maps every attached tool's raw slug to its
+        ``enabled`` is the step's attached ``is_enabled`` tools: a registered
+        slug runs its handler, any other slug is prompt-only (a Langfuse
+        prompt). ``tool_rows`` maps every attached tool's raw slug to its
         row. ``enabled`` is de-duplicated in ascending slug order and may be
         empty (the Step then answers directly with ``general_assistant``).
         """
-        slugs = available_slugs()
         enabled = []
         seen = set()
         for tool in step.tools.filter(is_enabled=True).order_by("slug"):
-            is_prompt_only = tool.type == "langfuse"
-            if (tool.slug in slugs or is_prompt_only) and tool.slug not in seen:
+            if tool.slug not in seen:
                 enabled.append(tool.slug)
                 seen.add(tool.slug)
         tool_rows = {t.slug: t for t in step.tools.all()}
@@ -1033,7 +1031,7 @@ class _TurnRunner:
             handler = get_handler(handler_slug)
             tool_row = tool_rows.get(handler_slug)
             if handler is None:
-                prompt_only = tool_row is not None and tool_row.type == "langfuse"
+                prompt_only = tool_row is not None
                 handler = get_handler(
                     "prompt_tool" if prompt_only else _DIRECT_HANDLER_SLUG
                 )

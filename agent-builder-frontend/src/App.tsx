@@ -1511,7 +1511,7 @@ function CreateStepDialog({
                 <span>
                   {t.name || t.slug}{" "}
                   <span className="ab-node-kind" style={{ display: "inline" }}>
-                    ({t.type})
+                    ({t.slug})
                   </span>
                 </span>
               </div>

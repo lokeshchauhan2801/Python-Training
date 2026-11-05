@@ -11,24 +11,19 @@ from django.db import transaction
 from agents.models import Agent, Step, Tool
 from company.models import Company
 
-# (slug, name, type) — slug == type for every built-in (handler-backed) tool:
-# `type` names what the tool does and `slug` selects the handler; they coincide.
+# (slug, name) of every built-in tool; the slug selects the handler.
 _TOOL_SPECS = [
-    ("general_assistant", "General assistant", "general_assistant"),
-    ("document_search", "Document search", "document_search"),
-    ("chat_summarise", "Chat summary", "chat_summarise"),
-    ("web_search", "Web search", "web_search"),
-    ("add_to_knowledge_base", "Add to knowledge base", "add_to_knowledge_base"),
-    (
-        "document_processing_status",
-        "Document processing status",
-        "document_processing_status",
-    ),
-    ("report_writer", "Write report", "report_writer"),
-    ("action_items", "Extract action items", "action_items"),
-    ("email_drafter", "Draft email", "email_drafter"),
-    ("translator", "Translate", "translator"),
-    ("chart_builder", "Chart from results", "chart_builder"),
+    ("general_assistant", "General assistant"),
+    ("document_search", "Document search"),
+    ("chat_summarise", "Chat summary"),
+    ("web_search", "Web search"),
+    ("add_to_knowledge_base", "Add to knowledge base"),
+    ("document_processing_status", "Document processing status"),
+    ("report_writer", "Write report"),
+    ("action_items", "Extract action items"),
+    ("email_drafter", "Draft email"),
+    ("translator", "Translate"),
+    ("chart_builder", "Chart from results"),
 ]
 
 _AGENT_SLUG = "chat_agent"
@@ -74,13 +69,12 @@ class Command(BaseCommand):
 
     def _seed_company(self, company):
         tools = {}
-        for slug, name, type_ in _TOOL_SPECS:
+        for slug, name in _TOOL_SPECS:
             tool, created = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
                 defaults={
                     "name": name,
-                    "type": type_,
                     "is_enabled": True,
                 },
             )
