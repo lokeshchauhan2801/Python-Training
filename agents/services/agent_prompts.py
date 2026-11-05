@@ -1,8 +1,8 @@
 """Each Agent's role prompt, kept only in Langfuse.
 
-The prompt says what the agent is for and which tasks it can do. Every worker
-of the agent answers in that role (``_persona``) and the supervisor routes work
-by it (``Worker.describe``). It is named ``agents/<company slug>/<agent slug>``
+The prompt says what the agent is for and which tasks it can do. Every step of
+the agent's flow answers in that role (``ToolContext.persona``), followed by the
+chosen tool's docs. It is named ``agents/<company slug>/<agent slug>``
 (agent slugs repeat across companies). It is created in Langfuse only when an
 Agent is created (``agents.signals``: canvas, API, admin, seeds); nothing is
 stored in the database.

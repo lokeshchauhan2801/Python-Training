@@ -20,11 +20,6 @@ _TOOL_SPECS = [
     ("web_search", "Web search"),
     ("add_to_knowledge_base", "Add to knowledge base"),
     ("document_processing_status", "Document processing status"),
-    ("report_writer", "Write report"),
-    ("action_items", "Extract action items"),
-    ("email_drafter", "Draft email"),
-    ("translator", "Translate"),
-    ("chart_builder", "Chart from results"),
 ]
 
 _AGENT_SLUG = "chat_agent"

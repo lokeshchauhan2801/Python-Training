@@ -4,7 +4,7 @@
 
 This React + TypeScript frontend provides a visual editor for building a company's chat flow. It uses React Flow for the canvas, Tailwind CSS for styling, and integrates with the Django DRF backend.
 
-The backend model is a two-level `Agent` + `Step` model, plus a flat `Tool` table (see `agents/models.py`). An `Agent` is a **supervisor**; its `Step` rows are its **workers**, and each worker holds its tools or hands its work to another agent. The canvas draws START → Supervisor → one node per worker → END. The dropdown lists `Agent`s; selecting one shows that agent's supervisor and workers.
+The backend model is a two-level `Agent` container + `Step` nodes, plus a flat `Tool` table (see `agents/models.py`). An `Agent` is a named flow; its ordered `Step` rows are the nodes and each step holds the tools. The canvas renders one React Flow node per `Step` row plus two synthetic START/END anchors, and translates connections/drags into `Step` PATCHes. The dropdown lists `Agent`s; selecting one shows only that agent's steps.
 
 ## @langchain/react is Installed but Not Used
 
@@ -14,45 +14,43 @@ The `@langchain/react` package (v0.1.1) is still listed as a dependency but is *
 
 All changes persist immediately via `Step`/`Agent` PATCHes; there is no explicit Save button.
 
-**Worker position:** Auto-save on drag stop (`onNodeDragStop` → `persistPosition` → PATCH `/api/v1/agents/step/{id}/` with `position_x`/`position_y`); a plain click (no movement) saves nothing. START, Supervisor and END are canvas-only nodes: where you drag them is kept per agent in this browser's `localStorage`. "Tidy layout" puts the workers in one column.
+**Step position:** Auto-save on drag stop (`onNodeDragStop` → `persistPosition` → PATCH `/api/v1/agents/step/{id}/` with `position_x`/`position_y`). The flush also updates local `steps` state so a dragged node never visually resets. START/END anchors are not draggable and never persisted.
 
-**Tool membership:** Auto-save on checkbox change (PATCH `/api/v1/agents/step/{id}/` with the full `tools` array). Ticking a tool that has no `Tool` row yet creates it first (`POST /tool/attach/`).
+**Tool membership:** Auto-save on checkbox change (PATCH `/api/v1/agents/step/{id}/` with the full `tools` array).
 
-**Wiring:** there is none to edit. A worker is connected to its supervisor just by belonging to the agent, so the canvas does not allow drawing or deleting wires. (`connected_from_start` / `next_step` / `connected_to_end` are legacy columns the runtime no longer reads.)
+**Chain links (connect/disconnect), scoped to the selected agent:**
+- `START → step`: PATCH step `connected_from_start: true` (delete → `false`)
+- `step → step`: PATCH source step `next_step: <target id>` (delete → `null`)
+- `step → END`: PATCH step `connected_to_end: true, next_step: null` (delete → `false`)
 
-After every change the canvas re-calls `GET /agent/load/?agent=<id>` so it mirrors backend truth.
+After every link/tool/flag mutation the canvas re-calls `GET /agent/load/?agent=<id>` so it mirrors backend truth.
 
-**Agent create/rename/describe/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / PATCH `name` or `prompt` / DELETE `/api/v1/agents/agent/{id}/`. **Worker create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
+**Agent create/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / DELETE `/api/v1/agents/agent/{id}/`. **Step create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
 
 **Agent selection:** Agents are independent flow containers — there is no company-wide "current" Agent and no state endpoint to flip one on. Choosing an Agent in the dropdown only changes which flow the canvas edits (it re-calls `GET /agent/load/?agent=<id>`); it never changes how Chat behaves. Chat sessions pick an Agent per session through the Chat UI's own selector.
 
-## The Agent Model (supervisor + workers)
+## The Flow Model (Agent container + Step nodes)
 
-- An **Agent** has a name and a **role prompt** (what it is for, which tasks it can do). The role lives only in Langfuse as `agents/<company slug>/<agent slug>`; the API reads and writes it as the agent's `prompt` field. The supervisor reads the roles to route work, and every worker of the agent answers in its role.
-- Its **Steps are workers**. A worker either uses its own tools (M2M to the flat `Tool` table), hands its parts to another Agent (`delegate_agent`), or, with no tools, answers itself with the LLM in its role.
-- A hand-off target must be another agent of the same company, and hand-offs can't loop back (checked server-side; at most 3 agents deep at run time). That agent supervises its own workers for the part it gets.
-- A company can hold many agents side by side; chat sessions pick one each in the chat header.
+The flow is an **Agent container** whose ordered **Step nodes** form a linear chain. There are no `start`/`step`/`end`/`tool`/`condition` node types and no graph/node/edge objects.
 
-### How a chat message runs
-
-`chat/services/task_planner.py` is the supervisor. For each message it:
-
-1. splits the message into parts and gives each part to one worker (by its tools and its agent's role), naming for each part the earlier parts whose answer it needs (`depends_on`);
-2. runs the parts as a LangGraph graph built from those dependencies: parts that need nothing from each other start at the same time; a part that needs another waits for it and receives only that answer;
-3. returns one reply with every part's answer, numbered in the order asked and naming who answered it. The turn's `metadata.tasks` records each part's worker, agent, tool, dependencies and wave; the chat page shows it as "How this was answered".
-
-An agent with a single worker skips the planner for a plain single request. `CHAT_MULTI_TASK_ENABLED` (default on) and `CHAT_MULTI_TASK_MAX` (default 5 parts) control it.
+- The entry step has `connected_from_start = true`.
+- Each step points to the next via `next_step` (same agent only).
+- The final step has `connected_to_end = true`.
+- Each step carries its own tools (M2M to the flat `Tool` table) — the step holds the tools.
+- A company can hold many live `Agent` containers side by side; none is implicitly the default. Each is independently selectable (in the builder for editing, and per Chat session for execution).
 
 The canvas renders:
-- START, a **Supervisor** node and END (canvas-only, never backend rows);
-- one node per worker (`.ab-node ab-node-step`; blue for a hand-off);
-- implied wires: START → Supervisor, Supervisor → every worker, every worker → END (its answer goes into the reply).
+- One React Flow node per `Step` row (styled `.ab-node ab-node-step`).
+- Two **synthetic** anchor nodes `__start__` / `__end__` — client-only visual anchors derived from `connected_from_start` / `connected_to_end`; they are never backend rows and never sent in writes.
+- Derived edges: `START → entry step`, `step → step.next_step`, `final step → END`.
 
-The toolbar has `New agent`, `+ Worker`, `Tidy layout` and the agent dropdown. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
+The toolbar has two buttons — `Add Agent` (create a new flow container) and `+ Step` (add a step to the selected agent) — plus an agent dropdown to switch which flow the canvas views. The `+ Tool`, `+ Condition`, and `Run` buttons and the Run modal were intentionally removed and must not be reintroduced.
 
-## Tools
+## Tools and the agent role
 
-A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `report_writer`, `action_items`, `email_drafter`, `translator`, `chart_builder`); the last five work on the answers of the parts a part depends on. Any other slug is a prompt-only tool. A tool's `description` is its docs: its role and instructions, which run after the agent's role (tools have no Langfuse prompt). The sidebar shows each tool's slug next to its name.
+A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`); any other slug is a prompt-only tool. A tool's `description` is its docs (role + instructions). The sidebar shows each tool's slug next to its name.
+
+Each Agent has a **role** (what it is for, which tasks it can do), stored only in Langfuse as `agents/<company slug>/<agent slug>` and exposed by the agent API as `prompt`. Every step of the agent answers in that role, followed by the chosen tool's docs. The sidebar edits it under "Agent role".
 
 ## API Client Pattern
 
@@ -102,10 +100,10 @@ The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat hel
 3. `npm run dev` — Dev server starts, canvas loads at `http://localhost:5173`
 4. Manual E2E test:
    - Load `/agent-builder/` in Django (with `?csrf=...&company=...&company_name=...`)
-   - Click `New agent` (name + role), then `+ Worker` to add workers; each one appears wired from the Supervisor
-   - Select a worker → rename it, tick tools, or hand it off to another agent ("Another agent")
-   - Edit the agent's name and role in the sidebar header
-   - Switch Agents in the dropdown → the canvas shows that Agent's supervisor and workers (no Agent is "made current" by this)
+   - Click `Add Agent` to create a flow container, then `+ Step` to add steps
+   - Drag from START to a step, step → step, and step → END to wire the chain
+   - Select a step node → rename it and toggle tools / entry/final flags in the sidebar
+   - Switch Agents in the dropdown → the canvas shows only that Agent's Steps (no Agent is "made current" by this)
 
 **Backend tests:** The Django test suite (`python manage.py test agents`) covers API endpoints. Frontend integration is verified manually.
 

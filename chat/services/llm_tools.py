@@ -46,15 +46,11 @@ class ToolContext:
     llm: object | None = None
     langfuse: object | None = None
     pipeline_context: str = ""  # prior steps' accumulated output (multi-step pipeline)
+    # The step's agent role (its Langfuse prompt); leads every tool's prompt.
+    persona: str = ""
     # Composer picker selection (already validated SessionFile entry ULIDs) for
     # an ACTION_PROCESS request; empty for every other intent.
     selected_entry_ids: list = field(default_factory=list)
-    # A planned sub-task that builds on earlier tasks' output (in
-    # ``pipeline_context``), e.g. "make a pie chart of those statuses".
-    uses_prior_results: bool = False
-    # Who the answering worker is ("You are the 'chat summary' agent. ..."),
-    # used when a worker with no tools answers with the LLM in its role.
-    persona: str = ""
 
 
 @dataclass
@@ -175,13 +171,13 @@ def _with_pipeline_context(base_text: str, ctx: "ToolContext") -> str:
     pc = (getattr(ctx, "pipeline_context", "") or "").strip()
     if not pc:
         return base_text
-    block = f"[Answers from the other agents for this message]\n{pc}"
+    block = f"[Pipeline context from previous steps]\n{pc}"
     base_text = (base_text or "").strip()
     return f"{block}\n\n{base_text}" if base_text else block
 
 
 def _with_persona(base_text: str, ctx: "ToolContext") -> str:
-    """Put the answering worker's role first (when it has one)."""
+    """Put the agent's role first (when it has one)."""
     persona = (getattr(ctx, "persona", "") or "").strip()
     if not persona:
         return base_text
@@ -206,11 +202,6 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     India's GDP growth last 5 years".
     """
     from chat.services.chat_service import ChatCompletion, ChatService
-
-    # A planned sub-task charting an earlier task's answer uses that answer
-    # (the planner marks it; a task that names its own file is not marked).
-    if ctx.uses_prior_results and (ctx.pipeline_context or "").strip():
-        return _prior_results_chart_reply(ctx, tool_slug)
 
     # A chat file the request targets (D7) is charted from that file, even
     # when the router picked a general-knowledge tool (F.4).
@@ -239,8 +230,8 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
         has_file_context=False,
         attachment_sections=[],
     )
-    # Honour the tool's Langfuse system prompt (chart guidance lives there) by
-    # prepending it, mirroring how document_search applies its own prompt.
+    # Honour the tool's docs (chart guidance lives there) by prepending them,
+    # mirroring how document_search applies its own docs.
     pre = _with_identity(
         _with_pipeline_context(
             _system_prompt(
@@ -279,57 +270,6 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
             "Here is the chart you requested."
             if chart_data is not None
             else "I could not produce a chart for that request."
-        )
-    return ToolResult(
-        content=content,
-        chart_data=chart_data,
-        tool_used=tool_slug,
-        llm_generated=True,
-    )
-
-
-def _prior_results_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
-    """Chart the figures found in earlier tasks' output (``pipeline_context``).
-
-    Used for a planned sub-task such as "make a pie chart of the document
-    statuses" after a status task: the data is in the previous answer, not in
-    a file or the model's general knowledge.
-    """
-    from chat.services.chat_service import ChatCompletion, ChatService
-
-    service = ChatService()
-    prompt, _ = service._build_prompt(
-        ctx.history_text,
-        ctx.message_text,
-        chunks=[],
-        has_file_context=False,
-        attachment_sections=[],
-    )
-    pre = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, "general_assistant"), ctx),
-        ctx.llm,
-    )
-    prompt = (
-        "Important: build the chart ONLY from the data in the '[Answers from "
-        "the other agents for this message]' block (the answers this part "
-        "depends on). Count or read the values from it exactly (e.g. how "
-        "many documents are in each status); never invent values. If that "
-        "block has no data that can be charted, set chart to null and say "
-        "so. Call that data 'the results above'; never mention 'pipeline "
-        "context' or 'previous steps' to the user. Keep the text to one short "
-        "caption.\n\n"
-        f"{pre.strip()}\n\n{prompt}"
-    )
-    completion = ctx.llm.generate_structured(prompt, ChatCompletion)
-    chart_data = completion.chart.model_dump(mode="json") if completion.chart else None
-    content = ChatService._strip_chart_json_blocks(completion.response).strip()
-    if chart_data is not None:
-        content = _chart_caption_only(content, ctx.message_text)
-    if not content:
-        content = (
-            "Here is the chart you requested."
-            if chart_data is not None
-            else "I could not produce a chart from the earlier results."
         )
     return ToolResult(
         content=content,
@@ -405,10 +345,10 @@ def _file_chart_reply(
 
 
 def _system_prompt(ctx: "ToolContext", slug: str) -> str:
-    """The answering worker's role (its agent's Langfuse prompt, ``persona``)
-    followed by the tool's docs (``Tool.description``).
+    """The step's agent role (its Langfuse prompt, ``persona``) followed by
+    the tool's docs (``Tool.description``).
 
-    With no Tool row on the context (a worker without tools runs
+    With no Tool row on the context (a step without tools runs
     ``general_assistant``) the company's row for ``slug`` supplies the docs.
     """
     tool = ctx.tool
@@ -512,9 +452,6 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     # the file's real values by the local builder, not the LLM. This is the
     # reliable path for "create a pie chart" on a CSV like county_uk.csv.
     if service._is_chart_request(ctx.message_text):
-        # A planned sub-task charting an earlier task's answer uses that answer.
-        if ctx.uses_prior_results and (ctx.pipeline_context or "").strip():
-            return _prior_results_chart_reply(ctx, "document_search")
         # A chart request with a D7 file target charts only that file.
         target = ChatService._chart_target(ctx.conversation, ctx.message_text)
         if target is not None and target.kind == "file":
@@ -603,23 +540,8 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     conversation_context = service._build_conversation_context(
         turns, recent_limit=ChatService._SUMMARY_RECENT_TURNS
     )
-    # In a multi-step pipeline the summary also covers what earlier steps of
-    # this same request answered (labelled plainly, so it is not called a
-    # "pipeline note" in the summary).
-    earlier = _earlier_output(ctx)
-    if earlier:
-        conversation_context = (
-            f"{conversation_context}\n\n"
-            "Answers already given in the current message (part of this chat; "
-            f"ignore the bracketed labels):\n{earlier}"
-        ).strip()
-    if not conversation_context.strip():
-        # Nothing to summarise: an empty prompt made the model summarise its
-        # own instructions instead.
-        return ToolResult(
-            content="There is nothing to summarise yet: this chat has no earlier messages.",
-            tool_used="chat_summarise",
-        )
+    # In a multi-step pipeline the summary should also cover prior-step output.
+    conversation_context = _with_pipeline_context(conversation_context, ctx)
 
     sys = _plain_text_system_prompt(_system_prompt(ctx, "chat_summarise"))
 
@@ -730,78 +652,3 @@ def _file_command_tool(ctx, *, allowed, default, tool_used) -> "ToolResult":
     return ToolResult(
         content=reply.content, metadata=dict(reply.metadata), tool_used=tool_used
     )
-
-
-# --------------------------------------------------------------------------- #
-# Tools that work on the EARLIER steps' output (multi-agent hand-offs)
-# --------------------------------------------------------------------------- #
-# Each one turns what earlier steps / agents produced (``ctx.pipeline_context``)
-# into something new. Used alone (no earlier output) it works on the user's
-# message and the conversation instead. The instructions are the tool's docs
-# (``Tool.description``).
-
-
-def _earlier_output(ctx: "ToolContext") -> str:
-    return (getattr(ctx, "pipeline_context", "") or "").strip()
-
-
-def _earlier_output_reply(ctx: "ToolContext", slug: str) -> "ToolResult":
-    """Run the ``slug`` tool's docs on the earlier steps' output."""
-    sys = _with_identity(_system_prompt(ctx, slug), ctx.llm)
-    earlier = _earlier_output(ctx)
-    if earlier:
-        # The step labels ("[Step 'x' used tool 'y']") are routing notes, not
-        # content; the model is told to ignore them.
-        messages = [
-            {"role": "system", "content": sys},
-            {
-                "role": "user",
-                "content": (
-                    "Earlier results from the other steps and agents (ignore "
-                    "the bracketed step labels):\n"
-                    f"{earlier}\n\n"
-                    f"User request:\n{ctx.message_text}"
-                ),
-            },
-        ]
-    else:
-        messages = _history_messages(ctx.conversation, ctx.message_text)
-        messages.insert(0, {"role": "system", "content": sys})
-    content = ctx.llm.complete(messages)
-    return ToolResult(content=content, tool_used=slug, llm_generated=True)
-
-
-@register("report_writer")
-def _report_writer(ctx: "ToolContext") -> "ToolResult":
-    """``report_writer`` — a short report (summary, findings, next steps)."""
-    return _earlier_output_reply(ctx, "report_writer")
-
-
-@register("action_items")
-def _action_items(ctx: "ToolContext") -> "ToolResult":
-    """``action_items`` — the tasks / owners / deadlines in the earlier output."""
-    return _earlier_output_reply(ctx, "action_items")
-
-
-@register("email_drafter")
-def _email_drafter(ctx: "ToolContext") -> "ToolResult":
-    """``email_drafter`` — an email sharing the earlier output."""
-    return _earlier_output_reply(ctx, "email_drafter")
-
-
-@register("translator")
-def _translator(ctx: "ToolContext") -> "ToolResult":
-    """``translator`` — the earlier output in the language the user asks for."""
-    return _earlier_output_reply(ctx, "translator")
-
-
-@register("chart_builder")
-def _chart_builder(ctx: "ToolContext") -> "ToolResult":
-    """``chart_builder`` — a chart of the numbers in the earlier output.
-
-    Without earlier output it charts like ``general_assistant`` (a named chat
-    file, a knowledge-base dataset, or general knowledge).
-    """
-    if _earlier_output(ctx):
-        return _prior_results_chart_reply(ctx, "chart_builder")
-    return _knowledge_chart_reply(ctx, "chart_builder")

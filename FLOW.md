@@ -133,8 +133,8 @@ flow, else "Document reference" when citations exist, else "General purpose".
   column. `agents/services/agent_prompts.py` reads/writes it, the canvas edits
   it through the agent API's `prompt` field, and it is created in Langfuse
   only when an Agent is created (`agents/signals.py`, admin included).
-- Every worker answers in its agent's role (`_persona`) and the supervisor
-  routes by it (`Worker.describe`).
+- Every step of the agent's sequential flow answers in that role
+  (`ToolContext.persona`).
 - **Tools have no prompt.** `Tool.description` is the tool's docs (role +
   instructions) and follows the agent's role in the system prompt
   (`llm_tools._system_prompt`). Defaults for new companies are in

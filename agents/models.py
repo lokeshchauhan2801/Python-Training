@@ -58,13 +58,13 @@ class Tool(BaseModel, SoftDeleteModel):
 
 
 class Agent(BaseModel, SoftDeleteModel):
-    """A named, independently-usable chat agent (a supervisor + its workers).
+    """A named, independently-usable chat flow (container).
 
-    Its Steps are the workers. For each message a supervisor (LLM) splits the
-    request into parts and gives each part to the worker that fits; a worker
-    runs its own tools, hands the part to another Agent, or (no tools) answers
-    with the LLM itself. Multiple live Agents may coexist in a company; a user
-    selects one per ConversationSession (or Normal RAG) in the chat header.
+    An Agent groups an ordered set of Steps (its nodes) into a runnable
+    START -> Step ... -> END pipeline; each Step answers with one of its tools
+    or, with none, a direct LLM call. Multiple live Agents may coexist in a
+    company; none is implicitly chosen for chat. A user selects one per
+    ConversationSession (or Normal RAG) in the chat header.
 
     The agent's role (what it is for, which tasks it can do) is its Langfuse
     prompt, not a column: see ``agents/services/agent_prompts.py``.
@@ -122,15 +122,6 @@ class Step(BaseModel, SoftDeleteModel):
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
     tools = models.ManyToManyField("agents.Tool", blank=True, related_name="steps")
-    # Multi-agent: when set, this step hands its work to ANOTHER Agent's flow
-    # (a sub-agent) instead of routing to its own tools.
-    delegate_agent = models.ForeignKey(
-        "agents.Agent",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="delegated_steps",
-    )
     connected_from_start = models.BooleanField(default=False, db_index=True)
     connected_to_end = models.BooleanField(default=False, db_index=True)
     next_step = models.ForeignKey(
@@ -181,23 +172,6 @@ class Step(BaseModel, SoftDeleteModel):
             if self.next_step.agent_id != self.agent_id:
                 raise ValidationError(
                     {"next_step": "next_step must belong to the same agent"}
-                )
-        # (3) delegate_agent (if set) must be another agent of the SAME company
-        # whose flow never delegates back into this step's agent.
-        if self.delegate_agent_id is not None and self.agent_id is not None:
-            from agents.services.flow import delegation_reaches
-
-            if self.delegate_agent_id == self.agent_id:
-                raise ValidationError(
-                    {"delegate_agent": "a step cannot delegate to its own agent"}
-                )
-            if self.delegate_agent.company_id != self.agent.company_id:
-                raise ValidationError(
-                    {"delegate_agent": "delegate_agent must belong to the same company"}
-                )
-            if delegation_reaches(self.delegate_agent, self.agent):
-                raise ValidationError(
-                    {"delegate_agent": "this delegation would create an agent cycle"}
                 )
         # NOTE: tools (M2M) are NOT validated here — M2M relations are not
         # populated until after save(). The "tools must belong to step.company"

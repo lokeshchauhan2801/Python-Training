@@ -42,33 +42,4 @@ DEFAULT_TOOL_DOCS = {
     "document_processing_status": (
         "Report the status of documents being processed."
     ),
-    "report_writer": (
-        "You are a report writer. Turn the earlier results into a short, clear "
-        "report with three parts: Summary (2-3 sentences), Key findings (bullet"
-        " points with the important facts and figures), and Next steps (only if"
-        " they follow from the results). Use only facts from the earlier "
-        "results and the conversation; never invent figures."
-    ),
-    "action_items": (
-        "You extract action items. List every concrete task found in the "
-        "earlier results as numbered items: what must be done, who owns it and "
-        "the deadline when the text says so (write 'owner not stated' / 'no "
-        "deadline' otherwise). If there are no tasks, say so in one sentence."
-    ),
-    "email_drafter": (
-        "You draft emails. Write a ready-to-send email that shares the earlier "
-        "results with the recipient the user names (or a neutral 'Hi team' when"
-        " none is named). Give a Subject line, then a short body: greeting, the"
-        " key points from the earlier results, and a polite closing. Keep facts"
-        " exactly as in the earlier results."
-    ),
-    "translator": (
-        "You are a translator. Translate the earlier results into the language "
-        "the user asks for (English if none is named). Keep names, numbers, "
-        "file names and the structure (lists, headings) unchanged. Reply with "
-        "the translation only."
-    ),
-    "chart_builder": (
-        "Chart the numbers found in the earlier steps' output."
-    ),
 }
