@@ -20,6 +20,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from agents.models import Agent, Step, Tool
+from agents.services.agent_prompts import ensure_role
+from agents.services.tool_docs import DEFAULT_TOOL_DOCS
 from company.models import Company
 
 _TOOL_NAMES = {
@@ -36,20 +38,23 @@ _TOOL_NAMES = {
     "chart_builder": "Chart from results",
 }
 
-# (slug, name, description, [(step slug, step name, tool slugs, delegate slug)])
+# (slug, name, role prompt, [(step slug, step name, tool slugs, delegate slug)])
+# The role prompt goes to Langfuse (agents/<company>/<slug>), not the database.
 _AGENTS = [
     (
         "research-agent",
         "Research agent",
-        "Finds information: searches the company documents and attached files, "
-        "the web, or answers from general knowledge.",
+        "You are the 'Research agent' agent. Your job: Finds information: "
+        "searches the company documents and attached files, the web, or "
+        "answers from general knowledge.",
         [("find", "Find information", ["document_search", "web_search", "general_assistant"], None)],
     ),
     (
         "writer-agent",
         "Writer agent",
-        "Writes things up from answers found by other agents: reports, action "
-        "items, emails, translations and charts, plus chat summaries.",
+        "You are the 'Writer agent' agent. Your job: Writes things up from "
+        "answers found by other agents: reports, action items, emails, "
+        "translations and charts, plus chat summaries.",
         [
             (
                 "write",
@@ -69,8 +74,9 @@ _AGENTS = [
     (
         "multi-agent-assistant",
         "Multi-agent assistant",
-        "A supervisor that splits each request between the Research agent, its "
-        "own Files worker and the Writer agent.",
+        "You are the 'Multi-agent assistant' agent. Your job: A supervisor that "
+        "splits each request between the Research agent, its own Files worker "
+        "and the Writer agent.",
         [
             ("research", "Research", [], "research-agent"),
             ("files", "Files", ["add_to_knowledge_base", "document_processing_status"], None),
@@ -115,20 +121,22 @@ class Command(BaseCommand):
             tools[slug], _ = Tool.objects.get_or_create(
                 company=company,
                 slug=slug,
-                defaults={"name": name, "is_enabled": True},
+                defaults={
+                    "name": name,
+                    "description": DEFAULT_TOOL_DOCS.get(slug, ""),
+                    "is_enabled": True,
+                },
             )
 
         agents = {}
-        for agent_slug, agent_name, description, steps in _AGENTS:
+        for agent_slug, agent_name, role, steps in _AGENTS:
             agent, created = Agent.objects.get_or_create(
                 company=company,
                 slug=agent_slug,
-                defaults={"name": agent_name, "description": description},
+                defaults={"name": agent_name},
             )
             agents[agent_slug] = agent
-            if not created and not agent.description:
-                agent.description = description
-                agent.save(update_fields=["description", "updated_at"])
+            ensure_role(agent, role)
             if not created or Step.objects.filter(agent=agent).exists():
                 self.stdout.write(f"  = Agent '{agent_slug}' already exists for {company}")
                 continue

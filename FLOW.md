@@ -126,23 +126,20 @@ Each assistant reply shows a **"Method:"** badge at the bottom of the bubble
 (`chat/templates/chat/chat_page.html`): the graph tool used when routed through a
 flow, else "Document reference" when citations exist, else "General purpose".
 
-### Tool prompts via Langfuse
+### Agent roles via Langfuse, tool docs in the database
 
-- `Tool.prompt_name` is a POINTER (a Langfuse prompt NAME), not the prompt text.
-  The prompt TEXT is authored and edited in the Langfuse Prompts UI under that
-  name; the canvas Tools section edits only the pointer per tool.
-- **Prompt-only tools** carry `config = {"source": "langfuse", "kind":
-  "prompt_only"}`. They need no registered handler: the runtime routes an
-  unregistered-but-prompt-only slug through the generic `prompt_tool` handler
-  (in `chat/services/langgraph_service.py`), which answers like the general
-  assistant but
-  forces the tool's Langfuse prompt as the system message. Create one from the
-  canvas ("Add Langfuse tool") — it POSTs `tool/sync_langfuse/` with the prompt
-  name (langfuse 4.18.0 has no prompt-listing API, so the client supplies the
-  names).
-- Every path falls back to the hard-coded prompt when Langfuse is unconfigured:
-  `basics/langfuse.py::get_prompt` returns the supplied fallback, so an
-  empty/absent managed prompt degrades to today's behaviour.
+- Each **Agent's role** (what it is for, which tasks it can do) is a Langfuse
+  prompt named `agents/<company slug>/<agent slug>`; there is no database
+  column. `agents/services/agent_prompts.py` reads/writes it, the canvas edits
+  it through the agent API's `prompt` field, and it is created in Langfuse
+  only when an Agent is created (`agents/signals.py`, admin included).
+- Every worker answers in its agent's role (`_persona`) and the supervisor
+  routes by it (`Worker.describe`).
+- **Tools have no prompt.** `Tool.description` is the tool's docs (role +
+  instructions) and follows the agent's role in the system prompt
+  (`llm_tools._system_prompt`). Defaults for new companies are in
+  `agents/services/tool_docs.py`. A slug with no registered handler is a
+  prompt-only tool that runs on its docs (`prompt_tool`).
 
 ---
 
@@ -154,5 +151,5 @@ flow, else "Document reference" when citations exist, else "General purpose".
 | `/chat/<id>/send/` | `chat/views.py::send` | run one turn (graph or RAG) |
 | `/agent-builder/` | `agents/views.py` | the flow builder canvas (iframe) |
 | `/company/set-active-company/` | `company/views.py` | switch active company |
-| `api/v1/agents/graph|node|edge|tool/` | `agents/api/views.py` | canvas CRUD + `graph/<id>/load/` + `graph/<id>/activate/` + `tool/sync_langfuse/` |
+| `api/v1/agents/graph|node|edge|tool/` | `agents/api/views.py` | canvas CRUD + `graph/<id>/load/` + `graph/<id>/activate/` |
 | `api/v1/chat/...`, `api/v1/documents/...` | each app's `api/` | thin DRF surface |

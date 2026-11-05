@@ -13,8 +13,8 @@ class Tool(BaseModel, SoftDeleteModel):
     """A tool attached to agent steps, admin-togglable per company.
 
     A slug with a registered handler runs that built-in tool; any other slug
-    is a prompt-only tool whose instructions are the Langfuse prompt of that
-    name.
+    is a prompt-only tool. Either way ``description`` is the tool's docs: its
+    role and the instructions it runs with.
     """
 
     id = ULIDField()
@@ -50,20 +50,11 @@ class Tool(BaseModel, SoftDeleteModel):
 
     @property
     def is_prompt_only(self) -> bool:
-        """True when no built-in handler has this slug (a Langfuse prompt)."""
+        """True when no built-in handler has this slug (it runs on its docs)."""
         # Lazy import avoids a module-scope chat<-agents cycle.
         from chat.services.langgraph_service import available_slugs
 
         return self.slug not in available_slugs()
-
-    @property
-    def prompt_name(self) -> str:
-        """The Langfuse prompt the llm_tools handlers read for this tool.
-
-        A prompt-only tool's slug IS its prompt name. A built-in tool returns
-        "" so ``_system_prompt`` uses the handler's ``tool_<slug>`` name.
-        """
-        return self.slug if self.is_prompt_only else ""
 
 
 class Agent(BaseModel, SoftDeleteModel):
@@ -74,6 +65,9 @@ class Agent(BaseModel, SoftDeleteModel):
     runs its own tools, hands the part to another Agent, or (no tools) answers
     with the LLM itself. Multiple live Agents may coexist in a company; a user
     selects one per ConversationSession (or Normal RAG) in the chat header.
+
+    The agent's role (what it is for, which tasks it can do) is its Langfuse
+    prompt, not a column: see ``agents/services/agent_prompts.py``.
     """
 
     id = ULIDField()
@@ -87,9 +81,6 @@ class Agent(BaseModel, SoftDeleteModel):
     )
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
-    # What this agent does: the supervisor reads it to route work here, and a
-    # worker without tools answers with it as its instructions.
-    description = models.TextField(blank=True)
     order = models.IntegerField(default=0, db_index=True)
 
     objects = SoftDeleteManager()

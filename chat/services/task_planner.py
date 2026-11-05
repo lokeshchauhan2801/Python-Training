@@ -112,6 +112,7 @@ class Worker:
     step: object
     delegate: object | None = None  # the agent the step hands work to
     tools: list = field(default_factory=list)  # tool slugs it can run
+    role: str = ""  # the owning agent's Langfuse role prompt
 
     @property
     def name(self) -> str:
@@ -120,10 +121,7 @@ class Worker:
 
     def describe(self) -> str:
         label = self.step.name or self.step.slug
-        about = ""
-        owner = self.delegate if self.delegate is not None else self.step.agent
-        if (getattr(owner, "description", "") or "").strip():
-            about = f" Does: {owner.description.strip()}"
+        about = f" Does: {self.role.strip()}" if self.role.strip() else ""
         tools = (
             f"tools: {', '.join(self.tools)}"
             if self.tools

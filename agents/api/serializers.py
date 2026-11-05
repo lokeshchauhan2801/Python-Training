@@ -1,5 +1,6 @@
 """Serializers for the agents API (per-field validation; 400 on bad payloads)."""
 
+from django.db import transaction
 from rest_framework import serializers
 
 from basics.api.serializers import AuditReadOnlySerializerMixin
@@ -85,7 +86,15 @@ class AgentSerializer(
     AuditReadOnlySerializerMixin,
     serializers.ModelSerializer,
 ):
-    """The flow CONTAINER. Steps live under it (see ``StepSerializer``)."""
+    """The flow CONTAINER. Steps live under it (see ``StepSerializer``).
+
+    ``prompt`` is the agent's role (what it is for, which tasks it can do). It
+    is read from and saved to Langfuse, never stored in the database.
+    """
+
+    prompt = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, trim_whitespace=True
+    )
 
     class Meta:
         model = Agent
@@ -93,7 +102,7 @@ class AgentSerializer(
             "id",
             "slug",
             "name",
-            "description",
+            "prompt",
             "order",
             "company",
             "created_at",
@@ -119,6 +128,39 @@ class AgentSerializer(
                     {"slug": "an agent with this slug already exists for the company"}
                 )
         return attrs
+
+    def create(self, validated_data):
+        prompt = validated_data.pop("prompt", None)
+        # One transaction: a prompt Langfuse rejects undoes the agent change.
+        with transaction.atomic():
+            agent = super().create(validated_data)
+            self._save_prompt(agent, prompt)
+        return agent
+
+    def update(self, instance, validated_data):
+        prompt = validated_data.pop("prompt", None)
+        with transaction.atomic():
+            agent = super().update(instance, validated_data)
+            self._save_prompt(agent, prompt)
+        return agent
+
+    def to_representation(self, instance):
+        from agents.services.agent_prompts import get_role
+
+        data = super().to_representation(instance)
+        data["prompt"] = get_role(instance)
+        return data
+
+    @staticmethod
+    def _save_prompt(agent, prompt):
+        if not prompt:
+            return
+        from agents.services.agent_prompts import save_role
+
+        if not save_role(agent, prompt):
+            raise serializers.ValidationError(
+                {"prompt": "Could not save the prompt to Langfuse; try again."}
+            )
 
 
 class StepSerializer(

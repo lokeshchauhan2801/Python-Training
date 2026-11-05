@@ -327,14 +327,14 @@ export default function App() {
 
   // Create a new empty Agent container, then select it.
   const createAgent = useCallback(
-    async (values: { name: string; slug: string; description: string }) => {
+    async (values: { name: string; slug: string; prompt: string }) => {
       if (busy) return;
       setBusy(true);
       try {
         const created = await api.createAgent({
           slug: values.slug,
           name: values.name,
-          description: values.description,
+          prompt: values.prompt,
           company: company || undefined,
         });
         setShowAddAgent(false);
@@ -528,12 +528,12 @@ export default function App() {
     [agents, refresh, selectedAgentId, showError, showSuccess]
   );
 
-  const saveAgentDescription = useCallback(
-    async (agentId: string, description: string) => {
+  const saveAgentPrompt = useCallback(
+    async (agentId: string, prompt: string) => {
       try {
-        await api.updateAgent(agentId, { description: description.trim() });
+        await api.updateAgent(agentId, { prompt: prompt.trim() });
         await refresh(selectedAgentId);
-        showSuccess("Description saved");
+        showSuccess("Role saved to Langfuse");
         return true;
       } catch (e) {
         showError(e);
@@ -749,10 +749,10 @@ export default function App() {
             <strong>No agent selected</strong>
           )}
           {selectedAgent && (
-            <DescriptionEditor
-              key={`agent-about-${selectedAgent.id}-${selectedAgent.description}`}
-              value={selectedAgent.description || ""}
-              onSave={(text) => saveAgentDescription(String(selectedAgent.id), text)}
+            <RoleEditor
+              key={`agent-about-${selectedAgent.id}-${selectedAgent.prompt}`}
+              value={selectedAgent.prompt || ""}
+              onSave={(text) => saveAgentPrompt(String(selectedAgent.id), text)}
             />
           )}
         </div>
@@ -809,14 +809,14 @@ export default function App() {
   );
 }
 
-interface DescriptionEditorProps {
+interface RoleEditorProps {
   value: string;
   onSave: (text: string) => Promise<boolean>;
 }
 
-/** "What this agent does": shown as text with Edit; the supervisor routes by
- * it and a no-tools worker answers with it as its instructions. */
-function DescriptionEditor({ value, onSave }: DescriptionEditorProps) {
+/** The agent's role (its Langfuse prompt): shown as text with Edit; the
+ * supervisor routes by it and every worker of the agent answers in it. */
+function RoleEditor({ value, onSave }: RoleEditorProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const [saving, setSaving] = useState(false);
@@ -825,11 +825,11 @@ function DescriptionEditor({ value, onSave }: DescriptionEditorProps) {
     return (
       <div className="ab-about">
         <span className={value ? "" : "ab-about-empty"}>
-          {value || "No description yet. Add one so the supervisor knows what this agent is for."}
+          {value || "No role yet. Describe what this agent is for and which tasks it can do (saved to Langfuse)."}
         </span>
         <button
           className="ab-link"
-          aria-label="Edit agent description"
+          aria-label="Edit agent role"
           onClick={() => {
             setDraft(value);
             setEditing(true);
@@ -844,7 +844,7 @@ function DescriptionEditor({ value, onSave }: DescriptionEditorProps) {
     <div className="ab-inline-name-edit">
       <textarea
         className="ab-input"
-        aria-label="Agent description"
+        aria-label="Agent role"
         rows={3}
         value={draft}
         autoFocus
@@ -976,7 +976,7 @@ function FlowOverview({ workers, tools, agentNameById, onSelect }: FlowOverviewP
       <div className="ab-help">
         <div>How a chat message is handled:</div>
         <div>1. The supervisor reads it and splits it into parts ("GDP figures", "summarise the chat", "pie chart"…).</div>
-        <div>2. Each part goes to the worker that fits it best, by its tools and the agent's description.</div>
+        <div>2. Each part goes to the worker that fits it best, by its tools and the agent's role.</div>
         <div>3. Parts that don't need each other run at the same time. A part that needs another's answer (a chart of the GDP figures) waits for it and gets only that answer.</div>
         <div>4. Every worker's answer goes into the reply, in the order you asked. A worker with no tools answers itself with the LLM, in its role.</div>
       </div>
@@ -1168,7 +1168,7 @@ function StepEditor({
                 label="Sub-agent name"
                 onSave={(name) => onRenameAgent(String(delegate.id), name)}
               />
-              {delegate.description && <div className="ab-about">{delegate.description}</div>}
+              {delegate.prompt && <div className="ab-about">{delegate.prompt}</div>}
               <div className="ab-preview-title">Its workers</div>
               {delegateFlow.length === 0 ? (
                 <div className="ab-position-warn">
@@ -1224,7 +1224,7 @@ function StepEditor({
           {stepToolIds.size === 0 && (
             <div className="ab-empty" style={{ fontSize: "12px" }}>
               No tools ticked: this worker answers itself with the LLM, in the
-              role of this agent (its name and description).
+              role of this agent (its Langfuse role prompt).
             </div>
           )}
         </div>
@@ -1255,7 +1255,7 @@ interface CreateAgentDialogProps {
   busy: boolean;
   existingSlugs: string[];
   onCancel: () => void;
-  onCreate: (values: { name: string; slug: string; description: string }) => void;
+  onCreate: (values: { name: string; slug: string; prompt: string }) => void;
 }
 
 function CreateAgentDialog({
@@ -1267,7 +1267,7 @@ function CreateAgentDialog({
   const [name, setName] = useState<string>("New agent");
   const [slug, setSlug] = useState<string>(`agent-${Date.now().toString(36)}`);
   const [slugEdited, setSlugEdited] = useState<boolean>(false);
-  const [description, setDescription] = useState<string>("");
+  const [prompt, setPrompt] = useState<string>("");
   const [localError, setLocalError] = useState<string>("");
 
   const onNameChange = (value: string) => {
@@ -1293,7 +1293,7 @@ function CreateAgentDialog({
       return;
     }
     setLocalError("");
-    onCreate({ name: name.trim(), slug: finalSlug, description: description.trim() });
+    onCreate({ name: name.trim(), slug: finalSlug, prompt: prompt.trim() });
   };
 
   return (
@@ -1332,18 +1332,18 @@ function CreateAgentDialog({
         </label>
 
         <label className="ab-field">
-          <span>What this agent does (optional)</span>
+          <span>Role and tasks of this agent (optional, saved to Langfuse)</span>
           <textarea
             className="ab-input"
             rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="e.g. Summarises the conversation in a few short lines."
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="e.g. You are the meeting agent. You summarise meetings and list their action items."
           />
         </label>
 
         <div className="ab-empty" style={{ fontSize: "12px", marginTop: "8px" }}>
-          The supervisor reads the description to decide which parts of a
+          The supervisor reads the role to decide which parts of a
           message to send here. Add workers to the new agent with "+ Worker".
         </div>
 

@@ -8,25 +8,8 @@ from rest_framework.response import Response
 from basics.api.views import ScopedModelViewSet
 
 from ..models import Agent, Step, Tool
+from ..services.tool_docs import DEFAULT_TOOL_DOCS
 from .serializers import AgentSerializer, StepSerializer, ToolSerializer
-
-# Human-readable descriptions for the registered handler functions. The runtime
-# registry (chat/services/llm_tools.py) maps a slug -> handler but carries no
-# description, so the canvas's "add tool from function" list sources its labels
-# here. A slug with no entry falls back to a titleised slug.
-_FUNCTION_DESCRIPTIONS = {
-    "general_assistant": "Plain LLM answer with no retrieval (chart-capable).",
-    "document_search": "Answer from the company's uploaded documents (RAG, chart-capable).",
-    "chat_summarise": "Summarise the current conversation.",
-    "web_search": "Answer from the model's general knowledge (no live web).",
-    "add_to_knowledge_base": "Add an attached file to the knowledge base (background processing).",
-    "document_processing_status": "Report the status of documents being processed.",
-    "report_writer": "Turn the earlier steps' output into a short report (summary, findings, next steps).",
-    "action_items": "List the tasks, owners and deadlines found in the earlier steps' output.",
-    "email_drafter": "Draft an email that shares the earlier steps' output.",
-    "translator": "Translate the earlier steps' output into the language the user asks for.",
-    "chart_builder": "Chart the numbers found in the earlier steps' output.",
-}
 
 # Display names for the canvas list (slug titles read badly for these).
 _FUNCTION_NAMES = {
@@ -57,7 +40,7 @@ def _function_catalog():
             {
                 "slug": slug,
                 "name": _FUNCTION_NAMES.get(slug) or slug.replace("_", " ").title(),
-                "description": _FUNCTION_DESCRIPTIONS.get(slug, ""),
+                "description": DEFAULT_TOOL_DOCS.get(slug, ""),
             }
         )
     return catalog

@@ -22,13 +22,13 @@ All changes persist immediately via `Step`/`Agent` PATCHes; there is no explicit
 
 After every change the canvas re-calls `GET /agent/load/?agent=<id>` so it mirrors backend truth.
 
-**Agent create/rename/describe/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / PATCH `name` or `description` / DELETE `/api/v1/agents/agent/{id}/`. **Worker create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
+**Agent create/rename/describe/delete:** POST `/api/v1/agents/agent/` (stamping `company` from the querystring) / PATCH `name` or `prompt` / DELETE `/api/v1/agents/agent/{id}/`. **Worker create/delete:** POST `/api/v1/agents/step/` (requires `agent`, stamps `company`) / DELETE `/api/v1/agents/step/{id}/`.
 
 **Agent selection:** Agents are independent flow containers — there is no company-wide "current" Agent and no state endpoint to flip one on. Choosing an Agent in the dropdown only changes which flow the canvas edits (it re-calls `GET /agent/load/?agent=<id>`); it never changes how Chat behaves. Chat sessions pick an Agent per session through the Chat UI's own selector.
 
 ## The Agent Model (supervisor + workers)
 
-- An **Agent** has a name and a **description** ("what this agent does"). The supervisor reads the descriptions to route work, and a worker without tools answers with its agent's description as its instructions.
+- An **Agent** has a name and a **role prompt** (what it is for, which tasks it can do). The role lives only in Langfuse as `agents/<company slug>/<agent slug>`; the API reads and writes it as the agent's `prompt` field. The supervisor reads the roles to route work, and every worker of the agent answers in its role.
 - Its **Steps are workers**. A worker either uses its own tools (M2M to the flat `Tool` table), hands its parts to another Agent (`delegate_agent`), or, with no tools, answers itself with the LLM in its role.
 - A hand-off target must be another agent of the same company, and hand-offs can't loop back (checked server-side; at most 3 agents deep at run time). That agent supervises its own workers for the part it gets.
 - A company can hold many agents side by side; chat sessions pick one each in the chat header.
@@ -37,7 +37,7 @@ After every change the canvas re-calls `GET /agent/load/?agent=<id>` so it mirro
 
 `chat/services/task_planner.py` is the supervisor. For each message it:
 
-1. splits the message into parts and gives each part to one worker (by its tools and description), naming for each part the earlier parts whose answer it needs (`depends_on`);
+1. splits the message into parts and gives each part to one worker (by its tools and its agent's role), naming for each part the earlier parts whose answer it needs (`depends_on`);
 2. runs the parts as a LangGraph graph built from those dependencies: parts that need nothing from each other start at the same time; a part that needs another waits for it and receives only that answer;
 3. returns one reply with every part's answer, numbered in the order asked and naming who answered it. The turn's `metadata.tasks` records each part's worker, agent, tool, dependencies and wave; the chat page shows it as "How this was answered".
 
@@ -52,7 +52,7 @@ The toolbar has `New agent`, `+ Worker`, `Tidy layout` and the agent dropdown. T
 
 ## Tools
 
-A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `report_writer`, `action_items`, `email_drafter`, `translator`, `chart_builder`); the last five work on the answers of the parts a part depends on. Any other slug is a prompt-only tool whose instructions are the Langfuse prompt of that name. The sidebar shows each tool's slug next to its name.
+A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`, `report_writer`, `action_items`, `email_drafter`, `translator`, `chart_builder`); the last five work on the answers of the parts a part depends on. Any other slug is a prompt-only tool. A tool's `description` is its docs: its role and instructions, which run after the agent's role (tools have no Langfuse prompt). The sidebar shows each tool's slug next to its name.
 
 ## API Client Pattern
 
@@ -102,9 +102,9 @@ The old graph/node/edge endpoints and the form-urlencoded `formRequest` chat hel
 3. `npm run dev` — Dev server starts, canvas loads at `http://localhost:5173`
 4. Manual E2E test:
    - Load `/agent-builder/` in Django (with `?csrf=...&company=...&company_name=...`)
-   - Click `New agent` (name + description), then `+ Worker` to add workers; each one appears wired from the Supervisor
+   - Click `New agent` (name + role), then `+ Worker` to add workers; each one appears wired from the Supervisor
    - Select a worker → rename it, tick tools, or hand it off to another agent ("Another agent")
-   - Edit the agent's name and description in the sidebar header
+   - Edit the agent's name and role in the sidebar header
    - Switch Agents in the dropdown → the canvas shows that Agent's supervisor and workers (no Agent is "made current" by this)
 
 **Backend tests:** The Django test suite (`python manage.py test agents`) covers API endpoints. Frontend integration is verified manually.

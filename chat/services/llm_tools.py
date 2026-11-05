@@ -241,11 +241,14 @@ def _knowledge_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResult":
     )
     # Honour the tool's Langfuse system prompt (chart guidance lives there) by
     # prepending it, mirroring how document_search applies its own prompt.
-    default_name = (
-        "tool_web_search" if tool_slug == "web_search" else "tool_general_assistant"
-    )
     pre = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, default_name), ctx), ctx.llm
+        _with_pipeline_context(
+            _system_prompt(
+                ctx, "web_search" if tool_slug == "web_search" else "general_assistant"
+            ),
+            ctx,
+        ),
+        ctx.llm,
     )
     prompt = f"{pre.strip()}\n\n{prompt}"
     # No file is attached on this turn. If the user's message does not itself
@@ -303,7 +306,7 @@ def _prior_results_chart_reply(ctx: "ToolContext", tool_slug: str) -> "ToolResul
         attachment_sections=[],
     )
     pre = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, "tool_general_assistant"), ctx),
+        _with_pipeline_context(_system_prompt(ctx, "general_assistant"), ctx),
         ctx.llm,
     )
     prompt = (
@@ -376,7 +379,7 @@ def _file_chart_reply(
         attachment_sections=sections,
     )
     pre = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, "tool_document_search"), ctx),
+        _with_pipeline_context(_system_prompt(ctx, "document_search"), ctx),
         ctx.llm,
     )
     prompt = f"{pre.strip()}\n\n{prompt}"
@@ -401,10 +404,20 @@ def _file_chart_reply(
     )
 
 
-def _system_prompt(ctx: "ToolContext", default_name: str, fallback: str = "") -> str:
-    """Resolve a Langfuse system prompt for the tool (or a fallback string)."""
-    name = (ctx.tool.prompt_name if ctx.tool else "") or default_name
-    return ctx.langfuse.get_prompt(name, fallback=fallback) if ctx.langfuse else fallback
+def _system_prompt(ctx: "ToolContext", slug: str) -> str:
+    """The answering worker's role (its agent's Langfuse prompt, ``persona``)
+    followed by the tool's docs (``Tool.description``).
+
+    With no Tool row on the context (a worker without tools runs
+    ``general_assistant``) the company's row for ``slug`` supplies the docs.
+    """
+    tool = ctx.tool
+    if tool is None and ctx.company is not None:
+        from agents.models import Tool
+
+        tool = Tool.objects.filter(company=ctx.company, slug=slug).first()
+    docs = (tool.description or "").strip() if tool is not None else ""
+    return _with_persona(docs, ctx)
 
 
 def _chart_caption_only(content: str, message_text: str) -> str:
@@ -434,9 +447,7 @@ def _general_assistant(ctx: "ToolContext") -> "ToolResult":
 
     messages = _history_messages(ctx.conversation, ctx.message_text)
     sys = _with_identity(
-        _with_pipeline_context(
-            _with_persona(_system_prompt(ctx, "tool_general_assistant"), ctx), ctx
-        ),
+        _with_pipeline_context(_system_prompt(ctx, "general_assistant"), ctx),
         ctx.llm,
     )
     messages.insert(0, {"role": "system", "content": sys})
@@ -465,15 +476,7 @@ def _web_search(ctx: "ToolContext") -> "ToolResult":
         return _knowledge_chart_reply(ctx, "web_search")
 
     messages = _history_messages(ctx.conversation, ctx.message_text)
-    sys = _system_prompt(ctx, "tool_web_search")
-    if not sys.strip():
-        sys = (
-            "You are a helpful assistant. You do not have live internet access "
-            "right now, so answer the user's question from your own general "
-            "knowledge rather than declining. Give your best, most accurate "
-            "answer, and add a one-line note that you could not fetch live web "
-            "results and the information may be out of date."
-        )
+    sys = _system_prompt(ctx, "web_search")
     messages.insert(
         0,
         {
@@ -565,7 +568,7 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     )
 
     pre = _with_identity(
-        _with_pipeline_context(_system_prompt(ctx, "tool_document_search"), ctx),
+        _with_pipeline_context(_system_prompt(ctx, "document_search"), ctx),
         ctx.llm,
     )
     prompt = f"{pre.strip()}\n\n{prompt}"
@@ -593,7 +596,7 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
 @register("chat_summarise")
 def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
     """``chat_summarise`` tool — summarise the conversation's prior history."""
-    from chat.services.chat_service import ChatService, _SUMMARY_SYSTEM_PROMPT
+    from chat.services.chat_service import ChatService
 
     service = ChatService()
     turns = list(ctx.conversation.turns.order_by("created_at"))
@@ -618,28 +621,16 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
             tool_used="chat_summarise",
         )
 
-    name = (ctx.tool.prompt_name if ctx.tool else "") or "tool_chat_summarise"
-    sys = (
-        ctx.langfuse.get_prompt(name, fallback=_SUMMARY_SYSTEM_PROMPT)
-        if ctx.langfuse
-        else _SUMMARY_SYSTEM_PROMPT
-    )
-    sys = _plain_text_system_prompt(sys)
+    sys = _plain_text_system_prompt(_system_prompt(ctx, "chat_summarise"))
 
-    try:
-        if "{{conversation}}" in sys or "{{history}}" in sys:
-            system_content = sys.replace(
-                "{{conversation}}", conversation_context
-            ).replace("{{history}}", conversation_context)
-            messages = [{"role": "system", "content": system_content}]
-        else:
-            messages = [
-                {"role": "system", "content": sys},
-                {"role": "user", "content": conversation_context},
-            ]
-    except Exception:
+    if "{{conversation}}" in sys or "{{history}}" in sys:
+        system_content = sys.replace(
+            "{{conversation}}", conversation_context
+        ).replace("{{history}}", conversation_context)
+        messages = [{"role": "system", "content": system_content}]
+    else:
         messages = [
-            {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
+            {"role": "system", "content": sys},
             {"role": "user", "content": conversation_context},
         ]
 
@@ -664,11 +655,10 @@ def _chat_summarise(ctx: "ToolContext") -> "ToolResult":
 
 @register("prompt_tool")
 def _prompt_tool(ctx: "ToolContext") -> "ToolResult":
-    """``prompt_tool`` — generic prompt-only tool driven by a Langfuse prompt."""
+    """``prompt_tool`` — a tool with no handler, driven by its own docs."""
     messages = _history_messages(ctx.conversation, ctx.message_text)
 
-    name = (ctx.tool.prompt_name if ctx.tool else "") or ""
-    sys = ctx.langfuse.get_prompt(name, fallback="") if (ctx.langfuse and name) else ""
+    sys = _system_prompt(ctx, ctx.tool.slug if ctx.tool else "")
     messages.insert(
         0,
         {
@@ -747,36 +737,8 @@ def _file_command_tool(ctx, *, allowed, default, tool_used) -> "ToolResult":
 # --------------------------------------------------------------------------- #
 # Each one turns what earlier steps / agents produced (``ctx.pipeline_context``)
 # into something new. Used alone (no earlier output) it works on the user's
-# message and the conversation instead. A Langfuse prompt named
-# ``tool_<slug>`` overrides the built-in instructions.
-_EARLIER_OUTPUT_TASKS = {
-    "report_writer": (
-        "You are a report writer. Turn the earlier results into a short, clear "
-        "report with three parts: Summary (2-3 sentences), Key findings (bullet "
-        "points with the important facts and figures), and Next steps (only if "
-        "they follow from the results). Use only facts from the earlier results "
-        "and the conversation; never invent figures."
-    ),
-    "action_items": (
-        "You extract action items. List every concrete task found in the "
-        "earlier results as numbered items: what must be done, who owns it and "
-        "the deadline when the text says so (write 'owner not stated' / 'no "
-        "deadline' otherwise). If there are no tasks, say so in one sentence."
-    ),
-    "email_drafter": (
-        "You draft emails. Write a ready-to-send email that shares the earlier "
-        "results with the recipient the user names (or a neutral 'Hi team' "
-        "when none is named). Give a Subject line, then a short body: greeting, "
-        "the key points from the earlier results, and a polite closing. Keep "
-        "facts exactly as in the earlier results."
-    ),
-    "translator": (
-        "You are a translator. Translate the earlier results into the language "
-        "the user asks for (English if none is named). Keep names, numbers, file "
-        "names and the structure (lists, headings) unchanged. Reply with the "
-        "translation only."
-    ),
-}
+# message and the conversation instead. The instructions are the tool's docs
+# (``Tool.description``).
 
 
 def _earlier_output(ctx: "ToolContext") -> str:
@@ -784,9 +746,8 @@ def _earlier_output(ctx: "ToolContext") -> str:
 
 
 def _earlier_output_reply(ctx: "ToolContext", slug: str) -> "ToolResult":
-    """Run one of the ``_EARLIER_OUTPUT_TASKS`` on the earlier steps' output."""
-    sys = _system_prompt(ctx, f"tool_{slug}", fallback=_EARLIER_OUTPUT_TASKS[slug])
-    sys = _with_identity(sys or _EARLIER_OUTPUT_TASKS[slug], ctx.llm)
+    """Run the ``slug`` tool's docs on the earlier steps' output."""
+    sys = _with_identity(_system_prompt(ctx, slug), ctx.llm)
     earlier = _earlier_output(ctx)
     if earlier:
         # The step labels ("[Step 'x' used tool 'y']") are routing notes, not

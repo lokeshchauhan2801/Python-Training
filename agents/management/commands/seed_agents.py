@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from agents.models import Agent, Step, Tool
+from agents.services.tool_docs import DEFAULT_TOOL_DOCS
 from company.models import Company
 
 # (slug, name) of every built-in tool; the slug selects the handler.
@@ -75,6 +76,7 @@ class Command(BaseCommand):
                 slug=slug,
                 defaults={
                     "name": name,
+                    "description": DEFAULT_TOOL_DOCS.get(slug, ""),
                     "is_enabled": True,
                 },
             )

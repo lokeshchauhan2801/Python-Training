@@ -114,6 +114,35 @@ class LangfuseClient:
             logger.debug("langfuse create_prompt(%s) failed", name)
             return False
 
+    def ensure_prompt(self, name: str, text: str) -> bool:
+        """Create ``name`` in Langfuse only when it does not exist yet.
+
+        Never adds a version over an existing prompt, so edits made in the
+        Langfuse UI are kept. Returns True when the prompt was created. Any
+        error other than "not found" (Langfuse down, bad keys) creates nothing,
+        so an outage cannot add stray versions.
+        """
+        client = self._ensure_client()
+        if client is None:
+            return False
+        try:
+            from langfuse.api import NotFoundError
+        except Exception:
+            return False
+        try:
+            client.get_prompt(name, max_retries=0)
+            return False
+        except NotFoundError:
+            pass
+        except Exception:
+            logger.debug("langfuse ensure_prompt(%s): lookup failed", name)
+            return False
+        created = self.create_prompt(name, text)
+        if created:
+            # Serve the new prompt now instead of after the miss TTL.
+            _PROMPT_MISSES.pop(name, None)
+        return created
+
     @contextlib.contextmanager
     def trace(self, name: str, **kw):
         """Context manager wrapping an observable unit of work.

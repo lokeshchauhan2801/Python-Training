@@ -22,7 +22,7 @@ export interface Agent {
   id: string; // ULID string
   slug: string;
   name: string;
-  description: string; // what the agent does: the supervisor routes by it
+  prompt: string; // the agent's role + tasks; stored in Langfuse, the supervisor routes by it
   order: number;
   company: string | number | null;
   created_at: string;
