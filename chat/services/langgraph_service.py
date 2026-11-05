@@ -339,8 +339,10 @@ class LangGraphChatService:
         ):
             raise ValueError("Conversation does not belong to the signed-in user.")
 
-        if self._agent is not None and self._agent.company_id != getattr(
-            company, "pk", None
+        # A global agent (no company) serves every company.
+        if self._agent is not None and self._agent.company_id not in (
+            None,
+            getattr(company, "pk", None),
         ):
             raise ValueError("Selected agent does not belong to the chat company.")
 

@@ -2,18 +2,21 @@
 
 The prompt says what the agent is for and which tasks it can do. Every step of
 the agent's flow answers in that role (``ToolContext.persona``), followed by the
-chosen tool's docs. It is named ``agents/<company slug>/<agent slug>``
-(agent slugs repeat across companies). It is created in Langfuse only when an
-Agent is created (``agents.signals``: canvas, API, admin, seeds); nothing is
-stored in the database.
+chosen tool's docs. It is named after the agent's slug alone (no folders, no
+company: company scoping lives in the database), so agents sharing a slug share
+one role. It is created in Langfuse only when an Agent is created
+(``agents.signals``: canvas, API, admin, seeds); nothing is stored in the
+database.
 """
 
 from __future__ import annotations
 
+# Langfuse prompts the app reads that are not agent roles.
+RESERVED_PROMPT_NAMES = {"agent_router"}
+
 
 def prompt_name(agent) -> str:
-    company = agent.company.slug if agent.company_id else "global"
-    return f"agents/{company}/{agent.slug}"
+    return agent.slug
 
 
 def starter_text(agent) -> str:

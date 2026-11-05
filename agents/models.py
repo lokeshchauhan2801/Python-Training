@@ -63,7 +63,8 @@ class Agent(BaseModel, SoftDeleteModel):
     An Agent groups an ordered set of Steps (its nodes) into a runnable
     START -> Step ... -> END pipeline; each Step answers with one of its tools
     or, with none, a direct LLM call. Multiple live Agents may coexist in a
-    company; none is implicitly chosen for chat. A user selects one per
+    company; none is implicitly chosen for chat. An Agent without a company is
+    global: every company can use it. A user selects one per
     ConversationSession (or Normal RAG) in the chat header.
 
     The agent's role (what it is for, which tasks it can do) is its Langfuse
@@ -98,6 +99,17 @@ class Agent(BaseModel, SoftDeleteModel):
 
     def __str__(self) -> str:
         return self.name or self.slug
+
+    def clean(self):
+        super().clean()
+        # The slug is the agent's Langfuse prompt name: a "/" would make a
+        # folder there, and reserved names belong to other prompts.
+        from agents.services.agent_prompts import RESERVED_PROMPT_NAMES
+
+        if "/" in (self.slug or ""):
+            raise ValidationError({"slug": "an agent slug cannot contain '/'"})
+        if self.slug in RESERVED_PROMPT_NAMES:
+            raise ValidationError({"slug": f"'{self.slug}' is a reserved prompt name"})
 
 
 class Step(BaseModel, SoftDeleteModel):

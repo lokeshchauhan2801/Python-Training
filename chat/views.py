@@ -7,6 +7,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
+from django.db.models import Q
 from django.http import Http404, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods
@@ -80,7 +81,7 @@ def _resolve_selected_agent(session, *, actor=None, repair=False):
     * a live Agent and ``None`` provenance when the stored FK resolves;
     * ``(None, None)`` when the field is NULL;
     * ``(None, provenance)`` (or ``(None, None)`` when ``repair`` is false) when
-      a non-null FK is not live / not same-company. With ``repair=True`` the
+      a non-null FK is not live / not same-company or global. With ``repair=True`` the
       stale value is cleared (audit-stamped) and a single warning is logged with
       the session and old Agent ID but no user content.
     """
@@ -89,7 +90,9 @@ def _resolve_selected_agent(session, *, actor=None, repair=False):
     old_id = session.selected_agent_id
     if old_id is None:
         return None, None
-    agent = Agent.objects.filter(pk=old_id, company=session.company).first()
+    agent = Agent.objects.filter(
+        Q(company=session.company) | Q(company__isnull=True), pk=old_id
+    ).first()
     if agent is not None:
         return agent, None
     # Stale / soft-deleted / cross-company persisted FK.
@@ -148,7 +151,7 @@ def _parse_agent_choice(raw, company):
     """Validate a submitted ``agent_id`` for ``company``.
 
     ``None`` / an empty form value clears the selection (returns ``None``); a
-    26-char ULID must name a live Agent of ``company``. Raises
+    26-char ULID must name a live Agent of ``company`` or a global one. Raises
     ``_AgentChoiceError`` with the client-facing message otherwise.
     """
     from agents.models import Agent
@@ -157,7 +160,9 @@ def _parse_agent_choice(raw, company):
         return None
     if not isinstance(raw, str) or not _valid_ulid(raw.strip()):
         raise _AgentChoiceError("agent_id must be a ULID or null")
-    agent = Agent.objects.filter(company=company, pk=raw.strip()).first()
+    agent = Agent.objects.filter(
+        Q(company=company) | Q(company__isnull=True), pk=raw.strip()
+    ).first()
     if agent is None:
         raise _AgentChoiceError(_AGENT_UNAVAILABLE)
     return agent
@@ -435,9 +440,9 @@ def agents_json(request):
 
     agents = [
         {"id": str(agent.pk), "name": agent.name, "slug": agent.slug}
-        for agent in Agent.objects.filter(company=company).order_by(
-            "created_at"
-        )
+        for agent in Agent.objects.filter(
+            Q(company=company) | Q(company__isnull=True)
+        ).order_by("created_at")
     ]
     return JsonResponse({"agents": agents})
 

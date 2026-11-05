@@ -129,10 +129,12 @@ flow, else "Document reference" when citations exist, else "General purpose".
 ### Agent roles via Langfuse, tool docs in the database
 
 - Each **Agent's role** (what it is for, which tasks it can do) is a Langfuse
-  prompt named `agents/<company slug>/<agent slug>`; there is no database
-  column. `agents/services/agent_prompts.py` reads/writes it, the canvas edits
-  it through the agent API's `prompt` field, and it is created in Langfuse
-  only when an Agent is created (`agents/signals.py`, admin included).
+  prompt named after the agent's slug (no folders or company; company
+  scoping is in the database); there is no database column.
+  `agents/services/agent_prompts.py` reads/writes it, the canvas edits it
+  through the agent API's `prompt` field, and it is created in Langfuse only
+  when an Agent is created (`agents/signals.py`, admin included).
+- An Agent without a company is **global**: chat offers it to every company.
 - Every step of the agent's sequential flow answers in that role
   (`ToolContext.persona`).
 - **Tools have no prompt.** `Tool.description` is the tool's docs (role +

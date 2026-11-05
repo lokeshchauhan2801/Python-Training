@@ -50,7 +50,7 @@ The toolbar has two buttons — `Add Agent` (create a new flow container) and `+
 
 A tool has no type field: its `slug` decides what it is. A slug with a registered handler is a built-in tool (`general_assistant`, `document_search`, `chat_summarise`, `web_search`, `add_to_knowledge_base`, `document_processing_status`); any other slug is a prompt-only tool. A tool's `description` is its docs (role + instructions). The sidebar shows each tool's slug next to its name.
 
-Each Agent has a **role** (what it is for, which tasks it can do), stored only in Langfuse as `agents/<company slug>/<agent slug>` and exposed by the agent API as `prompt`. Every step of the agent answers in that role, followed by the chosen tool's docs. The sidebar edits it under "Agent role".
+Each Agent has a **role** (what it is for, which tasks it can do), stored only in Langfuse under the agent's slug (no folders or company; company scoping is in the database) and exposed by the agent API as `prompt`. Every step of the agent answers in that role, followed by the chosen tool's docs. The sidebar edits it under "Agent role". An Agent without a company is global: chat offers it to every company (manage it in Django admin).
 
 ## API Client Pattern
 

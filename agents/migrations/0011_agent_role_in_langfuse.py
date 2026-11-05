@@ -3,7 +3,7 @@
 1. Empty ``Tool.description`` gets the built-in tool's docs (the text its
    Langfuse ``tool_<slug>`` prompt held), frozen here.
 2. Every ``Agent.description`` becomes the agent's Langfuse role prompt
-   ``agents/<company slug>/<agent slug>``, worded as ``_persona`` used it.
+   (named after the agent's slug), worded as ``_persona`` used it.
    Langfuse must be configured when any agent has a description; the column
    is dropped only after every prompt is saved in Langfuse.
 3. ``Agent.description`` is removed.
@@ -103,14 +103,13 @@ def forwards(apps, schema_editor):
             "missing. Set them (source ~/.bash_profile) and run migrate again."
         )
     for agent in agents:
-        company = agent.company.slug if agent.company_id else "global"
-        name = f"agents/{company}/{agent.slug}"
+        name = agent.slug
         text = (
             f"You are the '{agent.name or agent.slug}' agent. "
             f"Your job: {agent.description.strip()}"
         )
-        # A new version, not ensure_prompt: a running server's startup sync
-        # may already have made a starter prompt under this name.
+        # A new version, not ensure_prompt: a starter prompt may already
+        # exist under this name.
         if not client.create_prompt(name, text):
             raise RuntimeError(f"Could not create Langfuse prompt {name}; nothing was dropped.")
     client.flush()
