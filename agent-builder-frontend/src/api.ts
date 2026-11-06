@@ -23,7 +23,7 @@ export interface Agent {
   slug: string;
   name: string;
   prompt: string; // the agent's role + tasks; stored in Langfuse, leads every step's prompt
-  company: string | number | null;
+  company: string | number | null; // null = global: every company can use it
   created_at: string;
   updated_at: string;
   created_by: string | number | null;
@@ -136,8 +136,12 @@ export const api = {
 
   // Tools-from-functions: list the registered handler functions and
   // create/attach a backing Tool row to a STEP from one.
-  availableFunctions: (company?: string) => {
-    const qs = company ? `?company=${encodeURIComponent(company)}` : "";
+  // ``step`` scopes the list to that step's agent (global tools for a global agent).
+  availableFunctions: (company?: string, step?: string) => {
+    const params = new URLSearchParams();
+    if (company) params.set("company", company);
+    if (step) params.set("step", step);
+    const qs = params.toString() ? `?${params.toString()}` : "";
     return request<AvailableFunction[]>("GET", `/tool/available/${qs}`);
   },
   attachFunction: (data: { slug: string; step?: string; company?: string }) =>

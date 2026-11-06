@@ -113,6 +113,17 @@ class AgentSerializer(
         ]
         read_only_fields = []
 
+    def validate_company(self, value):
+        # An explicit ``company: null`` on create makes a global agent (every
+        # company can use it); only a superuser may create one.
+        if value is None and "company" in (self.initial_data or {}):
+            if not self.context["request"].user.is_superuser:
+                raise serializers.ValidationError(
+                    "only an administrator can create a global agent"
+                )
+            return None
+        return super().validate_company(value)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         company = self._scoped_company(attrs)
@@ -126,13 +137,18 @@ class AgentSerializer(
                 raise serializers.ValidationError({"slug": "an agent slug cannot contain '/'"})
             if slug in RESERVED_PROMPT_NAMES:
                 raise serializers.ValidationError({"slug": f"'{slug}' is a reserved prompt name"})
-        if company is not None and slug:
-            clash = Agent.objects.filter(company=company, slug=slug)
+        if slug:
+            # The DB constraint cannot see global (NULL company) duplicates.
+            clash = (
+                Agent.objects.filter(company=company, slug=slug)
+                if company is not None
+                else Agent.objects.filter(company__isnull=True, slug=slug)
+            )
             if self.instance is not None:
                 clash = clash.exclude(pk=self.instance.pk)
             if clash.exists():
                 raise serializers.ValidationError(
-                    {"slug": "an agent with this slug already exists for the company"}
+                    {"slug": "an agent with this slug already exists"}
                 )
         return attrs
 
@@ -288,6 +304,9 @@ class StepSerializer(
             raise serializers.ValidationError(
                 {"company": "step.company must match its agent's company"}
             )
+        # A step always takes its agent's company (none for a global agent).
+        if self.instance is None and agent is not None:
+            attrs["company"] = agent.company
 
         next_step = attrs.get("next_step")
         if next_step is not None and agent is not None:
@@ -302,12 +321,13 @@ class StepSerializer(
         elif attrs.get("connected_to_end"):
             attrs["next_step"] = None
 
+        # A company agent uses its company's tools; a global agent global ones.
         tools = attrs.get("tools")
-        if tools is not None and agent_company_id is not None:
+        if tools is not None and agent is not None:
             for tool in tools:
                 if tool.company_id != agent_company_id:
                     raise serializers.ValidationError(
-                        {"tools": "every tool must belong to the agent's company"}
+                        {"tools": "every tool must belong to the agent's company (or be global for a global agent)"}
                     )
 
         slug = attrs.get("slug") or (self.instance and self.instance.slug)

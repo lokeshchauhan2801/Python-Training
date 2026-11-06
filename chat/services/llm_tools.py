@@ -349,13 +349,18 @@ def _system_prompt(ctx: "ToolContext", slug: str) -> str:
     the tool's docs (``Tool.description``).
 
     With no Tool row on the context (a step without tools runs
-    ``general_assistant``) the company's row for ``slug`` supplies the docs.
+    ``general_assistant``) the company's row for ``slug`` supplies the docs,
+    else the global row.
     """
     tool = ctx.tool
-    if tool is None and ctx.company is not None:
+    if tool is None:
         from agents.models import Tool
 
-        tool = Tool.objects.filter(company=ctx.company, slug=slug).first()
+        # The company's row first, then the global one (global agents).
+        rows = Tool.objects.filter(slug=slug)
+        tool = (
+            ctx.company is not None and rows.filter(company=ctx.company).first()
+        ) or rows.filter(company__isnull=True).first()
     docs = (tool.description or "").strip() if tool is not None else ""
     return _with_persona(docs, ctx)
 

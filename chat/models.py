@@ -47,11 +47,12 @@ class ConversationSession(BaseModel, SoftDeleteModel):
         return self.title or str(self.session_id)
 
     def _validate_selected_agent_company(self):
-        """A selected Agent must belong to the same company as the session."""
+        """A selected Agent must belong to the session's company or be global
+        (no company)."""
         if (
             self.selected_agent_id is not None
             and self.company_id is not None
-            and self.selected_agent.company_id != self.company_id
+            and self.selected_agent.company_id not in (None, self.company_id)
         ):
             raise ValidationError(
                 {"selected_agent": "selected_agent must belong to session.company."}

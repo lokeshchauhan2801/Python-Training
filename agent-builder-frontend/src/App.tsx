@@ -219,7 +219,7 @@ export default function App() {
 
   // Create a new empty Agent container, then select it.
   const createAgent = useCallback(
-    async (values: { name: string; slug: string; prompt: string }) => {
+    async (values: { name: string; slug: string; prompt: string; global: boolean }) => {
       if (busy) return;
       setBusy(true);
       try {
@@ -227,7 +227,8 @@ export default function App() {
           slug: values.slug,
           name: values.name,
           prompt: values.prompt,
-          company: company || undefined,
+          // null = global (every company); only an administrator may.
+          company: values.global ? null : company || undefined,
         });
         setShowAddAgent(false);
         setSelectedStepId(null);
@@ -559,6 +560,7 @@ export default function App() {
               {agents.map((a) => (
                 <option key={String(a.id)} value={String(a.id)}>
                   {a.name || a.slug}
+                  {a.company == null ? " (global)" : ""}
                 </option>
               ))}
             </select>
@@ -697,7 +699,7 @@ function StepEditor({
   useEffect(() => {
     let cancelled = false;
     api
-      .availableFunctions(company || undefined)
+      .availableFunctions(company || undefined, String(step.id))
       .then((fns) => {
         if (!cancelled) setFunctions(fns);
       })
@@ -863,7 +865,7 @@ interface CreateAgentDialogProps {
   busy: boolean;
   existingSlugs: string[];
   onCancel: () => void;
-  onCreate: (values: { name: string; slug: string; prompt: string }) => void;
+  onCreate: (values: { name: string; slug: string; prompt: string; global: boolean }) => void;
 }
 
 function CreateAgentDialog({
@@ -876,6 +878,7 @@ function CreateAgentDialog({
   const [slug, setSlug] = useState<string>(`agent-${Date.now().toString(36)}`);
   const [slugEdited, setSlugEdited] = useState<boolean>(false);
   const [prompt, setPrompt] = useState<string>("");
+  const [isGlobal, setIsGlobal] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string>("");
 
   const onNameChange = (value: string) => {
@@ -901,7 +904,7 @@ function CreateAgentDialog({
       return;
     }
     setLocalError("");
-    onCreate({ name: name.trim(), slug: finalSlug, prompt: prompt.trim() });
+    onCreate({ name: name.trim(), slug: finalSlug, prompt: prompt.trim(), global: isGlobal });
   };
 
   return (
@@ -948,6 +951,15 @@ function CreateAgentDialog({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="e.g. You are the meeting agent. You summarise meetings and list their action items."
           />
+        </label>
+
+        <label className="ab-field" style={{ flexDirection: "row", alignItems: "center", gap: "8px" }}>
+          <input
+            type="checkbox"
+            checked={isGlobal}
+            onChange={(e) => setIsGlobal(e.target.checked)}
+          />
+          <span>Global: every company can use it (administrators only)</span>
         </label>
 
         <div className="ab-empty" style={{ fontSize: "12px", marginTop: "8px" }}>

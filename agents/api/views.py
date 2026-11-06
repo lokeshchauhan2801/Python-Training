@@ -1,6 +1,7 @@
 """Agents API viewsets backing the canvas (owner/company-scoped, 404 out-of-scope)."""
 
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -60,6 +61,25 @@ class ToolViewSet(ScopedModelViewSet):
             supplied = Company.objects.filter(pk=supplied_id).first()
         return serializer._resolve_company(supplied)
 
+    def _tool_company(self, request):
+        """The company whose tools apply: the step's/agent's when one is given
+        (``None`` for a global agent), else the resolved company."""
+        step_id = request.data.get("step") or request.query_params.get("step")
+        agent_id = request.data.get("agent") or request.query_params.get("agent")
+        owner = None
+        if step_id:
+            step = Step.objects.filter(pk=step_id).select_related("agent").first()
+            owner = step.agent if step else None
+        elif agent_id:
+            owner = Agent.objects.filter(pk=agent_id).first()
+        if owner is not None and owner.company_id is None:
+            if not request.user.is_superuser:
+                from rest_framework.exceptions import PermissionDenied
+
+                raise PermissionDenied("only an administrator can edit a global agent")
+            return None
+        return self._resolve_company(request)
+
     @action(detail=False, methods=["get"])
     def available(self, request):
         """List the registered handler FUNCTIONS the canvas can attach as tools.
@@ -67,7 +87,7 @@ class ToolViewSet(ScopedModelViewSet):
         Each entry marks whether a backing Tool row already exists for the
         resolved company (``tool_id``) so the UI can show "added" vs "add".
         """
-        company = self._resolve_company(request)
+        company = self._tool_company(request)
         existing = {
             t.slug: str(t.pk)
             for t in Tool.objects.filter(company=company)
@@ -86,7 +106,7 @@ class ToolViewSet(ScopedModelViewSet):
         "company": <id, optional> }``. The Tool row is created once per
         (company, slug); re-attaching reuses it. Returns the Tool.
         """
-        company = self._resolve_company(request)
+        company = self._tool_company(request)
         slug = (request.data.get("slug") or "").strip()
         if not slug:
             return Response(
@@ -117,7 +137,9 @@ class ToolViewSet(ScopedModelViewSet):
 
             step_id = request.data.get("step")
             if step_id:
-                step = Step.objects.filter(pk=step_id, company=company).first()
+                step = Step.objects.filter(
+                    pk=step_id, company=company, agent__company=company
+                ).first()
                 if step is None:
                     return Response(
                         {"detail": "Step not found or not in this company."},
@@ -165,20 +187,27 @@ class AgentViewSet(ScopedModelViewSet):
             supplied = Company.objects.filter(pk=supplied_id).first()
         company = serializer._resolve_company(supplied)
 
-        tools_qs = Tool.objects.filter(company=company).order_by("slug")
-        tools_data = ToolSerializer(tools_qs, many=True, context=context).data
-
-        all_agents = list(
-            Agent.objects.filter(company=company).order_by("created_at")
-        )
+        # The company's agents, plus the global ones for an administrator
+        # (only a superuser may edit a global agent).
+        scope = Q(company=company)
+        if request.user.is_superuser:
+            scope |= Q(company__isnull=True)
+        visible = Agent.objects.filter(scope)
+        all_agents = list(visible.order_by("created_at"))
 
         # Resolve the selected agent, falling back silently (never 404).
         agent_id = request.query_params.get("agent") or request.data.get("agent")
         selected = None
         if agent_id:
-            selected = self.get_queryset().filter(pk=agent_id).first()
+            selected = visible.filter(pk=agent_id).first()
         if selected is None:
             selected = all_agents[0] if all_agents else None
+
+        # A global agent's steps use the global tools.
+        tools_qs = Tool.objects.filter(
+            company=selected.company if selected is not None else company
+        ).order_by("slug")
+        tools_data = ToolSerializer(tools_qs, many=True, context=context).data
 
         steps_data = []
         if selected is not None:
