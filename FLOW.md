@@ -117,8 +117,9 @@ company/ → (every page via context processor)
 - **Prompts + tracing:** `basics/langfuse.py` (import-safe; reads
   `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` from the
   environment, local fallback when absent).
-- **Seeding:** `python manage.py seed_agents` creates the four built-in tools +
-  a default inactive `START → chat_agent → END` graph per company.
+- **Seeding:** `python manage.py seed_agents` creates the six built-in tools as
+  global rows and the one global `chat_agent` (`START → main → END`). For now
+  it is the only agent (migration `0015_global_chat_agent`).
 
 ### How the method/tool shows in chat
 

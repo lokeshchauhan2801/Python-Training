@@ -1,16 +1,18 @@
-"""seed_agents — idempotently create the built-in tools + a default active
-single-agent flow (START -> chat_agent -> END) per company. Run manually, not at
-migrate.
+"""seed_agents — idempotently create the global built-in tools and the global
+``chat_agent`` (START -> main -> END), usable by every company. Run manually,
+not at migrate (migration 0015 does the same once).
+
+The agent's role is its Langfuse prompt ``chat_agent``; saving the Agent
+creates it there when missing (``agents.signals``).
 """
 
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from agents.models import Agent, Step, Tool
 from agents.services.tool_docs import DEFAULT_TOOL_DOCS
-from company.models import Company
 
 # (slug, name) of every built-in tool; the slug selects the handler.
 _TOOL_SPECS = [
@@ -27,84 +29,42 @@ _STEP_SLUG = "main"
 
 
 class Command(BaseCommand):
-    help = (
-        "Idempotently seed the built-in tools and an optional example "
-        "single-agent flow (chat_agent) per company."
-    )
+    help = "Idempotently seed the global built-in tools and the global chat_agent."
 
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "--company",
-            dest="company",
-            default=None,
-            help=(
-                "Seed only this company (by id or slug). Defaults to every "
-                "company."
-            ),
-        )
-
+    @transaction.atomic
     def handle(self, *args, **options):
-        companies = self._resolve_companies(options.get("company"))
-        if not companies:
-            self.stdout.write(self.style.WARNING("No companies to seed."))
-            return
-        for company in companies:
-            with transaction.atomic():
-                self._seed_company(company)
-
-    def _resolve_companies(self, selector):
-        if selector is None:
-            return list(Company.objects.all())
-        company = (
-            Company.objects.filter(pk=selector).first()
-            or Company.objects.filter(slug=selector).first()
-        )
-        if company is None:
-            raise CommandError(f"No company matches '{selector}'.")
-        return [company]
-
-    def _seed_company(self, company):
-        tools = {}
+        tools = []
         for slug, name in _TOOL_SPECS:
-            tool, created = Tool.objects.get_or_create(
-                company=company,
-                slug=slug,
-                defaults={
-                    "name": name,
-                    "description": DEFAULT_TOOL_DOCS.get(slug, ""),
-                    "is_enabled": True,
-                },
-            )
-            tools[slug] = tool
-            if created:
-                self.stdout.write(f"  + Tool {slug} for {company}")
+            tool = Tool.objects.filter(company__isnull=True, slug=slug).first()
+            if tool is None:
+                tool = Tool.objects.create(
+                    company=None,
+                    slug=slug,
+                    name=name,
+                    description=DEFAULT_TOOL_DOCS.get(slug, ""),
+                    is_enabled=True,
+                )
+                self.stdout.write(f"  + global tool {slug}")
+            tools.append(tool)
 
-        agent, created = Agent.objects.get_or_create(
-            company=company,
-            slug=_AGENT_SLUG,
-            defaults={
-                "name": "Chat agent",
-            },
-        )
-        if created:
-            self.stdout.write(f"  + Agent '{_AGENT_SLUG}' for {company}")
+        agent = Agent.objects.filter(company__isnull=True, slug=_AGENT_SLUG).first()
+        if agent is None:
+            agent = Agent.objects.create(company=None, slug=_AGENT_SLUG, name="Chat agent")
+            self.stdout.write(f"  + global agent '{_AGENT_SLUG}'")
 
-        step, step_created = Step.objects.get_or_create(
+        step, created = Step.objects.get_or_create(
             agent=agent,
             slug=_STEP_SLUG,
             defaults={
-                "company": company,
+                "company": None,
                 "name": "Main step",
                 "connected_from_start": True,
                 "connected_to_end": True,
                 "order": 0,
-                "position_x": 0,
-                "position_y": 0,
             },
         )
-        if step_created:
-            self.stdout.write(f"  + Step '{_STEP_SLUG}' for {company}")
+        if created:
+            step.tools.set(tools)
+            self.stdout.write(f"  + step '{_STEP_SLUG}'")
 
-        step.tools.add(*tools.values())
-
-        self.stdout.write(self.style.SUCCESS(f"Seeded agents for {company}."))
+        self.stdout.write(self.style.SUCCESS("Seeded the global chat agent."))
