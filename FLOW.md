@@ -138,6 +138,11 @@ flow, else "Document reference" when citations exist, else "General purpose".
 - An Agent without a company is **global**: chat offers it to every company.
   Only a superuser creates or edits one (canvas "Global" checkbox, or
   `company: null` in the agent API); its steps use global tool rows.
+- **Langfuse holds only agent roles.** Everything else an agent is given stays
+  in code, next to the function that uses it: the router prompt and per-tool
+  routing rules (`_ROUTER_PROMPT`, `_ROUTER_RULES` in
+  `chat/services/langgraph_service.py`), and the identity line, plain-text
+  format guidance and bare-chart check (`chat/services/llm_tools.py`).
 - Every step of the agent's sequential flow answers in that role
   (`ToolContext.persona`).
 - **Tools have no prompt.** `Tool.description` is the tool's docs (role +

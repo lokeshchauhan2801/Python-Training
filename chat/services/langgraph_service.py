@@ -1,10 +1,10 @@
 from __future__ import annotations
 """LangGraph chat runtime.
 
-This file holds ONLY the graph implementation: the router prompt, the
-``LangGraphChatService`` that compiles a company's agent graph into a
+This file holds ONLY the graph implementation: the router prompt and rules, the
+``LangGraphChatService`` that compiles an agent's step chain into a
 ``langgraph`` ``StateGraph``, routes each message to one tool, and persists the
-resulting conversation turn.
+resulting conversation turn. Only the agent's role comes from Langfuse.
 
 The tools themselves (and the registry) live in ``chat/services/llm_tools.py``.
 They are imported here and the registry symbols are re-exported so existing
@@ -119,7 +119,7 @@ _ROUTER_RULES = {
 # so a question like "do you know about <person>" must still be able to reach it.
 _FILE_ONLY_SLUGS = frozenset({"add_to_knowledge_base", "document_processing_status"})
 
-_FALLBACK_ROUTER_PROMPT = (
+_ROUTER_PROMPT = (
     "You are a router that selects the single best tool to answer the user's "
     "message.\n"
     "Available tools (slug: description):\n{tools}\n\n"
@@ -861,36 +861,18 @@ class LangGraphChatService:
             )
         else:
             attachment_note = "Attachment note: no file is attached on this message."
-        prompt_name = "agent_router"
-        template = self._langfuse.get_prompt(
-            prompt_name, fallback=_FALLBACK_ROUTER_PROMPT
-        )
-        fmt = {
-            "question": message_text,
-            "tools": tools_desc,
-            "history": history_text or "(no prior conversation)",
-            "attachment_note": attachment_note,
-            "rules": "\n".join(
+        router_prompt = _ROUTER_PROMPT.format(
+            question=message_text,
+            tools=tools_desc,
+            history=history_text or "(no prior conversation)",
+            attachment_note=attachment_note,
+            rules="\n".join(
                 f"- {_ROUTER_RULES[slug]}"
                 for slug in enabled_tools
                 if slug in _ROUTER_RULES
             )
             or "- Choose the tool whose description best fits the message.",
-        }
-        try:
-            router_prompt = template.format(**fmt)
-        except (KeyError, IndexError):
-            # A managed prompt may omit {attachment_note}; fall back to the
-            # built-in template, appending the note so routing stays correct.
-            try:
-                router_prompt = _FALLBACK_ROUTER_PROMPT.format(**fmt)
-            except (KeyError, IndexError):
-                router_prompt = template.format(
-                    question=message_text,
-                    tools=tools_desc,
-                    history=history_text or "(no prior conversation)",
-                )
-                router_prompt = f"{router_prompt}\n\n{attachment_note}"
+        )
 
         trace_id = None
         with self._langfuse.trace("agent_router") as span:

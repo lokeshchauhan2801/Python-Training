@@ -103,13 +103,9 @@ class Agent(BaseModel, SoftDeleteModel):
     def clean(self):
         super().clean()
         # The slug is the agent's Langfuse prompt name: a "/" would make a
-        # folder there, and reserved names belong to other prompts.
-        from agents.services.agent_prompts import RESERVED_PROMPT_NAMES
-
+        # folder there.
         if "/" in (self.slug or ""):
             raise ValidationError({"slug": "an agent slug cannot contain '/'"})
-        if self.slug in RESERVED_PROMPT_NAMES:
-            raise ValidationError({"slug": f"'{self.slug}' is a reserved prompt name"})
 
 
 class Step(BaseModel, SoftDeleteModel):

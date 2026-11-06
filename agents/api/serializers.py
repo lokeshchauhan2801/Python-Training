@@ -129,14 +129,9 @@ class AgentSerializer(
         company = self._scoped_company(attrs)
 
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        if slug:
-            from agents.services.agent_prompts import RESERVED_PROMPT_NAMES
-
-            # The slug is the agent's Langfuse prompt name.
-            if "/" in slug:
-                raise serializers.ValidationError({"slug": "an agent slug cannot contain '/'"})
-            if slug in RESERVED_PROMPT_NAMES:
-                raise serializers.ValidationError({"slug": f"'{slug}' is a reserved prompt name"})
+        # The slug is the agent's Langfuse prompt name: no "/" (a folder there).
+        if slug and "/" in slug:
+            raise serializers.ValidationError({"slug": "an agent slug cannot contain '/'"})
         if slug:
             # The DB constraint cannot see global (NULL company) duplicates.
             clash = (

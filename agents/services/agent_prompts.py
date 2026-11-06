@@ -7,12 +7,12 @@ company: company scoping lives in the database), so agents sharing a slug share
 one role. It is created in Langfuse only when an Agent is created
 (``agents.signals``: canvas, API, admin, seeds); nothing is stored in the
 database.
+
+Everything else an agent is given (router prompt and rules, identity,
+response format) is code, next to the functions that use it.
 """
 
 from __future__ import annotations
-
-# Langfuse prompts the app reads that are not agent roles.
-RESERVED_PROMPT_NAMES = {"agent_router"}
 
 
 def prompt_name(agent) -> str:
