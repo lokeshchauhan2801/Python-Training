@@ -67,7 +67,8 @@ def _requests_web_source(message_text: str) -> bool:
 _ROUTER_RULES = {
     "general_assistant": (
         "Choose 'general_assistant' for normal general questions and chart "
-        "requests. Attached files do not change this default."
+        "requests that are not about a specific person or named thing that "
+        "may be in company documents. Attached files do not change this default."
     ),
     "chat_summarise": (
         "Choose 'chat_summarise' whenever the user asks to summarise, recap, or "
@@ -88,7 +89,12 @@ _ROUTER_RULES = {
         "own data or knowledge base: what or how many documents it holds, or "
         "facts found in company documents (e.g. 'how many documents are in "
         "the knowledge base', 'how many employees do we have', 'what does our "
-        "leave policy say'). Do not select it merely because files exist."
+        "leave policy say'). Also choose it when the user asks about a specific "
+        "person, employee, customer, project or other named thing that may "
+        "appear in company documents (e.g. 'do you know about Lokesh Chauhan', "
+        "'who is Priya', 'tell me about project Atlas'): the documents are "
+        "checked first, before general knowledge. Do not select it merely "
+        "because files exist."
     ),
     "add_to_knowledge_base": (
         "Choose 'add_to_knowledge_base' when the user asks to ADD, SAVE, STORE, "
@@ -107,11 +113,11 @@ _ROUTER_RULES = {
     ),
 }
 
-# Tools that only make sense against this chat's files / processing; they are
-# dropped from routing when the chat has files but the message references none.
-_FILE_ONLY_SLUGS = frozenset(
-    {"document_search", "add_to_knowledge_base", "document_processing_status"}
-)
+# Tools that only act on this chat's files / processing; they are dropped from
+# routing when the chat has files but the message references none.
+# ``document_search`` is not one: it also searches the company knowledge base,
+# so a question like "do you know about <person>" must still be able to reach it.
+_FILE_ONLY_SLUGS = frozenset({"add_to_knowledge_base", "document_processing_status"})
 
 _FALLBACK_ROUTER_PROMPT = (
     "You are a router that selects the single best tool to answer the user's "
