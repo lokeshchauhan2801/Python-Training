@@ -8,6 +8,7 @@ import ReactFlow, {
   Node as FlowNode,
   Edge as FlowEdge,
   Connection,
+  Position,
   ReactFlowInstance,
 } from "reactflow";
 import {
@@ -57,11 +58,16 @@ function toStepNode(step: Step, toolNameById: Record<string, string>): CanvasNod
     position: { x: step.position_x ?? 0, y: step.position_y ?? 0 },
     data: { raw: step, label: content },
     type: "default",
+    // Wires run left to right: in on the left, out on the right.
+    targetPosition: Position.Left,
+    sourcePosition: Position.Right,
     className: "ab-node ab-node-step",
   };
 }
 
+// START only has an output, END only an input.
 function anchorNode(id: string, label: string, x: number, y: number, cls: string): CanvasNode {
+  const isStart = id === START_ID;
   return {
     id,
     position: { x, y },
@@ -72,7 +78,9 @@ function anchorNode(id: string, label: string, x: number, y: number, cls: string
         </div>
       ),
     },
-    type: "default",
+    type: isStart ? "input" : "output",
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
     className: `ab-node ${cls}`,
     draggable: false,
   };
@@ -374,7 +382,19 @@ export default function App() {
         } else if (target === END_ID && source !== START_ID) {
           await api.updateStep(source, { connected_to_end: true, next_step: null });
         } else if (source !== START_ID && target !== END_ID) {
+          // The backend clears the source's END link (a step ends the flow or
+          // goes on, never both). If the source WAS the last step, END moves to
+          // the new step: START -> A -> END plus A -> B gives START -> A -> B -> END.
+          const src = steps.find((s) => String(s.id) === source);
+          const tgt = steps.find((s) => String(s.id) === target);
           await api.updateStep(source, { next_step: target });
+          if (tgt && (tgt.connected_from_start || (src?.connected_to_end && !tgt.next_step && !tgt.connected_to_end))) {
+            await api.updateStep(target, {
+              // B now follows A, so it is no longer an entry step.
+              connected_from_start: false,
+              connected_to_end: !!(src?.connected_to_end && !tgt.next_step) || tgt.connected_to_end,
+            });
+          }
         } else {
           return; // START->END or any anchor-to-anchor link is invalid
         }
@@ -384,7 +404,7 @@ export default function App() {
         await refresh(selectedAgentId);
       }
     },
-    [refresh, selectedAgentId, showError]
+    [refresh, selectedAgentId, showError, steps]
   );
 
   // Deleting a derived edge PATCHes the inverse change, then refreshes.

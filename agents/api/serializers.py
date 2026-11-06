@@ -295,6 +295,12 @@ class StepSerializer(
                 raise serializers.ValidationError(
                     {"next_step": "next_step must belong to the same agent"}
                 )
+        # A step goes on to its next step OR ends the flow, never both: the
+        # runtime stops at END, so a next step after it would never run.
+        if next_step is not None:
+            attrs["connected_to_end"] = False
+        elif attrs.get("connected_to_end"):
+            attrs["next_step"] = None
 
         tools = attrs.get("tools")
         if tools is not None and agent_company_id is not None:

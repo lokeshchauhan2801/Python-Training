@@ -20,7 +20,7 @@ All changes persist immediately via `Step`/`Agent` PATCHes; there is no explicit
 
 **Chain links (connect/disconnect), scoped to the selected agent:**
 - `START → step`: PATCH step `connected_from_start: true` (delete → `false`)
-- `step → step`: PATCH source step `next_step: <target id>` (delete → `null`)
+- `step → step`: PATCH source step `next_step: <target id>` (delete → `null`). A step goes on OR ends the flow, never both: the API clears the source's END link, and when the source was the last step the canvas moves END to the target (START → A → END plus A → B gives START → A → B → END). Nodes take wires in on the left and out on the right; START has only an output, END only an input.
 - `step → END`: PATCH step `connected_to_end: true, next_step: null` (delete → `false`)
 
 After every link/tool/flag mutation the canvas re-calls `GET /agent/load/?agent=<id>` so it mirrors backend truth.
