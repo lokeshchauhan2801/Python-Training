@@ -1,11 +1,3 @@
-"""Default docs of the built-in tools.
-
-A tool's ``description`` is its docs: the role and instructions its handler
-runs with (after the agent's role) and what the router reads to pick it. These
-are the starting docs for a new company's Tool rows; edit them per tool in
-admin or the canvas.
-"""
-
 DEFAULT_TOOL_DOCS = {
     "general_assistant": (
         "You are a helpful general assistant. Answer the user's question "

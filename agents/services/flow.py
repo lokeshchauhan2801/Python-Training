@@ -1,21 +1,3 @@
-"""The single authoritative reachable-Step walker.
-
-``walk_reachable_steps(agent)`` is the ONE source of truth for which Steps an
-Agent's pipeline will execute. Both the LangGraph runtime
-(``chat.services.langgraph_service``) and the capability preflight
-(``chat.services.agent_capabilities``) call it directly, so a reachability
-change can never let a policy allow an action that execution would not traverse.
-
-The walk is dependency-light and read-only:
-
-* It imports ``Step`` locally to avoid an app-import cycle.
-* It uses the soft-delete-aware default manager (``Step.objects``), never an FK
-  descriptor, so a soft-deleted / missing / foreign entry or hop terminates the
-  chain.
-* It is cycle- and cap-guarded, so any malformed graph still terminates.
-* It performs no writes.
-"""
-
 from __future__ import annotations
 
 
