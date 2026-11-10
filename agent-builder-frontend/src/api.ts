@@ -17,12 +17,33 @@ export interface Tool {
   deleted_at: string | null;
 }
 
+/** An agent's runtime config, stored as its Langfuse prompt's config. */
+export interface AgentConfig {
+  schema_version?: number;
+  provider: string;
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  retrieval: { top_k: number };
+}
+
+/** The allowed models and the [min, max] of each number field. */
+export interface ConfigOptions {
+  models: { provider: string; model: string }[];
+  limits: {
+    temperature: [number, number];
+    max_tokens: [number, number];
+    top_k: [number, number];
+  };
+}
+
 /** A flow CONTAINER. Its ordered Steps are the canvas nodes. */
 export interface Agent {
   id: string; // ULID string
   slug: string;
   name: string;
   prompt: string; // the agent's role + tasks; stored in Langfuse, leads every step's prompt
+  config: AgentConfig; // model, temperature, max tokens, retrieval; stored in Langfuse
   company: string | number | null; // null = global: every company can use it
   created_at: string;
   updated_at: string;
@@ -59,6 +80,8 @@ export interface LoadFlowResponse {
   selected_agent_id: string | null;
   steps: Step[];
   tools: Tool[];
+  config_defaults: AgentConfig; // prefill for a new agent
+  config_options: ConfigOptions;
 }
 
 /** A registered handler function the canvas can attach as a tool. */

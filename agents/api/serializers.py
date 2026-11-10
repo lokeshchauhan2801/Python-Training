@@ -88,13 +88,18 @@ class AgentSerializer(
 ):
     """The flow CONTAINER. Steps live under it (see ``StepSerializer``).
 
-    ``prompt`` is the agent's role (what it is for, which tasks it can do). It
-    is read from and saved to Langfuse, never stored in the database.
+    ``prompt`` is the agent's role (what it is for, which tasks it can do) and
+    ``config`` its runtime config (model, temperature, max tokens, retrieval;
+    see ``agents/services/agent_config.py``). Both are read from and saved to
+    the agent's Langfuse prompt, never stored in the database. ``config`` may
+    be partial: it is merged over the agent's current config (the defaults on
+    create).
     """
 
     prompt = serializers.CharField(
         write_only=True, required=False, allow_blank=True, trim_whitespace=True
     )
+    config = serializers.JSONField(write_only=True, required=False)
 
     class Meta:
         model = Agent
@@ -103,6 +108,7 @@ class AgentSerializer(
             "slug",
             "name",
             "prompt",
+            "config",
             "company",
             "created_at",
             "updated_at",
@@ -147,37 +153,52 @@ class AgentSerializer(
                 )
         return attrs
 
+    def validate_config(self, value):
+        from agents.services import agent_config
+
+        base = None
+        if self.instance is not None:
+            from agents.services.agent_prompts import get_role_and_config
+
+            base = get_role_and_config(self.instance)[1]
+        try:
+            return agent_config.validate(value, base=base)
+        except agent_config.ConfigError as exc:
+            raise serializers.ValidationError(exc.errors)
+
     def create(self, validated_data):
         prompt = validated_data.pop("prompt", None)
+        config = validated_data.pop("config", None)
         # One transaction: a prompt Langfuse rejects undoes the agent change.
         with transaction.atomic():
             agent = super().create(validated_data)
-            self._save_prompt(agent, prompt)
+            self._save_prompt(agent, prompt, config)
         return agent
 
     def update(self, instance, validated_data):
         prompt = validated_data.pop("prompt", None)
+        config = validated_data.pop("config", None)
         with transaction.atomic():
             agent = super().update(instance, validated_data)
-            self._save_prompt(agent, prompt)
+            self._save_prompt(agent, prompt, config)
         return agent
 
     def to_representation(self, instance):
-        from agents.services.agent_prompts import get_role
+        from agents.services.agent_prompts import get_role_and_config
 
         data = super().to_representation(instance)
-        data["prompt"] = get_role(instance)
+        data["prompt"], data["config"] = get_role_and_config(instance)
         return data
 
     @staticmethod
-    def _save_prompt(agent, prompt):
-        if not prompt:
+    def _save_prompt(agent, prompt, config=None):
+        if not prompt and config is None:
             return
-        from agents.services.agent_prompts import save_role
+        from agents.services.agent_prompts import save
 
-        if not save_role(agent, prompt):
+        if not save(agent, text=prompt or None, config=config):
             raise serializers.ValidationError(
-                {"prompt": "Could not save the prompt to Langfuse; try again."}
+                {"prompt": "Could not save to Langfuse; try again."}
             )
 
 

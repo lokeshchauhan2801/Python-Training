@@ -99,7 +99,16 @@ def _provider_config(provider):
 
 
 class LLMClient:
-    def __init__(self, *, model=None, api_key=None, base_url=None, provider=None):
+    def __init__(
+        self,
+        *,
+        model=None,
+        api_key=None,
+        base_url=None,
+        provider=None,
+        temperature=None,
+        max_tokens=None,
+    ):
 
 
         self.provider = provider or settings.LLM_PROVIDER
@@ -120,6 +129,10 @@ class LLMClient:
 
             or (self._api_key if self._embedding_base_url == self.base_url else None)
         ) or None
+
+        # None leaves the provider's own default (an agent's config sets them).
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
         self._client = None
         self._embeddings = None
@@ -168,6 +181,8 @@ class LLMClient:
                     self._api_key,
                     timeout_key,
                     retries,
+                    self.temperature,
+                    self.max_tokens,
                 ),
                 lambda: ChatOpenAI(
                     model=self.model,
@@ -175,6 +190,8 @@ class LLMClient:
                     base_url=self.base_url,
                     timeout=timeout,
                     max_retries=retries,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
                 ),
             )
         return self._client

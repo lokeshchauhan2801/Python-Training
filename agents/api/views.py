@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from basics.api.views import ScopedModelViewSet
 
 from ..models import Agent, Step, Tool
+from ..services import agent_config
 from ..services.tool_docs import DEFAULT_TOOL_DOCS
 from .serializers import AgentSerializer, StepSerializer, ToolSerializer
 
@@ -226,6 +227,12 @@ class AgentViewSet(ScopedModelViewSet):
                 "selected_agent_id": str(selected.pk) if selected else None,
                 "steps": steps_data,
                 "tools": tools_data,
+                # Prefill for a new agent's config and the allowed values.
+                "config_defaults": agent_config.defaults(),
+                "config_options": {
+                    "models": agent_config.model_options(),
+                    "limits": agent_config.limits(),
+                },
             },
             status=status.HTTP_200_OK,
         )

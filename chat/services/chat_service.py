@@ -122,9 +122,18 @@ class _LibraryCsv:
 
 
 class ChatService:
-    def __init__(self, llm_client: LLMClient | None = None):
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        *,
+        retrieval_top_k: int | None = None,
+    ):
 
         self._llm = llm_client or LLMClient()
+        # Knowledge-base passages per question; an agent's config sets it.
+        # Chart requests always use RAG_CHART_TOP_K from settings.
+        self._retrieval_top_k = retrieval_top_k or settings.RAG_TOP_K
+        self._chart_top_k = settings.RAG_CHART_TOP_K
 
 
     def _session_messages(self, session):
@@ -247,7 +256,11 @@ class ChatService:
 
 
             return []
-        k = 20 if self._is_chart_request(question) else 5
+        k = (
+            self._chart_top_k
+            if self._is_chart_request(question)
+            else self._retrieval_top_k
+        )
         try:
             return document_services.find_relevant_chunks(
                 user, question, company, k=k

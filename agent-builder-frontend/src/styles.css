@@ -128,6 +128,12 @@ body {
   font-size: 13px;
 }
 
+.ab-config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 8px;
+}
+
 .ab-tool-row {
   display: flex;
   align-items: center;

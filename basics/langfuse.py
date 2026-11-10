@@ -51,20 +51,16 @@ class LangfuseClient:
                 self._client = None
         return self._client
 
-    def get_prompt(self, name: str, *, fallback: str) -> str:
-        """Return the managed prompt's compiled text, or ``fallback``.
-
-        Falls back on any SDK error (including a missing prompt) so the feature
-        works against an empty/unconfigured Langfuse project.
-        """
+    def _fetch(self, name: str):
+        """The managed prompt object, or ``None`` (unconfigured, missing, error)."""
         client = self._ensure_client()
         if client is None:
-            return fallback
+            return None
         # The SDK caches found prompts but not missing ones, so an absent
         # prompt costs a blocking fetch (seconds) on every turn. Remember the
         # miss briefly; a prompt created in Langfuse is picked up after the TTL.
         if _PROMPT_MISSES.get(name, 0) > time.monotonic():
-            return fallback
+            return None
         try:
             prompt = client.get_prompt(name)
         except Exception:
@@ -72,9 +68,14 @@ class LangfuseClient:
             _PROMPT_MISSES[name] = time.monotonic() + getattr(
                 settings, "LANGFUSE_PROMPT_MISS_TTL_SECONDS", 300
             )
-            return fallback
+            return None
         _PROMPT_MISSES.pop(name, None)
+        return prompt
 
+    @staticmethod
+    def _text_of(prompt, fallback: str) -> str:
+        if prompt is None:
+            return fallback
         for attr in ("compile", "get_langchain_prompt"):
             method = getattr(prompt, attr, None)
             if callable(method):
@@ -89,12 +90,63 @@ class LangfuseClient:
             return text
         return fallback
 
-    def create_prompt(self, name: str, text: str, *, labels=None) -> bool:
+    def get_prompt(self, name: str, *, fallback: str) -> str:
+        """Return the managed prompt's compiled text, or ``fallback``.
+
+        Falls back on any SDK error (including a missing prompt) so the feature
+        works against an empty/unconfigured Langfuse project.
+        """
+        return self._text_of(self._fetch(name), fallback)
+
+    def get_prompt_and_config(self, name: str, *, fallback: str) -> tuple[str, dict]:
+        """Return ``(text, config)`` of the served version in one fetch.
+
+        ``config`` is the version's config JSON (``{}`` when missing, not a
+        dict, or Langfuse cannot serve the prompt).
+        """
+        prompt = self._fetch(name)
+        config = getattr(prompt, "config", None) if prompt is not None else None
+        return self._text_of(prompt, fallback), (
+            dict(config) if isinstance(config, dict) else {}
+        )
+
+    def latest_prompt(self, name: str) -> tuple[str, dict] | None:
+        """``(text, config)`` of the served version, read uncached for a write.
+
+        ``("", {})`` when the prompt does not exist yet; ``None`` when Langfuse
+        cannot answer (unconfigured, down, bad keys), so a caller never mistakes
+        an outage for an empty prompt and overwrites real content.
+        """
+        client = self._ensure_client()
+        if client is None:
+            return None
+        try:
+            from langfuse.api import NotFoundError
+        except Exception:
+            return None
+        try:
+            prompt = client.get_prompt(name, cache_ttl_seconds=0, max_retries=0)
+        except NotFoundError:
+            return "", {}
+        except Exception:
+            logger.debug("langfuse latest_prompt(%s): lookup failed", name)
+            return None
+        _PROMPT_MISSES.pop(name, None)
+        config = getattr(prompt, "config", None)
+        return self._text_of(prompt, ""), (
+            dict(config) if isinstance(config, dict) else {}
+        )
+
+    def create_prompt(
+        self, name: str, text: str, *, labels=None, config=None, commit_message=None
+    ) -> bool:
         """Create/version a TEXT prompt in Langfuse. Returns True on success.
 
         A no-op returning False when Langfuse is unconfigured or the SDK errors
         (so a push command degrades gracefully offline). Labels default to
         ["production"] so the created version is the one get_prompt() serves.
+        ``config`` is stored with the version (Langfuse versions text and
+        config together).
         """
         client = self._ensure_client()
         if client is None:
@@ -108,13 +160,15 @@ class LangfuseClient:
                 prompt=text,
                 type="text",
                 labels=list(labels) if labels is not None else ["production"],
+                config=dict(config or {}),
+                commit_message=commit_message,
             )
             return True
         except Exception:
             logger.debug("langfuse create_prompt(%s) failed", name)
             return False
 
-    def ensure_prompt(self, name: str, text: str) -> bool:
+    def ensure_prompt(self, name: str, text: str, *, config=None) -> bool:
         """Create ``name`` in Langfuse only when it does not exist yet.
 
         Never adds a version over an existing prompt, so edits made in the
@@ -137,7 +191,7 @@ class LangfuseClient:
         except Exception:
             logger.debug("langfuse ensure_prompt(%s): lookup failed", name)
             return False
-        created = self.create_prompt(name, text)
+        created = self.create_prompt(name, text, config=config)
         if created:
             # Serve the new prompt now instead of after the miss TTL.
             _PROMPT_MISSES.pop(name, None)

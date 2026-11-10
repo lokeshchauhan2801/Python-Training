@@ -230,6 +230,20 @@ LLM_PROVIDERS = {
     },
 }
 
+# Agent config defaults: what a new agent's Langfuse config starts with (the
+# canvas prefills them) and what an agent without a valid value runs with.
+# They match how chat runs without an agent: the provider's default model,
+# temperature 1.0 (the OpenAI/DeepSeek API default) and RAG_TOP_K passages.
+AGENT_DEFAULT_TEMPERATURE = float(os.getenv("AGENT_DEFAULT_TEMPERATURE", "1.0"))
+AGENT_DEFAULT_MAX_TOKENS = int(os.getenv("AGENT_DEFAULT_MAX_TOKENS", "8192"))
+# Upper bounds an agent config may set (cost and provider guardrails).
+AGENT_MAX_TOKENS_LIMIT = int(os.getenv("AGENT_MAX_TOKENS_LIMIT", "16384"))
+AGENT_TOP_K_LIMIT = int(os.getenv("AGENT_TOP_K_LIMIT", "50"))
+
+# Knowledge-base passages retrieved per question (more for a chart request).
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+RAG_CHART_TOP_K = int(os.getenv("RAG_CHART_TOP_K", "20"))
+
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "")

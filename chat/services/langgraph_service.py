@@ -25,7 +25,7 @@ from pydantic import Field
 
 # Tool plumbing + handlers live in llm_tools; importing the module also
 # registers every @register handler. Re-exported below for back-compat.
-from agents.services.agent_prompts import get_role
+from agents.services.agent_prompts import get_role_and_config
 from chat.services.llm_tools import (  # noqa: F401
     ToolContext,
     ToolResult,
@@ -173,6 +173,23 @@ class LangGraphChatService:
         self._langfuse = langfuse
         self._agent = agent
 
+    def _agent_runtime(self):
+        """``(role, config, llm)`` for this turn from the agent's Langfuse prompt.
+
+        One fetch per turn. The agent's config sets the model, temperature and
+        max tokens, so it wins over the chat header's model picker; the turn
+        is saved with the model that answered.
+        """
+        from basics.llm import LLMClient
+
+        role, config = get_role_and_config(self._agent, self._langfuse)
+        llm = LLMClient(
+            provider=config["provider"],
+            model=config["model"],
+            temperature=config["temperature"],
+            max_tokens=config["max_tokens"],
+        )
+        return role, config, llm
 
     def process_message(
         self,
@@ -195,8 +212,8 @@ class LangGraphChatService:
         ``ChatRetrievalError``) so the view's HTTP status mapping is unchanged.
         """
         self._check_turn(user, conversation, company)
-        llm = self._chat._llm
-
+        role, config, llm = self._agent_runtime()
+        model_name = llm.model
 
         with timed(timing, "history"):
             history_text, router_history_text = self._history_texts(conversation)
@@ -214,6 +231,8 @@ class LangGraphChatService:
             router_history_text=router_history_text,
             agent=self._agent,
             llm=llm,
+            role=role,
+            config=config,
             selected_entry_ids=selected_entry_ids,
             timing=timing,
         )
@@ -248,7 +267,8 @@ class LangGraphChatService:
         as ``process_message``.
         """
         self._check_turn(user, conversation, company)
-        llm = self._chat._llm
+        role, config, llm = self._agent_runtime()
+        model_name = llm.model
 
         with timed(timing, "history"):
             history_text, router_history_text = self._history_texts(conversation)
@@ -276,6 +296,8 @@ class LangGraphChatService:
                         router_history_text=router_history_text,
                         agent=self._agent,
                         llm=llm,
+                        role=role,
+                        config=config,
                         stream_llm=_StreamingLLM(llm, _on_delta),
                         selected_entry_ids=selected_entry_ids,
                         timing=timing,
@@ -453,6 +475,8 @@ class LangGraphChatService:
         history_text,
         agent,
         llm,
+        role="",
+        config=None,
         selected_entry_ids=None,
         router_history_text=None,
         timing=None,
@@ -466,6 +490,7 @@ class LangGraphChatService:
             router_history_text = history_text
 
         selected_entry_ids = list(selected_entry_ids or [])
+        retrieval = (config or {}).get("retrieval") or {}
         chain = walk_reachable_steps(agent)
         if not chain:
             raise ValueError("Selected agent has no runnable flow.")
@@ -602,8 +627,6 @@ class LangGraphChatService:
                     ).strip()
 
                 enabled, tool_rows = self._enabled_for(step)
-                # The agent's role (its Langfuse prompt) leads every tool's prompt.
-                persona = get_role(step.agent, self._langfuse)
                 # The router always gets ``llm`` (never streams); a final
                 # step's handler gets the streaming proxy when streaming.
                 step_llm = stream_llm if step.slug in last_slugs else llm
@@ -631,7 +654,10 @@ class LangGraphChatService:
                         langfuse=self._langfuse,
                         pipeline_context=pipeline_context,
                         selected_entry_ids=list(selected_entry_ids),
-                        persona=persona,
+                        # The agent's role (its Langfuse prompt) leads every
+                        # tool's prompt.
+                        persona=role,
+                        retrieval_top_k=retrieval.get("top_k"),
                     )
                     # A streamed last-step answer marks time-to-first-token
                     # on its first piece (``stream_message``).

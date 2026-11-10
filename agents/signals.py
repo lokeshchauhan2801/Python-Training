@@ -38,8 +38,14 @@ def create_agent_prompt(sender, instance, created, **kwargs):
     def _push():
         try:
             client = agent_prompts._client()
-            text = client.get_prompt(old_name, fallback="") if old_name else ""
-            agent_prompts.ensure_role(instance, text or None, langfuse=client)
+            text, config = (
+                client.get_prompt_and_config(old_name, fallback="")
+                if old_name
+                else ("", {})
+            )
+            agent_prompts.ensure_role(
+                instance, text or None, langfuse=client, config=config or None
+            )
         except Exception:
             logger.exception("could not create Langfuse prompt for agent %s", instance.pk)
 

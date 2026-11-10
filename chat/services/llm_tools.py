@@ -48,6 +48,9 @@ class ToolContext:
     pipeline_context: str = ""  # prior steps' accumulated output (multi-step pipeline)
     # The step's agent role (its Langfuse prompt); leads every tool's prompt.
     persona: str = ""
+    # Knowledge-base passages per question (the agent's config); None keeps
+    # the settings default.
+    retrieval_top_k: int | None = None
     # Composer picker selection (already validated SessionFile entry ULIDs) for
     # an ACTION_PROCESS request; empty for every other intent.
     selected_entry_ids: list = field(default_factory=list)
@@ -446,7 +449,7 @@ def _document_search(ctx: "ToolContext") -> "ToolResult":
     """
     from chat.services.chat_service import ChatCompletion, ChatService
 
-    service = ChatService()
+    service = ChatService(retrieval_top_k=ctx.retrieval_top_k)
     # The current turn's attachments. In the LangGraph path the user message is
     # not linked yet, so pass these explicitly — otherwise attachment resolution
     # grounds on an EARLIER file (the "attached CSV returned the previous

@@ -14,7 +14,9 @@ import ReactFlow, {
 import {
   api,
   Agent,
+  AgentConfig,
   AvailableFunction,
+  ConfigOptions,
   Step,
   Tool,
   companyId,
@@ -91,6 +93,9 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [tools, setTools] = useState<Tool[]>([]);
+  // A new agent's config prefill and the allowed values (from the server).
+  const [configDefaults, setConfigDefaults] = useState<AgentConfig | null>(null);
+  const [configOptions, setConfigOptions] = useState<ConfigOptions | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<StepNodeData | AnchorNodeData>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -186,6 +191,8 @@ export default function App() {
       setAgents(allAgents);
       setTools(flowTools);
       setSteps(flowSteps);
+      setConfigDefaults(payload.config_defaults || null);
+      setConfigOptions(payload.config_options || null);
       setSelectedAgentId(payload.selected_agent_id);
       renderFlow(flowSteps, flowTools);
     },
@@ -219,7 +226,13 @@ export default function App() {
 
   // Create a new empty Agent container, then select it.
   const createAgent = useCallback(
-    async (values: { name: string; slug: string; prompt: string; global: boolean }) => {
+    async (values: {
+      name: string;
+      slug: string;
+      prompt: string;
+      global: boolean;
+      config: AgentConfig;
+    }) => {
       if (busy) return;
       setBusy(true);
       try {
@@ -227,6 +240,7 @@ export default function App() {
           slug: values.slug,
           name: values.name,
           prompt: values.prompt,
+          config: values.config,
           // null = global (every company); only an administrator may.
           company: values.global ? null : company || undefined,
         });
@@ -250,6 +264,22 @@ export default function App() {
         await api.updateAgent(agentId, { prompt: prompt.trim() });
         await refresh(selectedAgentId);
         showSuccess("Role saved to Langfuse");
+        return true;
+      } catch (e) {
+        showError(e);
+        return false;
+      }
+    },
+    [refresh, selectedAgentId, showError, showSuccess]
+  );
+
+  // Save the agent's config (a new version of its Langfuse prompt).
+  const saveAgentConfig = useCallback(
+    async (agentId: string, config: AgentConfig) => {
+      try {
+        await api.updateAgent(agentId, { config });
+        await refresh(selectedAgentId);
+        showSuccess("Config saved to Langfuse");
         return true;
       } catch (e) {
         showError(e);
@@ -623,6 +653,16 @@ export default function App() {
           />
         )}
 
+        {selectedAgent && selectedAgent.config && configOptions && (
+          <ConfigEditor
+            key={`agent-config-${selectedAgent.id}-${JSON.stringify(selectedAgent.config)}`}
+            value={selectedAgent.config}
+            defaults={configDefaults}
+            options={configOptions}
+            onSave={(config) => saveAgentConfig(String(selectedAgent.id), config)}
+          />
+        )}
+
         <div className="ab-empty" style={{ fontSize: "11px", marginTop: "4px" }}>
           💡 Tip: use "Add Agent" to create a flow, "+ Step" to add steps, then
           drag from a node handle to START/END or another step to wire them.
@@ -647,8 +687,10 @@ export default function App() {
         )}
       </aside>
 
-      {showAddAgent && (
+      {showAddAgent && configDefaults && configOptions && (
         <CreateAgentDialog
+          defaults={configDefaults}
+          options={configOptions}
           busy={busy}
           existingSlugs={agents.map((a) => a.slug)}
           onCancel={() => setShowAddAgent(false)}
@@ -694,8 +736,9 @@ function StepEditor({
   const [functions, setFunctions] = useState<AvailableFunction[]>([]);
   const stepToolIds = new Set((step.tools || []).map(String));
 
-  // Load the registered handler functions once per selected step so the
-  // "Add tool from function" list can offer them.
+  // Load the registered handler functions once per selected step: a built-in
+  // tool with no Tool row yet is listed as an unchecked box, and ticking it
+  // creates the row and attaches it.
   useEffect(() => {
     let cancelled = false;
     api
@@ -710,6 +753,8 @@ function StepEditor({
       cancelled = true;
     };
   }, [company, step.id, step.tools]);
+  const toolSlugs = new Set(tools.map((t) => t.slug));
+  const missingFunctions = functions.filter((fn) => !toolSlugs.has(fn.slug));
 
   return (
     <div>
@@ -757,7 +802,9 @@ function StepEditor({
         Select which tools this step can use. The router picks one of them per
         step at run time.
       </div>
-      {tools.length === 0 && <div className="ab-empty">No tools available.</div>}
+      {tools.length === 0 && missingFunctions.length === 0 && (
+        <div className="ab-empty">No tools available.</div>
+      )}
       {tools.map((t) => (
         <div className="ab-tool-row" key={`step-${step.id}-tool-${t.id}`}>
           <input
@@ -772,41 +819,19 @@ function StepEditor({
         </div>
       ))}
 
-      <div
-        className="ab-section-title"
-        title="Create a tool directly from a registered handler function and add it to this step"
-      >
-        Add tool from function
-      </div>
-      <div className="ab-empty" style={{ marginBottom: "8px", fontSize: "12px" }}>
-        Tools come from the backend handler functions. Adding one creates the
-        tool (if needed) and attaches it to this step.
-      </div>
-      {functions.length === 0 && (
-        <div className="ab-empty">No handler functions available.</div>
-      )}
-      {functions.map((fn) => {
-        const alreadyOnStep = !!fn.tool_id && stepToolIds.has(String(fn.tool_id));
-        return (
-          <div className="ab-tool-row" key={`fn-${fn.slug}`} style={{ justifyContent: "space-between" }}>
-            <span title={fn.description}>
-              {fn.name}{" "}
-              <span className="ab-node-kind" style={{ display: "inline" }}>
-                ({fn.slug})
-              </span>
-            </span>
-            <button
-              className="ab-btn"
-              style={{ padding: "2px 10px", fontSize: "12px" }}
-              disabled={alreadyOnStep}
-              onClick={() => onAttachFunction(fn.slug)}
-              title={alreadyOnStep ? "Already on this step" : `Add ${fn.name}`}
-            >
-              {alreadyOnStep ? "Added" : "Add"}
-            </button>
-          </div>
-        );
-      })}
+      {missingFunctions.map((fn) => (
+        <div className="ab-tool-row" key={`step-${step.id}-fn-${fn.slug}`}>
+          <input
+            type="checkbox"
+            checked={false}
+            onChange={(e) => e.target.checked && onAttachFunction(fn.slug)}
+          />
+          <span title={fn.description}>
+            {fn.name}{" "}
+            <span className="ab-node-kind" style={{ display: "inline" }}>({fn.slug})</span>
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -861,14 +886,199 @@ function RoleEditor({ value, onSave }: RoleEditorProps) {
   );
 }
 
+/** The config form's values as typed (numbers stay strings until saved). */
+interface ConfigDraft {
+  modelKey: string; // "<provider>::<model>"
+  temperature: string;
+  max_tokens: string;
+  top_k: string;
+}
+
+const modelKey = (provider: string, model: string) => `${provider}::${model}`;
+
+function toDraft(config: AgentConfig): ConfigDraft {
+  return {
+    modelKey: modelKey(config.provider, config.model),
+    temperature: String(config.temperature),
+    max_tokens: String(config.max_tokens),
+    top_k: String(config.retrieval?.top_k ?? ""),
+  };
+}
+
+/** The draft as an AgentConfig, or the first error message. The server
+ * validates again; this only catches mistakes before the request. */
+function fromDraft(draft: ConfigDraft, options: ConfigOptions): AgentConfig | string {
+  const [provider, model] = draft.modelKey.split("::");
+  if (!options.models.some((m) => m.provider === provider && m.model === model)) {
+    return "Pick a model from the list.";
+  }
+  const lim = options.limits;
+  const checks: [string, string, [number, number], boolean][] = [
+    ["Temperature", draft.temperature, lim.temperature, false],
+    ["Max tokens", draft.max_tokens, lim.max_tokens, true],
+    ["Passages per question", draft.top_k, lim.top_k, true],
+  ];
+  for (const [label, raw, [low, high], whole] of checks) {
+    const n = Number(raw);
+    if (raw.trim() === "" || Number.isNaN(n)) return `${label} must be a number.`;
+    if (whole && !Number.isInteger(n)) return `${label} must be a whole number.`;
+    if (n < low || n > high) return `${label} must be between ${low} and ${high}.`;
+  }
+  return {
+    provider,
+    model,
+    temperature: Number(draft.temperature),
+    max_tokens: Number(draft.max_tokens),
+    retrieval: { top_k: Number(draft.top_k) },
+  };
+}
+
+interface ConfigFieldsProps {
+  draft: ConfigDraft;
+  options: ConfigOptions;
+  onChange: (draft: ConfigDraft) => void;
+}
+
+/** Model, temperature, max tokens and retrieval inputs. */
+function ConfigFields({ draft, options, onChange }: ConfigFieldsProps) {
+  const set = (field: keyof ConfigDraft) => (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => onChange({ ...draft, [field]: e.target.value });
+  const lim = options.limits;
+  const known = options.models.some(
+    (m) => modelKey(m.provider, m.model) === draft.modelKey
+  );
+
+  return (
+    <>
+      <label className="ab-field">
+        <span>Model</span>
+        <select className="ab-select" value={draft.modelKey} onChange={set("modelKey")}>
+          {!known && <option value={draft.modelKey}>{draft.modelKey.replace("::", " / ")} (not allowed)</option>}
+          {options.models.map((m) => (
+            <option key={modelKey(m.provider, m.model)} value={modelKey(m.provider, m.model)}>
+              {m.model} ({m.provider})
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="ab-config-grid">
+        <label className="ab-field">
+          <span>Temperature ({lim.temperature[0]}–{lim.temperature[1]})</span>
+          <input
+            className="ab-input"
+            type="number"
+            step="0.1"
+            min={lim.temperature[0]}
+            max={lim.temperature[1]}
+            value={draft.temperature}
+            onChange={set("temperature")}
+          />
+        </label>
+        <label className="ab-field">
+          <span>Max tokens (≤ {lim.max_tokens[1]})</span>
+          <input
+            className="ab-input"
+            type="number"
+            step="1"
+            min={lim.max_tokens[0]}
+            max={lim.max_tokens[1]}
+            value={draft.max_tokens}
+            onChange={set("max_tokens")}
+          />
+        </label>
+        <label className="ab-field">
+          <span>Passages per question</span>
+          <input
+            className="ab-input"
+            type="number"
+            step="1"
+            min={lim.top_k[0]}
+            max={lim.top_k[1]}
+            value={draft.top_k}
+            onChange={set("top_k")}
+          />
+        </label>
+      </div>
+    </>
+  );
+}
+
+interface ConfigEditorProps {
+  value: AgentConfig;
+  defaults: AgentConfig | null;
+  options: ConfigOptions;
+  onSave: (config: AgentConfig) => Promise<boolean>;
+}
+
+/** The selected agent's config (its Langfuse prompt's config). Saving adds a
+ * new prompt version in Langfuse and keeps the role text. */
+function ConfigEditor({ value, defaults, options, onSave }: ConfigEditorProps) {
+  const [draft, setDraft] = useState<ConfigDraft>(() => toDraft(value));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const unchanged = JSON.stringify(draft) === JSON.stringify(toDraft(value));
+
+  return (
+    <div className="ab-field">
+      <span>Agent config (Langfuse prompt config)</span>
+      {error && (
+        <div className="ab-banner ab-banner-error" role="alert">
+          {error}
+        </div>
+      )}
+      <ConfigFields draft={draft} options={options} onChange={setDraft} />
+      <div style={{ display: "flex", gap: "6px" }}>
+        <button
+          className="ab-btn ab-btn-primary"
+          disabled={saving || unchanged}
+          onClick={async () => {
+            const parsed = fromDraft(draft, options);
+            if (typeof parsed === "string") {
+              setError(parsed);
+              return;
+            }
+            setError("");
+            setSaving(true);
+            await onSave(parsed);
+            setSaving(false);
+          }}
+        >
+          {saving ? "Saving…" : "Save config"}
+        </button>
+        {defaults && (
+          <button
+            className="ab-btn"
+            disabled={saving}
+            onClick={() => setDraft(toDraft(defaults))}
+            title="Fill in the default values (save to apply)"
+          >
+            Use defaults
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface CreateAgentDialogProps {
+  defaults: AgentConfig;
+  options: ConfigOptions;
   busy: boolean;
   existingSlugs: string[];
   onCancel: () => void;
-  onCreate: (values: { name: string; slug: string; prompt: string; global: boolean }) => void;
+  onCreate: (values: {
+    name: string;
+    slug: string;
+    prompt: string;
+    global: boolean;
+    config: AgentConfig;
+  }) => void;
 }
 
 function CreateAgentDialog({
+  defaults,
+  options,
   busy,
   existingSlugs,
   onCancel,
@@ -879,6 +1089,9 @@ function CreateAgentDialog({
   const [slugEdited, setSlugEdited] = useState<boolean>(false);
   const [prompt, setPrompt] = useState<string>("");
   const [isGlobal, setIsGlobal] = useState<boolean>(false);
+  // Prefilled with the defaults: the model, temperature, max tokens and
+  // retrieval chat runs with today.
+  const [configDraft, setConfigDraft] = useState<ConfigDraft>(() => toDraft(defaults));
   const [localError, setLocalError] = useState<string>("");
 
   const onNameChange = (value: string) => {
@@ -903,8 +1116,19 @@ function CreateAgentDialog({
       setLocalError(`An agent with slug "${finalSlug}" already exists.`);
       return;
     }
+    const parsed = fromDraft(configDraft, options);
+    if (typeof parsed === "string") {
+      setLocalError(parsed);
+      return;
+    }
     setLocalError("");
-    onCreate({ name: name.trim(), slug: finalSlug, prompt: prompt.trim(), global: isGlobal });
+    onCreate({
+      name: name.trim(),
+      slug: finalSlug,
+      prompt: prompt.trim(),
+      global: isGlobal,
+      config: parsed,
+    });
   };
 
   return (
@@ -961,6 +1185,9 @@ function CreateAgentDialog({
           />
           <span>Global: every company can use it (administrators only)</span>
         </label>
+
+        <div className="ab-section-title">Config (saved to Langfuse)</div>
+        <ConfigFields draft={configDraft} options={options} onChange={setConfigDraft} />
 
         <div className="ab-empty" style={{ fontSize: "12px", marginTop: "8px" }}>
           A new agent starts empty. Add steps to it with "+ Step".
