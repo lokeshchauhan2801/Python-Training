@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 class Kind:
     STOP = "stop"
     RESUME = "resume"
+    CANCEL = "cancel"
     PROCESS = "process"
     STATUS = "status"
     LIST = "list"
@@ -81,13 +82,16 @@ def BARE(verbs: str) -> re.Pattern:
     )
 
 
-STOP_V = r"stop|cancel|halt|abort|pause"
+STOP_V = r"stop|halt|pause"
+CANCEL_V = r"cancel|abort|discard"
 RESUME_V = r"resume|continue|restart|re-?start|retry|re-?try|try\s+again"
 
 _STOP_RE = re.compile(r"\b(?:" + STOP_V + r")\b", _I)
 _RESUME_RE = re.compile(r"\b(?:" + RESUME_V + r")\b", _I)
+_CANCEL_RE = re.compile(r"\b(?:" + CANCEL_V + r")\b", _I)
 _STOP_BARE = BARE(STOP_V)
 _RESUME_BARE = BARE(RESUME_V)
+_CANCEL_BARE = BARE(CANCEL_V)
 _PROCESS_ANY = re.compile(r"\bprocess\w*", _I)
 
 # PROCESS (review-3 F2 replaces kb.is_add_to_kb_request here).
@@ -123,7 +127,7 @@ _STATUS_WORD = re.compile(r"\b(status|progress)\b", _I)
 _STATUS_EXCEPT_LEAD = re.compile(r"^\W*(which|what|how\s+many)\b", _I)
 _STATUS_STATE_WORDS = re.compile(
     r"\b(status|progress|processing|processed|done|ready|finished|queued|"
-    r"pending|stopped|failed)\b",
+    r"pending|stopped|paused|failed)\b",
     _I,
 )
 STATE_Q = re.compile(
@@ -207,10 +211,11 @@ def classify(text: str | None) -> Command:
         return Command(Kind.NONE)
     is_chart = ChatService._is_chart_request(text)
 
-    # STOP / RESUME: a chart request without a process word is never one.
+    # STOP / CANCEL / RESUME: a chart request without a process word is never one.
     if not (is_chart and not _PROCESS_ANY.search(text)):
         for kind, verb_re, bare_re in (
             (Kind.STOP, _STOP_RE, _STOP_BARE),
+            (Kind.CANCEL, _CANCEL_RE, _CANCEL_BARE),
             (Kind.RESUME, _RESUME_RE, _RESUME_BARE),
         ):
             command = _verb_command(kind, text, verb_re, bare_re)
@@ -266,7 +271,7 @@ def effective_kind_from_files(cmd: Command, session, files) -> str | None:
         return Kind.STATUS
     if cmd.kind in (Kind.PROCESS, Kind.LIST):
         return cmd.kind
-    # STOP / RESUME
+    # STOP / RESUME / CANCEL
     if cmd.needs_name:
         if cmd.loose_tokens and all(prefix_hits(t, files) for t in cmd.loose_tokens):
             return cmd.kind
@@ -287,7 +292,7 @@ def effective_kind(cmd: Command, session) -> str | None:
     :func:`effective_kind_from_files` so the eligibility logic lives in exactly
     one place. Behaviour is byte-for-byte unchanged from before the split.
     """
-    if cmd.kind in (Kind.STOP, Kind.RESUME):
+    if cmd.kind in (Kind.STOP, Kind.RESUME, Kind.CANCEL):
         files = session_files.reconcile(session)
     else:
         # STATUS/PROCESS/LIST/NONE never consult the files sequence; avoid the
@@ -309,6 +314,7 @@ NO_FILES_REPLY = (
 )
 NOTHING_TO_STOP = "Nothing is processing in this chat right now."
 NOTHING_TO_RESUME = "There is nothing stopped or failed to resume."
+NOTHING_TO_CANCEL = "There is nothing stopped, failed or processing to cancel."
 START_FAILED = (
     "I couldn't start processing. Nothing was changed. Please try again."
 )
@@ -320,7 +326,8 @@ PLURAL_CUE = re.compile(
 )
 
 _IN_FLIGHT = {"queued", "processing"}
-_RESUMABLE = {"stopped", "failed"}
+_RESUMABLE = {"paused", "stopped", "failed"}
+_CANCELLABLE = {"queued", "processing", "paused", "stopped", "failed"}
 
 
 @dataclass(frozen=True)
@@ -366,6 +373,14 @@ def _status_text(f) -> str:
         stage = controls.current_stage(doc)
         progress = f"{doc.processing_progress_display}%"
         text = f"processing ({stage}, {progress})" if stage else f"processing ({progress})"
+    elif state == "paused":
+        stage = controls.current_stage(doc)
+        progress = f"{doc.processing_progress_display}%"
+        where = f"{stage}, {progress}" if stage else progress
+        text = (
+            f"paused ({where}) — say “resume {f.title}” to continue or "
+            f"“cancel {f.title}” to discard it"
+        )
     elif state == "stopped":
         stage = controls.current_stage(doc)
         text = (f"stopped at {stage}" if stage else "stopped") + (
@@ -433,7 +448,7 @@ def _stop_lines(targets) -> list:
             lines.append(f"{_q(f.title)} isn't processing, so there is nothing to stop.")
             continue
         try:
-            controls.stop_document(f.document)
+            controls.pause_document(f.document)
         except controls.ControlError as exc:
             lines.append(f"Couldn't stop {_q(f.title)}: {exc.message}")
             continue
@@ -441,7 +456,32 @@ def _stop_lines(targets) -> list:
             logger.exception("Could not stop chat file %s", f.id)
             lines.append(f"Couldn't stop {_q(f.title)}. Please try again.")
             continue
-        lines.append(f"Stopped {_q(f.title)}.")
+        lines.append(
+            f"Paused {_q(f.title)}. Say “resume” to continue from here or "
+            "“cancel” to discard it."
+        )
+    return lines
+
+
+def _cancel_lines(targets) -> list:
+    lines = []
+    for f in targets:
+        if f.state not in _CANCELLABLE:
+            lines.append(f"{_q(f.title)} isn't stopped or processing, so there is nothing to cancel.")
+            continue
+        try:
+            controls.cancel_document(f.document)
+        except controls.ControlError as exc:
+            lines.append(f"Couldn't cancel {_q(f.title)}: {exc.message}")
+            continue
+        except Exception:  # noqa: BLE001 - one file must not break the reply
+            logger.exception("Could not cancel chat file %s", f.id)
+            lines.append(f"Couldn't cancel {_q(f.title)}. Please try again.")
+            continue
+        lines.append(
+            f"Cancelled {_q(f.title)}. Its progress was discarded; process it "
+            "again to start over."
+        )
     return lines
 
 
@@ -614,6 +654,13 @@ def handle_file_command(
         targets = [f for f in files if f.state in _RESUMABLE]
         if not targets:
             return CommandReply(NOTHING_TO_RESUME)
+    elif kind == Kind.CANCEL:
+        # A bare "cancel" means the stopped ones; fall back to running ones.
+        targets = [f for f in files if f.state in _RESUMABLE] or [
+            f for f in files if f.state in _IN_FLIGHT
+        ]
+        if not targets:
+            return CommandReply(NOTHING_TO_CANCEL)
     else:
         return _status_reply(files, [], None)
     return _act(session, kind, targets, actor, entry_ids=_ids(targets))
@@ -627,6 +674,8 @@ def _act(session, kind, targets, actor, *, entry_ids, lines=()) -> CommandReply:
     extra = {}
     if kind == Kind.STOP:
         lines += _stop_lines(targets)
+    elif kind == Kind.CANCEL:
+        lines += _cancel_lines(targets)
     elif targets:
         allowed = _RESUMABLE if kind == Kind.RESUME else None
         result_lines, extra, failed = _run_processing(session, targets, actor, allowed)
@@ -637,6 +686,7 @@ def _act(session, kind, targets, actor, *, entry_ids, lines=()) -> CommandReply:
         lines = [{
             Kind.STOP: NOTHING_TO_STOP,
             Kind.RESUME: NOTHING_TO_RESUME,
+            Kind.CANCEL: NOTHING_TO_CANCEL,
         }.get(kind, "There is nothing to process.")]
     return CommandReply(
         "\n".join(lines),
@@ -680,7 +730,7 @@ def _named_reply(session, kind, names: _NameTargets, actor) -> CommandReply:
         # Report every match once (SessionFile holds a dict, so dedupe by id).
         targets = list({f.id: f for f in [*targets, *candidates]}.values())
     else:
-        button = "Stop" if kind == Kind.STOP else "Resume"
+        button = {Kind.STOP: "Stop", Kind.CANCEL: "Cancel"}.get(kind, "Resume")
         for tokens, group in names.ambiguous:
             titles = ", ".join(f.title for f in group)
             lines.append(
@@ -724,7 +774,7 @@ class Outcome:
             "reprocessed": f"Queued {name} for processing again from the start.",
             "processing": f"{name} is already processing.",
             "removed": f"{name} was removed from Documents.",
-            "not_allowed": f"{name} isn't stopped or failed.",
+            "not_allowed": f"{name} isn't paused, stopped or failed.",
             "missing": f"{name}: the file is missing; please attach it again.",
             "blocked": f"Couldn't process {name}: {self.detail}",
         }.get(self.result, f"{name} is no longer in this chat.")

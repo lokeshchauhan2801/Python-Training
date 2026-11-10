@@ -618,7 +618,7 @@ def _add_to_knowledge_base(ctx: "ToolContext") -> "ToolResult":
 
     return _file_command_tool(
         ctx,
-        allowed={Kind.PROCESS, Kind.STOP, Kind.RESUME, Kind.LIST},
+        allowed={Kind.PROCESS, Kind.STOP, Kind.RESUME, Kind.CANCEL, Kind.LIST},
         default=Kind.PROCESS,
         tool_used="add_to_knowledge_base",
     )
@@ -635,7 +635,7 @@ def _document_processing_status(ctx: "ToolContext") -> "ToolResult":
 
     return _file_command_tool(
         ctx,
-        allowed={Kind.STOP, Kind.RESUME, Kind.STATUS, Kind.LIST},
+        allowed={Kind.STOP, Kind.RESUME, Kind.CANCEL, Kind.STATUS, Kind.LIST},
         default=Kind.STATUS,
         tool_used="document_processing_status",
     )

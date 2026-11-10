@@ -107,3 +107,52 @@ class TemporalProcessingBackend(ProcessingBackend):
             # so the caller still marks the document stopped.
             return {"terminated": False, "already_closed": True}
         return {"terminated": True}
+
+    def signal(self, job_id: str, name: str) -> bool:
+        """Send signal ``name`` (``pause`` / ``resume``) to the running workflow.
+
+        False when it could not be delivered: no running workflow under that id
+        (never started, or already closed) or Temporal is unreachable.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(self._signal_async(job_id, name))
+        except Exception:
+            return False
+
+    async def _signal_async(self, job_id: str, name: str) -> bool:
+        import temporalio.client as tc
+        from django.conf import settings
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        await client.get_workflow_handle(job_id).signal(name)
+        return True
+
+    def cancel(self, job_id: str) -> bool:
+        """Request cancellation; the workflow cleans up and closes as Cancelled.
+
+        False when there is no running workflow or Temporal is unreachable.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(self._cancel_async(job_id))
+        except Exception:
+            return False
+
+    async def _cancel_async(self, job_id: str) -> bool:
+        import temporalio.client as tc
+        from django.conf import settings
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        handle = client.get_workflow_handle(job_id)
+        desc = await handle.describe()
+        if desc.status is None or desc.status.name != "RUNNING":
+            return False
+        await handle.cancel()
+        return True

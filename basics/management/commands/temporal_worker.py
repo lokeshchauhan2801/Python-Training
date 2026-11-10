@@ -23,6 +23,7 @@ class Command(BaseCommand):
             DocumentProcessingWorkflow,
             stage_chunk_text_activity,
             stage_delete_existing_chunks_activity,
+            stage_discard_cancelled_activity,
             stage_embed_and_store_chunks_activity,
             stage_extract_text_activity,
             stage_mark_completed_activity,
@@ -43,6 +44,7 @@ class Command(BaseCommand):
                 stage_embed_and_store_chunks_activity,
                 stage_mark_completed_activity,
                 stage_notify_completed_activity,
+                stage_discard_cancelled_activity,
             ],
         )
         self.stdout.write(

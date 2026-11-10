@@ -12,10 +12,13 @@ class Document(BaseModel, SoftDeleteModel):
     STATUS_PROCESSING = "processing"
     STATUS_READY = "ready"
     STATUS_FAILED = "failed"
+    # Stopped by the user; its Temporal workflow waits for a resume or cancel.
+    STATUS_PAUSED = "paused"
     STATUS_CHOICES = [
         (STATUS_UPLOADED, "Uploaded"),
         (STATUS_QUEUED, "Queued"),
         (STATUS_PROCESSING, "Processing"),
+        (STATUS_PAUSED, "Paused"),
         (STATUS_READY, "Processed"),
         (STATUS_FAILED, "Failed"),
     ]
@@ -67,6 +70,9 @@ class Document(BaseModel, SoftDeleteModel):
     processing_error = models.TextField(blank=True)
     chunk_count = models.PositiveIntegerField(default=0)
     processing_attempts = models.PositiveSmallIntegerField(default=0)
+    # Chunks already embedded and stored, in chunk order, so a paused or
+    # failed embed stage continues from here instead of from the first chunk.
+    processing_checkpoint = models.PositiveIntegerField(default=0)
 
     processing_duration_ms = models.PositiveIntegerField(null=True, blank=True)
 

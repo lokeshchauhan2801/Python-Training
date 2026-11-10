@@ -577,6 +577,7 @@ class LangGraphChatService:
                 Kind.STATUS: ("document_processing_status",),
                 Kind.STOP: ("add_to_knowledge_base", "document_processing_status"),
                 Kind.RESUME: ("add_to_knowledge_base", "document_processing_status"),
+                Kind.CANCEL: ("add_to_knowledge_base", "document_processing_status"),
                 Kind.LIST: ("add_to_knowledge_base", "document_processing_status"),
             }.get(kind, ())
             available = [slug for slug in capable if slug in enabled]

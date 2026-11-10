@@ -70,6 +70,7 @@ _STATUS_COLORS = {
     Document.STATUS_FAILED: "#dc2626",
     Document.STATUS_PROCESSING: "#d97706",
     Document.STATUS_QUEUED: "#d97706",
+    Document.STATUS_PAUSED: "#ea580c",
     Document.STATUS_UPLOADED: "#6b7280",
 }
 

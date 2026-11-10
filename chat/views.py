@@ -804,7 +804,9 @@ def _file_command_reply(
             selection_metadata=selection_metadata,
         )
     # STOP and LIST ignore the selection: in-flight rows have no checkbox (V12).
-    entry_ids = selected if selected and kind in (Kind.RESUME, Kind.STATUS) else None
+    entry_ids = (
+        selected if selected and kind in (Kind.RESUME, Kind.CANCEL, Kind.STATUS) else None
+    )
     return _command_turn(
         request,
         session,
@@ -1211,7 +1213,13 @@ def panel_process(request, session_id):
     return JsonResponse({"files": rows}, status=202)
 
 
-_FILE_ACTIONS = {"stop": "stop", "resume": "resume", "retry": "resume"}
+_FILE_ACTIONS = {
+    "stop": "stop",
+    "pause": "stop",
+    "resume": "resume",
+    "retry": "resume",
+    "cancel": "cancel",
+}
 
 
 def _one_file(session, entry_id):
@@ -1225,7 +1233,10 @@ def _one_file(session, entry_id):
 @login_required
 @require_http_methods(["POST"])
 def file_action(request, session_id, entry_id, action):
-    """Stop (200) or resume (202) one chat file; 409 when its state disallows it."""
+    """Stop / pause (200), cancel (200) or resume (202) one chat file.
+
+    409 when the file's state disallows the action.
+    """
     session = _resolve_session(request, session_id)
     action = _FILE_ACTIONS.get(action)
     if action is None:
@@ -1256,8 +1267,12 @@ def file_action(request, session_id, entry_id, action):
 
     try:
         if action == "stop":
-            # Outside the session lock: terminate is network IO.
-            result = controls.stop_document(target.document)
+            # Outside the session lock: the pause signal is network IO.
+            result = controls.pause_document(target.document)
+            status = 200
+        elif action == "cancel":
+            # Outside the session lock: the workflow cancel is network IO.
+            result = controls.cancel_document(target.document)
             status = 200
         else:
             with session_files.locked_files(session, actor=request.user):

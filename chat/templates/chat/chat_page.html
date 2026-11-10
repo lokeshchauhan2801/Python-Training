@@ -916,8 +916,13 @@
       color: var(--color-red-600);
     }
 
-    .chat-ui-file-status--stopped {
+    .chat-ui-file-status--stopped,
+    .chat-ui-file-status--paused {
       color: var(--color-orange-600, #ea580c);
+    }
+
+    .chat-ui-file-btn--cancel {
+      color: var(--color-red-600);
     }
 
     .chat-ui-file-btn {
@@ -1893,6 +1898,7 @@
       function fileActionLabel(action, row) {
         if (action === "stop") { return "Stop"; }
         if (action === "resume") { return row.state === "failed" ? "Try again" : "Resume"; }
+        if (action === "cancel") { return "Cancel"; }
         return "";
       }
 
@@ -1900,6 +1906,9 @@
         const sid = currentSessionId;
         if (!sid) { return; }
         const urlAction = action === "resume" && row.state === "failed" ? "retry" : action;
+        if (action === "cancel" && !window.confirm(
+          "Cancel processing of “" + row.title + "”? The progress so far is discarded and processing it again starts from the beginning."
+        )) { return; }
         panel.busy[row.id] = true;
         btn.disabled = true;
         fetch(fileActionUrlFor(sid, row.id, urlAction), {

@@ -458,6 +458,8 @@ def derive_state(entry, document) -> str:
         return "queued"
     if status == Document.STATUS_PROCESSING:
         return "processing"
+    if status == Document.STATUS_PAUSED:
+        return "paused"
     if status == Document.STATUS_FAILED:
         return "stopped" if controls.is_stopped(document) else "failed"
     if status == Document.STATUS_READY:
@@ -465,7 +467,7 @@ def derive_state(entry, document) -> str:
     return "removed"
 
 
-_SELECTABLE = {"not_started", "stopped", "failed", "processed"}
+_SELECTABLE = {"not_started", "paused", "stopped", "failed", "processed"}
 _IN_FLIGHT = {"queued", "processing"}
 
 
@@ -477,6 +479,9 @@ def _label(state, stage, progress) -> str:
     if state == "processing":
         detail = " ".join(part for part in (stage, f"{progress}%") if part)
         return f"Processing · {detail}"
+    if state == "paused":
+        detail = " · ".join(part for part in (stage, f"{progress}%") if part)
+        return f"Paused at {detail}" if detail else "Paused"
     if state == "stopped":
         return f"Stopped at {stage}" if stage else "Stopped"
     if state == "failed":
@@ -495,7 +500,7 @@ def file_row(session_file: SessionFile) -> dict:
     progress = 0
     error = ""
     hint = ""
-    if document is not None and state in (_IN_FLIGHT | {"stopped", "failed"}):
+    if document is not None and state in (_IN_FLIGHT | {"paused", "stopped", "failed"}):
         stage = controls.current_stage(document)
     if document is not None and state != "removed":
         progress = document.processing_progress_display
@@ -504,8 +509,9 @@ def file_row(session_file: SessionFile) -> dict:
         hint = FAILED_HINT
     if state in _IN_FLIGHT:
         actions = ["stop"]
-    elif state in ("stopped", "failed"):
-        actions = ["resume"]
+    elif state in ("paused", "stopped", "failed"):
+        # A stopped file is resumed or cancelled (progress discarded).
+        actions = ["resume", "cancel"]
     else:
         actions = []
     recoverable = state == "removed" and session_file.source_available
@@ -579,12 +585,13 @@ def reconcile(session) -> list[SessionFile]:
 
 _ELIGIBLE = {
     "stop": {"queued", "processing"},
-    "resume": {"stopped", "failed"},
+    "resume": {"paused", "stopped", "failed"},
+    "cancel": {"queued", "processing", "paused", "stopped", "failed"},
 }
 
 
 def has_eligible(session, kind) -> bool:
-    """True when some file can be stopped (``"stop"``) or resumed (``"resume"``)."""
+    """True when some file can be stopped, resumed or cancelled (``kind``)."""
     wanted = _ELIGIBLE.get(kind, set())
     return any(f.state in wanted for f in list_files(session))
 

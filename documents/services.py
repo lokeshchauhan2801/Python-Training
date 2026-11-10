@@ -1408,7 +1408,10 @@ def stage_mark_processing(document_id: str) -> dict:
 
     _stage_start(document, STAGE_MARK_PROCESSING, progress=5)
     try:
-        Document.objects.filter(pk=document.pk).update(
+        # A pause made while this stage ran wins over the PROCESSING flip.
+        Document.objects.filter(pk=document.pk).exclude(
+            status=Document.STATUS_PAUSED
+        ).update(
             status=Document.STATUS_PROCESSING,
             processing_error="",
             updated_at=timezone.now(),
@@ -1467,6 +1470,7 @@ def stage_extract_text(document_id: str) -> dict:
         with transaction.atomic():
             _delete_chunks(document)
             DocumentChunk.objects.bulk_create(chunk_rows)
+            Document.objects.filter(pk=document.pk).update(processing_checkpoint=0)
     except (DocumentValidationError, DocumentIndexError) as exc:
         _stage_fail(document, STAGE_EXTRACT_TEXT, str(exc))
         _mark_document_failed(document, str(exc))
@@ -1571,15 +1575,31 @@ def stage_delete_existing_chunks(document_id: str) -> dict:
         _stage_fail(document, STAGE_DELETE_EXISTING_CHUNKS, str(exc))
         _mark_document_failed(document, str(exc))
         raise DocumentIndexError(str(exc)) from exc
+    Document.objects.filter(pk=document.pk).update(processing_checkpoint=0)
     _stage_complete(document, STAGE_DELETE_EXISTING_CHUNKS, progress=50)
     return {"ok": True}
+
+
+def _should_yield(document: Document) -> bool:
+    """True when the user paused or cancelled the run (status left PROCESSING).
+
+    Long stages check this between batches and return ``{"paused": True}`` so
+    the workflow can wait for a resume, or close on a cancel.
+    """
+    return not Document.objects.filter(
+        pk=document.pk, status=Document.STATUS_PROCESSING
+    ).exists()
 
 
 def stage_embed_and_store_chunks(document_id: str) -> dict:
     """Stage 5: embed chunk rows and upsert their deterministic vectors.
 
-    Only library documents are embedded; chat attachments short-circuit. On
-    failure only the vectors pushed THIS run are removed (scoped partial cleanup).
+    Works in windows of ``EMBEDDING_BATCH_SIZE * EMBEDDING_WORKERS`` chunks and
+    records ``Document.processing_checkpoint`` after each stored window, so a
+    pause, a failure or a worker restart continues from the next window.
+    Between windows it returns ``{"paused": True}`` when the user paused or
+    cancelled. Only library documents are embedded; chat attachments
+    short-circuit. On failure only the current window's vectors are removed.
     """
     document = Document.objects.get(pk=document_id)
     _ensure_stages(document)
@@ -1592,100 +1612,99 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
 
     _stage_start(document, STAGE_EMBED_AND_STORE_CHUNKS, progress=55)
     vector_store: ChromaVectorStore | None = None
-    pushed_ids: list[str] = []
+    window_ids: list[str] = []
     try:
         chunk_rows = list(
             DocumentChunk.objects.filter(document=document).order_by("chunk_index")
         )
-        extracted_chunks = [
-            (chunk.page_number, chunk.source_location, chunk.content)
-            for chunk in chunk_rows
-        ]
-        try:
-            embeddings = _embed_chunks(
-                extracted_chunks, document_id=str(document.pk)
-            )
-        except LLMConfigurationError as exc:
-            raise DocumentIndexError(
-                "LLM key required to embed library documents. Set "
-                "OPENAI_API_KEY and retry."
-            ) from exc
-
+        total = len(chunk_rows)
+        done = min(document.processing_checkpoint or 0, total)
+        window = EMBEDDING_BATCH_SIZE * EMBEDDING_WORKERS
         vector_store = ChromaVectorStore()
-        total_batches = max(
-            1, (len(chunk_rows) + VECTOR_BATCH_SIZE - 1) // VECTOR_BATCH_SIZE
-        )
-        for batch_index, offset in enumerate(
-            range(0, len(chunk_rows), VECTOR_BATCH_SIZE), start=1
-        ):
-            rows = chunk_rows[offset : offset + VECTOR_BATCH_SIZE]
-            vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
-            batch_started = time.monotonic()
-            pushed_ids.extend(
-                vector_store.add_documents(
-                    [
-                        {
-
-
-                            "id": f"{document.pk}:{chunk.chunk_index}",
-                            "text": chunk.content,
-                            "embedding": embedding,
-                            "metadata": {
-                                "user_id": str(document.uploaded_by_id),
-                                "company_id": str(document.company_id)
-                                if document.company_id
-                                else "",
-                                "document_id": str(document.pk),
-                                "chunk_id": str(chunk.pk),
-                                "page_number": chunk.page_number,
-                                "source_location": chunk.source_location,
-                                "file_type": document.file_type,
-                            },
-                        }
-                        for chunk, embedding in zip(rows, vectors, strict=True)
-                    ],
-                    collection=VECTOR_COLLECTION,
+        while done < total:
+            if _should_yield(document):
+                DocumentStage.objects.filter(
+                    document=document, name=STAGE_EMBED_AND_STORE_CHUNKS
+                ).update(
+                    detail=f"paused after {done}/{total} chunks",
+                    updated_at=timezone.now(),
                 )
+                return {"paused": True, "chunks_stored": done}
+            rows = chunk_rows[done : done + window]
+            try:
+                embeddings = _embed_chunks(
+                    [(c.page_number, c.source_location, c.content) for c in rows],
+                    document_id=str(document.pk),
+                )
+            except LLMConfigurationError as exc:
+                raise DocumentIndexError(
+                    "LLM key required to embed library documents. Set "
+                    "OPENAI_API_KEY and retry."
+                ) from exc
+            window_ids = []
+            for offset in range(0, len(rows), VECTOR_BATCH_SIZE):
+                batch = rows[offset : offset + VECTOR_BATCH_SIZE]
+                vectors = embeddings[offset : offset + VECTOR_BATCH_SIZE]
+                batch_started = time.monotonic()
+                window_ids.extend(
+                    vector_store.add_documents(
+                        [
+                            {
+                                "id": f"{document.pk}:{chunk.chunk_index}",
+                                "text": chunk.content,
+                                "embedding": embedding,
+                                "metadata": {
+                                    "user_id": str(document.uploaded_by_id),
+                                    "company_id": str(document.company_id)
+                                    if document.company_id
+                                    else "",
+                                    "document_id": str(document.pk),
+                                    "chunk_id": str(chunk.pk),
+                                    "page_number": chunk.page_number,
+                                    "source_location": chunk.source_location,
+                                    "file_type": document.file_type,
+                                },
+                            }
+                            for chunk, embedding in zip(batch, vectors, strict=True)
+                        ],
+                        collection=VECTOR_COLLECTION,
+                    )
+                )
+                _log_timing(
+                    document.pk,
+                    "chroma_batch",
+                    batch_started,
+                    batch=(done + offset) // VECTOR_BATCH_SIZE + 1,
+                    count=len(batch),
+                )
+            done += len(rows)
+            window_ids = []
+            Document.objects.filter(pk=document.pk).update(
+                processing_checkpoint=done
             )
-            _log_timing(
-                document.pk,
-                "chroma_batch",
-                batch_started,
-                batch=batch_index,
-                count=len(rows),
-            )
-            progress = 55 + int(20 * batch_index / total_batches)
             _touch_document_stage(
-                document, STAGE_EMBED_AND_STORE_CHUNKS, progress
+                document,
+                STAGE_EMBED_AND_STORE_CHUNKS,
+                55 + int(20 * done / max(1, total)),
             )
-    except (DocumentValidationError, DocumentIndexError) as exc:
-        if vector_store is not None and pushed_ids:
+    except Exception as exc:
+        if vector_store is not None and window_ids:
             try:
                 vector_store.delete_documents(
-                    pushed_ids, collection=VECTOR_COLLECTION
+                    window_ids, collection=VECTOR_COLLECTION
                 )
             except Exception:
                 logger.exception(
                     "Could not remove partial vectors for document %s",
                     document_id,
                 )
-        _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, str(exc))
-        _mark_document_failed(document, str(exc))
-        raise
-    except Exception as exc:
+        if isinstance(exc, (DocumentValidationError, DocumentIndexError)):
+            _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, str(exc))
+            _mark_document_failed(document, str(exc))
+            raise
         logger.exception(
             "stage_embed_and_store_chunks failed for document %s", document_id
         )
-        if vector_store is not None and pushed_ids:
-            try:
-                vector_store.delete_documents(
-                    pushed_ids, collection=VECTOR_COLLECTION
-                )
-            except Exception:
-                logger.exception(
-                    "Could not remove partial vectors for document %s",
-                    document_id,
-                )
         message = "Embedding/indexing failed. Retry once the LLM provider is reachable."
         _stage_fail(document, STAGE_EMBED_AND_STORE_CHUNKS, message)
         _mark_document_failed(document, message)
@@ -1693,10 +1712,47 @@ def stage_embed_and_store_chunks(document_id: str) -> dict:
     _stage_complete(
         document,
         STAGE_EMBED_AND_STORE_CHUNKS,
-        detail=f"{len(pushed_ids)} vectors",
+        detail=f"{total} vectors",
         progress=75,
     )
-    return {"chunks_stored": len(pushed_ids)}
+    return {"chunks_stored": total}
+
+
+def discard_processing(document: Document) -> None:
+    """Undo a run's work so the document is UPLOADED again (Cancel).
+
+    Removes the document's vectors and chunk rows, re-arms every stage and
+    resets the progress fields. Idempotent: the Cancel control runs it at once
+    and the cancelled workflow runs it again after any in-flight stage ends.
+    """
+    vector_ids = [
+        f"{document.pk}:{chunk_index}"
+        for chunk_index in DocumentChunk.all_objects.filter(
+            document=document
+        ).values_list("chunk_index", flat=True)
+    ]
+    if vector_ids:
+        try:
+            ChromaVectorStore().delete_documents(
+                vector_ids, collection=VECTOR_COLLECTION
+            )
+        except Exception:
+            logger.exception(
+                "Could not remove vectors for cancelled document %s", document.pk
+            )
+    _delete_chunks(document)
+    reset_all_stages(document)
+    Document.objects.filter(pk=document.pk).update(
+        status=Document.STATUS_UPLOADED,
+        processing_stage="",
+        processing_progress=0,
+        processing_checkpoint=0,
+        processing_attempts=0,
+        processing_error="",
+        processing_task_id="",
+        chunk_count=0,
+        updated_at=timezone.now(),
+    )
 
 
 def stage_mark_completed(document_id: str) -> dict:

@@ -134,7 +134,11 @@ def classify_intent(message_text, session, attachment_ids, selected_entry_ids=()
     kind = file_commands.effective_kind_from_files(command, session, files)
     if kind == file_commands.Kind.PROCESS:
         return Intent.ACTION_PROCESS
-    if kind in (file_commands.Kind.STOP, file_commands.Kind.RESUME):
+    if kind in (
+        file_commands.Kind.STOP,
+        file_commands.Kind.RESUME,
+        file_commands.Kind.CANCEL,
+    ):
         return Intent.ACTION_STOP_RESUME
     if kind == file_commands.Kind.STATUS:
         return Intent.READ_STATUS

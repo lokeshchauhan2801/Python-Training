@@ -139,7 +139,7 @@ def retry_document_processing(*, document_id, company, actor) -> dict:
         }
 
     try:
-        if document.status == Document.STATUS_FAILED:
+        if document.status in (Document.STATUS_FAILED, Document.STATUS_PAUSED):
             controls.resume_document(document)
         else:
             controls.start_document(document)
@@ -282,7 +282,11 @@ def _status_documents(*, company, message_text: str | None):
     recent = list(
         Document.objects.filter(
             company=company,
-            status__in=(Document.STATUS_READY, Document.STATUS_FAILED),
+            status__in=(
+                Document.STATUS_READY,
+                Document.STATUS_FAILED,
+                Document.STATUS_PAUSED,
+            ),
         ).order_by("-updated_at")[:5]
     )
     return in_flight + recent, False
@@ -316,7 +320,11 @@ def document_status_report(*, company, message_text: str | None) -> str:
     recent = list(
         Document.objects.filter(
             company=company,
-            status__in=(Document.STATUS_READY, Document.STATUS_FAILED),
+            status__in=(
+                Document.STATUS_READY,
+                Document.STATUS_FAILED,
+                Document.STATUS_PAUSED,
+            ),
         ).order_by("-updated_at")[:5]
     )
 
@@ -378,7 +386,12 @@ def document_status_rows(*, company, document_ids=None, message_text=None) -> li
     for d in documents:
         if d is None:
             continue
-        terminal = d.status in (Document.STATUS_READY, Document.STATUS_FAILED)
+        # A paused row is idle until the user resumes it, so polling stops.
+        terminal = d.status in (
+            Document.STATUS_READY,
+            Document.STATUS_FAILED,
+            Document.STATUS_PAUSED,
+        )
         wf = workflow_id_for(d.id)
         rows.append(
             {
