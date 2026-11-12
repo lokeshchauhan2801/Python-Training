@@ -110,6 +110,7 @@ class AgentSerializer(
             "prompt",
             "config",
             "company",
+            "graph",
             "created_at",
             "updated_at",
             "created_by",
@@ -117,7 +118,8 @@ class AgentSerializer(
             "is_deleted",
             "deleted_at",
         ]
-        read_only_fields = []
+        # Written from the steps by the agents signals, never by clients.
+        read_only_fields = ["graph"]
 
     def validate_company(self, value):
         # An explicit ``company: null`` on create makes a global agent (every

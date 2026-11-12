@@ -10,9 +10,9 @@ fall back to the normal path, or must block the request:
   handler. It reads session file state only through
   ``session_files.list_files(session)`` and the read-only
   ``file_commands.effective_kind_from_files()`` helper.
-* It consumes the single shared reachable-Step walker
-  (``agents.services.flow.walk_reachable_steps``), so a reachability change can
-  never let policy allow an action execution would not traverse.
+* It reads the Agent's stored graph JSON (``Agent.graph``) with the same
+  helper the runtime binds tools with, so policy can never allow an action
+  the agent's model could not call.
 
 ``classify_intent`` mirrors the existing ``file_commands`` gates and the current
 router prompt precedence rather than guessing with an LLM. ``preflight`` and
@@ -59,6 +59,8 @@ class PolicyDecision:
 _BUILTIN_SLUGS = frozenset(
     {
         "general_assistant",
+        "create_chart",
+        "chart_from_file",
         "document_search",
         "chat_summarise",
         "web_search",
@@ -178,24 +180,16 @@ def classify_intent(message_text, session, attachment_ids, selected_entry_ids=()
 # Capability aggregation
 # --------------------------------------------------------------------------- #
 def _reachable_enabled_slugs(agent) -> set:
-    """Built-in slugs enabled on the Agent's REACHABLE Steps.
+    """Built-in slugs the agent's graph JSON (``Agent.graph``) binds.
 
-    Uses the shared walker so orphan/unreachable Steps (which never execute)
-    cannot satisfy a capability. A registered slug always runs its handler
-    (``_enabled_for``); the decisive contract is the registered slug.
+    Uses the same helper the runtime binds tools with, so policy can never
+    allow an action the agent's model could not call.
     """
-    from agents.services.flow import walk_reachable_steps
+    from chat.agent.tools import enabled_tool_rows
 
-    slugs: set = set()
-    for step in walk_reachable_steps(agent):
-        for tool in step.tools.filter(is_enabled=True):
-            if tool.slug in _BUILTIN_SLUGS:
-                slugs.add(tool.slug)
-    return slugs
+    return set(enabled_tool_rows(agent)) & _BUILTIN_SLUGS
 
 
-# Policy table: intent -> (required slug set [any-of], outcome-class, reply/reason)
-# outcome-class "write" => blocked when missing; "read" => fallback when missing.
 def _policy_for_intent(intent, available):
     """Return (outcome, required_slugs, reason, reply) for ``intent``."""
     if intent == Intent.ACTION_PROCESS:
@@ -229,8 +223,8 @@ def _policy_for_intent(intent, available):
             return "pipeline", required, "", ""
         return "fallback", required, "missing enabled chat_summarise on reachable steps", ""
     if intent == Intent.READ_DOCUMENT:
-        required = ("document_search",)
-        if "document_search" in available:
+        required = ("document_search", "chart_from_file")
+        if available & set(required):
             return "pipeline", required, "", ""
         return "fallback", required, "missing enabled document_search on reachable steps", ""
     if intent == Intent.READ_EXTERNAL:
@@ -246,9 +240,9 @@ def _policy_for_intent(intent, available):
 # Preflight entry points
 # --------------------------------------------------------------------------- #
 def _no_runnable_flow(agent) -> bool:
-    from agents.services.flow import walk_reachable_steps
+    from chat.agent.graph import model_nodes
 
-    return not walk_reachable_steps(agent)
+    return not model_nodes(agent.graph)
 
 
 def preflight(agent, session, message_text, attachment_ids, selected_entry_ids=()):

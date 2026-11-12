@@ -24,7 +24,7 @@ def _function_catalog():
     Sourced from the live registry (``available_slugs``) minus internal slugs;
     ``description`` is the tool's default docs (``DEFAULT_TOOL_DOCS``).
     """
-    from chat.services.langgraph_service import available_slugs
+    from chat.agent.tools import available_slugs
 
     catalog = []
     for slug in sorted(available_slugs()):
@@ -227,6 +227,9 @@ class AgentViewSet(ScopedModelViewSet):
                 "selected_agent_id": str(selected.pk) if selected else None,
                 "steps": steps_data,
                 "tools": tools_data,
+                # The stored graph JSON chat runs (``Agent.graph``); the
+                # canvas does not read it.
+                "graph": selected.graph if selected is not None else None,
                 # Prefill for a new agent's config and the allowed values.
                 "config_defaults": agent_config.defaults(),
                 "config_options": {

@@ -14,10 +14,13 @@ from django.db import transaction
 from agents.models import Agent, Step, Tool
 from agents.services.tool_docs import DEFAULT_TOOL_DOCS
 
-# (slug, name) of every built-in tool; the slug selects the handler.
+# (slug, name) of every built-in tool; the slug selects the LangChain tool
+# (``general_assistant`` binds none: the step's model answers directly).
 _TOOL_SPECS = [
     ("general_assistant", "General assistant"),
     ("document_search", "Document search"),
+    ("create_chart", "Create chart"),
+    ("chart_from_file", "Chart from file"),
     ("chat_summarise", "Chat summary"),
     ("web_search", "Web search"),
     ("add_to_knowledge_base", "Add to knowledge base"),

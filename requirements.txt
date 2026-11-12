@@ -3,6 +3,8 @@ djangorestframework==3.16.0
 django-unfold==0.81.0
 langchain-openai==1.6.7
 langgraph==1.2.15
+langgraph-checkpoint-postgres==3.2.0
+psycopg-pool==3.3.3
 langfuse==4.18.0
 python-dotenv==1.2.4
 psycopg[binary]==3.3.6

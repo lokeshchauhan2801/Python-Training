@@ -504,8 +504,7 @@ class ChatService:
     def _conversation_digest(cls, older):
         """Condense ``older`` turns into a short digest block ("" when none).
 
-        Shared by the prompt history (``_build_conversation_context``) and the
-        LangGraph tools' chat messages (``llm_tools._history_messages``).
+        Used by the prompt history (``_build_conversation_context``).
         """
         if not older:
             return ""

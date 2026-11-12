@@ -1,11 +1,10 @@
 """chat.services package — public surface re-exported from chat_service.
 
 The chat orchestration service used to live in a single chat/services.py
-module. It is now a package so the LangGraph runtime can sit beside it
-(langgraph_service.py). This __init__ re-exports the full
-public surface byte-for-byte, including the ``document_services`` binding, so
-``chat.services.document_services is documents.services`` stays true and every
-existing import keeps working.
+module. It is now a package; the Agent (LangGraph) runtime lives in
+``chat.agent``. This __init__ re-exports the full public surface, including the
+``document_services`` binding, so ``chat.services.document_services is
+documents.services`` stays true and every existing import keeps working.
 """
 
 from .chat_service import (
@@ -18,11 +17,6 @@ from .chat_service import (
     _SUMMARY_SYSTEM_PROMPT,
     document_services,
 )
-from .langgraph_service import (
-    LangGraphChatService,
-    available_slugs,
-    get_handler,
-)
 
 __all__ = [
     "ChatService",
@@ -33,7 +27,4 @@ __all__ = [
     "ChartPoint",
     "_SUMMARY_SYSTEM_PROMPT",
     "document_services",
-    "LangGraphChatService",
-    "available_slugs",
-    "get_handler",
 ]

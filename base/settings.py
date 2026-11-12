@@ -174,10 +174,9 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_STRUCTURED_METHOD = os.getenv("LLM_STRUCTURED_METHOD", "function_calling")
 
 # Chat history sent to the model: the last CHAT_RECENT_TURNS turns verbatim
-# (older turns are condensed into a digest), and only the last
-# CHAT_ROUTER_TURNS turns for the Agent router's tool pick.
+# (older turns are condensed into a digest). An Agent's checkpointed thread is
+# trimmed to the same number of turns before each model call.
 CHAT_RECENT_TURNS = int(os.getenv("CHAT_RECENT_TURNS", "12"))
-CHAT_ROUTER_TURNS = int(os.getenv("CHAT_ROUTER_TURNS", "4"))
 # Show the response-time line ("⏱ 3.2s · ...") under each assistant reply.
 # Timing is always recorded in turn metadata; this only hides the line.
 CHAT_SHOW_TIMING = os.getenv("CHAT_SHOW_TIMING", "True").strip().lower() in (
@@ -239,6 +238,9 @@ AGENT_DEFAULT_MAX_TOKENS = int(os.getenv("AGENT_DEFAULT_MAX_TOKENS", "8192"))
 # Upper bounds an agent config may set (cost and provider guardrails).
 AGENT_MAX_TOKENS_LIMIT = int(os.getenv("AGENT_MAX_TOKENS_LIMIT", "16384"))
 AGENT_TOP_K_LIMIT = int(os.getenv("AGENT_TOP_K_LIMIT", "50"))
+# LangGraph recursion limit for one Agent turn: each model call and each tool
+# round is a super-step, so 12 allows about five tool rounds.
+AGENT_RECURSION_LIMIT = int(os.getenv("AGENT_RECURSION_LIMIT", "12"))
 
 # Knowledge-base passages retrieved per question (more for a chart request).
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))

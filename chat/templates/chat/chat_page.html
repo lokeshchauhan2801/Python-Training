@@ -715,6 +715,37 @@
       color: var(--color-font-subtle-dark);
     }
 
+    /* Agent steps: the tool calls and results of a LangGraph agent turn. */
+    .chat-ui-trace {
+      display: block;
+      margin-top: .625rem;
+      font-size: .75rem;
+      color: var(--color-font-subtle-light);
+    }
+
+    html.dark .chat-ui-trace {
+      color: var(--color-font-subtle-dark);
+    }
+
+    .chat-ui-trace summary {
+      cursor: pointer;
+    }
+
+    .chat-ui-trace ol {
+      margin: .375rem 0 0;
+      padding-left: 1.25rem;
+      list-style: decimal;
+    }
+
+    .chat-ui-trace li {
+      margin-top: .125rem;
+      overflow-wrap: anywhere;
+    }
+
+    .chat-ui-trace-failed {
+      color: rgb(220 38 38);
+    }
+
     .chat-ui-chip--muted {
       color: var(--color-font-subtle-light);
     }
@@ -1549,13 +1580,24 @@
         general_assistant: "General assistant",
         document_search: "Document search",
         chat_summarise: "Chat summary",
-        web_search: "Web search"
+        web_search: "Web search",
+        create_chart: "Chart",
+        chart_from_file: "Chart from file",
+        add_to_knowledge_base: "Add to knowledge base",
+        document_processing_status: "Processing status"
       };
+
+      function toolLabel(slug) {
+        return TOOL_LABELS[slug] || slug;
+      }
 
       function methodLabel(message) {
         const meta = message.metadata || {};
         if (meta.tool_used) {
-          return TOOL_LABELS[meta.tool_used] || meta.tool_used;
+          return toolLabel(meta.tool_used);
+        }
+        if (meta.source === "langgraph") {
+          return "Agent (no tool)";
         }
         if (message.citations && message.citations.length) {
           return "Document reference";
@@ -1575,6 +1617,49 @@
         row.appendChild(label);
         row.appendChild(pill);
         container.appendChild(row);
+      }
+
+      // One line of an agent turn's trace (``metadata.trace`` / a live
+      // ``{trace}`` event): a tool call with its arguments, or its result.
+      function traceLine(step) {
+        const li = document.createElement("li");
+        if (step.kind === "tool_call") {
+          li.textContent = "Called " + toolLabel(step.tool) +
+            (step.args && step.args !== "{}" ? " " + step.args : "");
+        } else if (step.kind === "step_output") {
+          li.textContent = "Step " + step.tool + " replied" +
+            (step.preview ? ": " + step.preview : "");
+        } else {
+          li.textContent = (step.ok ? "✓ " : "✗ ") + toolLabel(step.tool) +
+            (step.preview ? ": " + step.preview : "");
+          if (!step.ok) { li.className = "chat-ui-trace-failed"; }
+        }
+        return li;
+      }
+
+      function traceBlock(open) {
+        const details = document.createElement("details");
+        details.className = "chat-ui-trace";
+        details.open = !!open;
+        const summary = document.createElement("summary");
+        const list = document.createElement("ol");
+        details.appendChild(summary);
+        details.appendChild(list);
+        return { details: details, summary: summary, list: list };
+      }
+
+      function setTraceCount(block) {
+        const n = block.list.children.length;
+        block.summary.textContent = "Agent steps (" + n + ")";
+      }
+
+      function renderTrace(container, message) {
+        const steps = (message.metadata || {}).trace;
+        if (!Array.isArray(steps) || !steps.length) { return; }
+        const block = traceBlock(false);
+        steps.forEach(function (step) { block.list.appendChild(traceLine(step)); });
+        setTraceCount(block);
+        container.appendChild(block.details);
       }
 
       // Stage order for the timing line; unknown stages follow in key order.
@@ -2173,6 +2258,7 @@
           renderCitations(bubble, message.citations);
           renderChart(bubble, message.chart_data);
           renderToolBadge(bubble, message);
+          renderTrace(bubble, message);
           renderTiming(bubble, message);
           renderRetry(bubble, message);
           renderTemporalLinks(bubble, message);
@@ -2629,11 +2715,12 @@
         wrap.appendChild(bubble);
         messagesEl.appendChild(wrap);
         messagesEl.scrollTop = messagesEl.scrollHeight;
-        return { wrap: wrap, text: text };
+        return { wrap: wrap, bubble: bubble, text: text, trace: null };
       }
 
       // Read a ``text/event-stream`` send reply. Each event is a
-      // ``data: <json>`` line: ``{delta}`` pieces, then ``{done, ...}`` (the
+      // ``data: <json>`` line: ``{delta}`` pieces and, for an agent, ``{trace}``
+      // steps (shown live in the bubble), then ``{done, ...}`` (the
       // same body as the JSON reply) or ``{error, status}``. Resolves to the
       // ``{ ok, data }`` shape the JSON branch produces. ``live`` holds the
       // live bubble (``live.el``) so the caller can remove it on failure.
@@ -2652,7 +2739,23 @@
           if (!data) { return; }
           let event;
           try { event = JSON.parse(data); } catch (e) { return; }
-          if (event.delta) {
+          if (event.trace) {
+            if (currentSessionId !== sessionId) { return; }
+            if (!live.el) {
+              removeProcessingPlaceholder(placeholder);
+              live.el = renderLiveBubble();
+            }
+            if (!live.el.trace) {
+              live.el.trace = traceBlock(true);
+              live.el.bubble.appendChild(live.el.trace.details);
+            }
+            // Text before a tool call was the model thinking aloud; the
+            // answer comes after the tools.
+            if (event.trace.kind === "tool_call") { live.el.text.textContent = ""; }
+            live.el.trace.list.appendChild(traceLine(event.trace));
+            setTraceCount(live.el.trace);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          } else if (event.delta) {
             if (currentSessionId !== sessionId) {
               // The user switched chats: don't stream into another one.
               if (live.el) { removeProcessingPlaceholder(live.el.wrap); live.el = null; }

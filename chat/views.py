@@ -48,9 +48,10 @@ def _orchestrator_for(company, selected_agent=None, llm_client=None):
     """Return the service that runs a turn.
 
     ``selected_agent is None`` -> Normal RAG (``_rag_service``). An explicit
-    resolved Agent -> a ``LangGraphChatService`` bound to that Agent. ``send``
-    has already preflighted a runnable chain, so this never re-resolves the
-    selection or downgrades an explicit Agent to Normal RAG. A construction /
+    resolved Agent -> an ``AgentChatService`` (the LangGraph tool-calling
+    graph) bound to that Agent. ``send`` has already preflighted it, so this
+    never re-resolves the selection or downgrades an explicit Agent to Normal
+    RAG. A construction /
     import failure is logged and raised as ``ChatProviderError`` so the
     existing 502 mapping applies.
     """
@@ -58,10 +59,10 @@ def _orchestrator_for(company, selected_agent=None, llm_client=None):
         return _rag_service(llm_client)
 
     try:
-        from chat.services.langgraph_service import LangGraphChatService
+        from chat.agent.service import AgentChatService
         from basics.langfuse import get_langfuse_client
 
-        return LangGraphChatService(
+        return AgentChatService(
             chat_service=_rag_service(llm_client),
             langfuse=get_langfuse_client(),
             agent=selected_agent,
@@ -613,7 +614,8 @@ def _send_events(session, start_turn):
     """SSE body for a streamed ``send``.
 
     ``start_turn()`` returns a service ``stream_message`` generator. Emits
-    ``{"delta": ...}`` per piece, then ``{"done": true, ...}`` with the JSON
+    ``{"delta": ...}`` per piece, ``{"trace": ...}`` per Agent step (a tool
+    call or its result), then ``{"done": true, ...}`` with the JSON
     reply body, or ``{"error": ..., "status": ...}`` mapped like the JSON
     branch. The body runs after the view (and its middleware) returned, so
     each step runs in a copy of the request's context (current user).
@@ -627,6 +629,8 @@ def _send_events(session, start_turn):
             for kind, value in events:
                 if kind == "delta":
                     yield _sse({"delta": value})
+                elif kind == "trace":
+                    yield _sse({"trace": value})
                 else:
                     yield _sse({"done": True, **_send_payload(session, value)})
         except _SEND_ERRORS as exc:

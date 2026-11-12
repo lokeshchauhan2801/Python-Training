@@ -275,7 +275,13 @@ Notes on scoping:
                                          // ordered by order, created_at
            "selected_agent_id": "<id>" | null,
            "steps":  [ <Step>, ... ],    // ALL steps of the selected agent
-           "tools":  [ <Tool>, ... ]     // the company's tools, by slug
+           "tools":  [ <Tool>, ... ],    // the company's tools, by slug
+           "graph":  { version, agent, nodes, edges } | {}
+                     // the selected agent's stored Agent.graph: the graph
+                     // JSON chat runs (model/tools nodes, conditional
+                     // "tools"/"next" edges). {} = no runnable flow. It is
+                     // rewritten whenever a step, a step's tools or a tool
+                     // changes. The canvas does not read it.
          }
        selected_agent_id = the in-scope `agent` param, else the first agent by
        (order, created_at), else null. A stale/foreign `agent` id never 404s;
@@ -378,6 +384,20 @@ Notes on scoping:
            - file attached + no text  -> assistant asks what to do.
            - "add this to the knowledge base" + attachment -> Temporal processing.
            - "what's processing / status of <id>" -> live status report.
+           - selected Agent: the turn runs the agent's flow compiled into a
+             LangGraph graph (each Step = a model node with its tools bound).
+         With header `Accept: text/event-stream` the reply is SSE:
+           data: {"delta": "<text>"}            answer tokens (last step)
+           data: {"trace": {"kind": "tool_call", "step": "...", "tool": "...",
+                            "args": "..."}}
+           data: {"trace": {"kind": "tool_result", "step": "...", "tool": "...",
+                            "ok": true, "preview": "..."}}
+           data: {"trace": {"kind": "step_output", "step": "...", "tool": "<step
+                            name>", "preview": "..."}}  (earlier steps' replies)
+           data: {"done": true, user, assistant, session, selection_consumed}
+           data: {"error": "...", "status": 502}
+         An agent turn's assistant metadata carries source="langgraph",
+         tool_used, tools_used, trace, flow (step slugs) and checkpoint_id.
 7.9  POST /chat/{session_id}/attach/
          Upload a file to a session (stored as a chat attachment, not embedded).
          Body (form-data):

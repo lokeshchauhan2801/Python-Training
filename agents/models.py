@@ -52,7 +52,7 @@ class Tool(BaseModel, SoftDeleteModel):
     def is_prompt_only(self) -> bool:
         """True when no built-in handler has this slug (it runs on its docs)."""
         # Lazy import avoids a module-scope chat<-agents cycle.
-        from chat.services.langgraph_service import available_slugs
+        from chat.agent.tools import available_slugs
 
         return self.slug not in available_slugs()
 
@@ -60,9 +60,10 @@ class Tool(BaseModel, SoftDeleteModel):
 class Agent(BaseModel, SoftDeleteModel):
     """A named, independently-usable chat flow (container).
 
-    An Agent groups an ordered set of Steps (its nodes) into a runnable
-    START -> Step ... -> END pipeline; each Step answers with one of its tools
-    or, with none, a direct LLM call. Multiple live Agents may coexist in a
+    The builder edits an Agent's flow as Steps (START -> Step ... -> END).
+    Every Step change rewrites ``graph``, the flow as LangGraph-style graph
+    JSON (``agents/services/graph_json.py``); chat runs that JSON only and
+    never reads Steps. Multiple live Agents may coexist in a
     company; none is implicitly chosen for chat. An Agent without a company is
     global: every company can use it. A user selects one per
     ConversationSession (or Normal RAG) in the chat header.
@@ -82,6 +83,7 @@ class Agent(BaseModel, SoftDeleteModel):
     )
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
+    graph = models.JSONField(default=dict, blank=True)
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
