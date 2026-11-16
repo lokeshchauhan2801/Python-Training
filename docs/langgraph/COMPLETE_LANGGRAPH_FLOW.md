@@ -17,7 +17,7 @@ Builder (steps)  ──save──►  Agent.graph (JSON in DB)  ──load──
 
 ## 2. The graph JSON (stored in `agents_agent.graph`)
 
-Example for the default `chat_agent` (one step called `main`):
+Example for the default `chat_agent` (one step called `main`; tool list shortened):
 
 ```json
 {
@@ -76,7 +76,7 @@ Step by step:
 6. The answer streams to the chat. Each tool call shows under the answer as **Agent steps**.
 7. The turn is saved with its tools used, the trace and a `checkpoint_id`.
 
-With several steps, they run one after another and the last step's reply is the answer.
+With several steps, they run one after another and the last step's reply is the answer; earlier steps' replies show under **Agent steps**.
 
 ## 4. Memory between messages
 
@@ -98,7 +98,7 @@ With several steps, they run one after another and the last step's reply is the 
 | `general_assistant` | Not a real tool: marks a step that answers directly. |
 | Your own tool | Runs one LLM call using the tool's description. |
 
-Tool descriptions (what the LLM reads to decide) are editable per tool in the builder.
+The LLM decides whether to call a tool or answer directly; it reads each tool's description to choose. Edit descriptions in Django admin (Agents → Tools) or with `PATCH /api/v1/agents/tool/{id}/`; the defaults are in `agents/services/tool_docs.py`.
 
 ## 6. Where the code is
 
