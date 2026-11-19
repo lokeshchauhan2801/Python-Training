@@ -156,3 +156,70 @@ class TemporalProcessingBackend(ProcessingBackend):
             return False
         await handle.cancel()
         return True
+
+    # ------------------------------------------------------------------ #
+    # Generic helpers (chat-only file processing uses its own workflow)
+    # ------------------------------------------------------------------ #
+    def start(self, workflow: str, params: dict, workflow_id: str) -> str:
+        """Start ``workflow`` under ``workflow_id`` on this task queue."""
+        import asyncio
+
+        return asyncio.run(self._start_async(workflow, params, workflow_id))
+
+    async def _start_async(self, workflow: str, params: dict, workflow_id: str) -> str:
+        import temporalio.client as tc
+        from django.conf import settings
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        handle = await client.start_workflow(
+            workflow, params, id=workflow_id, task_queue=self.TASK_QUEUE
+        )
+        return handle.id
+
+    def describe(self, job_id: str) -> dict:
+        """The workflow's status from the Temporal API, plus its ``get_state``
+        query while it is running.
+
+        ``{"reachable": False}`` when Temporal cannot be reached, and
+        ``{"reachable": True, "found": False}`` when no workflow has that id.
+        """
+        import asyncio
+
+        try:
+            return asyncio.run(self._describe_async(job_id))
+        except Exception:
+            return {"reachable": False}
+
+    async def _describe_async(self, job_id: str) -> dict:
+        import temporalio.client as tc
+        from django.conf import settings
+        from temporalio.service import RPCError, RPCStatusCode
+
+        client = await tc.Client.connect(
+            getattr(settings, "TEMPORAL_HOST", "localhost:7233")
+        )
+        handle = client.get_workflow_handle(job_id)
+        try:
+            desc = await handle.describe()
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                return {"reachable": True, "found": False}
+            raise
+        status = desc.status.name if desc.status else "UNKNOWN"
+        state = {}
+        if status == "RUNNING":
+            try:
+                state = await handle.query("get_state")
+            except Exception:  # noqa: BLE001 - a busy worker must not hide the status
+                state = {}
+        return {
+            "reachable": True,
+            "found": True,
+            "status": status,
+            "run_id": desc.run_id,
+            "started": desc.start_time.isoformat() if desc.start_time else None,
+            "closed": desc.close_time.isoformat() if desc.close_time else None,
+            "state": state if isinstance(state, dict) else {},
+        }

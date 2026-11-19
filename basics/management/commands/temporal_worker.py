@@ -31,12 +31,18 @@ class Command(BaseCommand):
             stage_notify_completed_activity,
         )
 
+        from infrastructure.temporal.chat_file_workflow import (
+            CHAT_FILE_ACTIVITIES,
+            ChatFileProcessingWorkflow,
+        )
+
         client = await Client.connect(settings.TEMPORAL_HOST)
         worker = Worker(
             client,
             task_queue="document-processing",
-            workflows=[DocumentProcessingWorkflow],
+            workflows=[DocumentProcessingWorkflow, ChatFileProcessingWorkflow],
             activities=[
+                *CHAT_FILE_ACTIVITIES,
                 stage_mark_processing_activity,
                 stage_extract_text_activity,
                 stage_chunk_text_activity,

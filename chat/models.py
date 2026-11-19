@@ -92,6 +92,10 @@ class Conversation(BaseModel, SoftDeleteModel):
     # (validated ChartData dict) and ``context["citations"]`` (citations list),
     # relocated here from the former ``chart_data``/``citations`` columns.
     context = models.JSONField(default=dict, blank=True)
+    # URL of what is attached to this turn: a chat file's media URL (its
+    # session entry's ``media_url``, e.g. ``/media/unsettled/...``) or a direct
+    # link. The session row holds the file details.
+    media_url = models.URLField(max_length=1000, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
     documents = models.ManyToManyField(
         "documents.Document",

@@ -205,8 +205,8 @@ class ChatService:
         ``session.company`` (the company-match invariant is enforced in
         ``Conversation.save()``). The save is actor-aware so the audit columns
         are stamped from the acting user. Attachments (session file entry ids,
-        when given) are recorded as chips in ``context["attachments"]`` as
-        ``[{"id", "title"}]``; ids not in the session's file lists are skipped.
+        when given) are recorded as the first attached file's URL in
+        ``media_url``; ids not in the session's file lists are skipped.
 
         Chart/citations render-state no longer has its own columns: ``citations``
         and ``chart_data`` are folded into the turn's ``context`` under the
@@ -226,10 +226,6 @@ class ChatService:
         # question/response text, never a turn's raw context dict).
         if chart_data is not None:
             turn_context["chart"] = chart_data
-        # Render-state too: the user bubble's file chips. Never prompt text.
-        chips = session_files.attachment_chips(session, attachment_ids)
-        if chips:
-            turn_context["attachments"] = chips
         turn = Conversation(
             company=session.company,
             session=session,
@@ -238,6 +234,7 @@ class ChatService:
             question=question,
             response=response,
             context=turn_context,
+            media_url=session_files.media_for(session, attachment_ids),
             metadata=metadata or {},
         )
         turn.save(actor=actor or user)
@@ -771,14 +768,13 @@ class ChatService:
             return False
         latest = (
             conversation.turns.order_by("-created_at")
-            .values("context", "metadata")
+            .values("media_url", "metadata")
             .first()
         )
         if latest is None:
             return False
-        context = latest["context"] or {}
         metadata = latest["metadata"] or {}
-        return bool(context.get("attachments")) or (
+        return bool(latest["media_url"]) or (
             metadata.get("tool_used") == "document_search"
         )
 
@@ -796,7 +792,7 @@ class ChatService:
 
         Precedence: THIS turn's ``attachment_ids`` (the current turn is not
         stored yet when this runs), else the latest stored turn's chips
-        (``context["attachments"]``), else every session file newest first.
+        (its ``media_url`` file), else every session file newest first.
         Text comes from ``documents.services.extract_document_text`` (which
         OCRs images via tesseract), capped per file; unreadable files and
         files with no usable text are skipped. The number of files is bounded.
@@ -837,20 +833,32 @@ class ChatService:
             chosen = []
             latest_turn = conversation.turns.order_by("-created_at").first()
             if latest_turn is not None:
-                chips = (latest_turn.context or {}).get("attachments") or []
-                chip_ids = [
-                    str(c.get("id")) for c in chips if isinstance(c, dict)
-                ]
+                chips = session_files.chips_for_media(
+                    conversation, latest_turn.media_url
+                )
+                chip_ids = [c["id"] for c in chips if c["id"]]
                 chosen = _eligible(
                     by_id[i] for i in dict.fromkeys(chip_ids) if i in by_id
                 )
             if not chosen:
                 chosen = _eligible(reversed(files))
 
+        from chat.services import chat_processing
+
         sections = []
         for session_file in chosen[: self._MAX_ATTACHMENT_DOCS]:
+            # A file processed in this chat already has its text (OCR included)
+            # in the session; use it instead of extracting again.
+            stored = (
+                chat_processing.stored_text(conversation, session_file.id)
+                if not session_file.is_csv and session_file.state == "processed"
+                and session_file.destination == chat_processing.DEST_CHAT
+                else ""
+            )
             text = (
-                self._csv_prompt_text(session_file)
+                stored[: self._MAX_ATTACHMENT_CHARS]
+                if stored
+                else self._csv_prompt_text(session_file)
                 if session_file.is_csv
                 else self._cached_chat_file_text(session_file)
             )

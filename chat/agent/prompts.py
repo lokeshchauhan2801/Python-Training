@@ -20,7 +20,19 @@ _TOOL_GUIDANCE = (
     "documents or files, not merely because files exist. When an answer uses "
     "tool results, base it on them and cite passages by their [n] number. "
     "Never put chart data or JSON in your reply; a chart tool shows the chart, "
-    "so reply with a short caption."
+    "so reply with a short caption.\n"
+    "Finish the task in this turn. Do not stop to offer the user options or "
+    "ask which one they want when a reasonable reading of the request exists: "
+    "pick it, do it, and say in one line what you assumed. When a request has "
+    "several parts (for example a chart from a file and figures from the web), "
+    "do every part you can, each with its own tool call. When a part cannot "
+    "be done as asked (two datasets share no field to join on), do the closest "
+    "useful version (chart each one separately) and explain the limit in one "
+    "short sentence, without lecturing. When the web or the documents do not "
+    "have public, well-known figures (a country's GDP, the most polluted "
+    "cities), use your own general knowledge: put \"(general knowledge)\" in "
+    "the chart title and say once that the figures are approximate. Never "
+    "show internal ids, reference ids or URLs of tool results in your reply."
 )
 
 
@@ -44,8 +56,16 @@ def identity_line(llm) -> str:
     )
 
 
-def system_prompt(role: str, llm, has_tools: bool) -> str:
+_FILES_GUIDANCE = (
+    "When the user refers to a file, use the file names listed here; to read "
+    "a file's content, call a tool rather than guessing it."
+)
+
+
+def system_prompt(role: str, llm, has_tools: bool, files_note: str = "") -> str:
     parts = [(role or "").strip(), identity_line(llm), PLAIN_TEXT_GUIDANCE]
     if has_tools:
         parts.append(_TOOL_GUIDANCE)
+    if files_note:
+        parts.append(f"{files_note}\n{_FILES_GUIDANCE}")
     return "\n\n".join(p for p in parts if p)

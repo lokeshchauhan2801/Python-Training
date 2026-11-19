@@ -196,8 +196,12 @@ def web_search(query: str, runtime: ToolRuntime) -> tuple[str, dict]:
     if not _enabled(runtime, "web_search"):
         return NOT_ENABLED, {}
     return (
-        "No live web access is available in this app. Answer from your own "
-        "knowledge and say briefly that it may be out of date.",
+        "No live web results are available. Continue the task with your own "
+        "general knowledge for this query: give your best real figures (and "
+        "chart them with a chart tool if the user asked for a chart, adding "
+        "\"(general knowledge)\" to the title). Do not ask the user for "
+        "permission; mention once, briefly, that the figures are approximate "
+        "and may be out of date.",
         {},
     )
 
@@ -205,7 +209,7 @@ def web_search(query: str, runtime: ToolRuntime) -> tuple[str, dict]:
 # --------------------------------------------------------------------------- #
 # Chat files: knowledge-base processing (Temporal) and status
 # --------------------------------------------------------------------------- #
-def _file_command(runtime, slug, action, file_names):
+def _file_command(runtime, slug, action, file_names, destination=None):
     from chat.services import file_commands
 
     if not _enabled(runtime, slug):
@@ -224,6 +228,7 @@ def _file_command(runtime, slug, action, file_names):
         attachment_ids=list(ctx.attachment_ids),
         entry_ids=entry_ids,
         actor=ctx.user,
+        destination=destination,
     )
     return reply.content, {"metadata": dict(reply.metadata)}
 
@@ -231,17 +236,37 @@ def _file_command(runtime, slug, action, file_names):
 @tool(response_format="content_and_artifact")
 def add_to_knowledge_base(
     runtime: ToolRuntime,
+    destination: Literal["chat", "knowledge_base"],
     action: Literal["process", "stop", "resume", "cancel", "list"] = "process",
     file_names: str = "",
 ) -> tuple[str, dict]:
-    """Process this chat's files into the knowledge base, or manage that processing.
+    """Process this chat's files through Temporal, or stop / resume / cancel that processing.
+
+    "Process this file" means destination "chat": the file is processed and
+    its text stays in this chat only (no Documents entry, no knowledge base).
+    Use "knowledge_base" only when the user explicitly asks to add the file to
+    the company knowledge base or company documents. When the user's wording
+    does not say which (for example "add this file" or "upload it"), ask them
+    before calling this tool. The reply names each file's workflow id.
 
     Args:
-        action: process (add files), stop, resume, cancel, or list the files.
+        destination: chat (process only in this chat) or knowledge_base.
+        action: process, stop, resume, cancel, or list the files.
         file_names: The file names the user mentioned; empty for this turn's
             attachments or the files the user picked.
     """
-    return _file_command(runtime, "add_to_knowledge_base", action, file_names)
+    from chat.services import file_commands
+
+    dest = "kb" if destination == "knowledge_base" else "chat"
+    if action == "process" and dest == "kb":
+        ctx = _context(runtime)
+        if not file_commands.kb_requested(ctx.session, ctx.message_text):
+            # The user did not ask for the knowledge base: never add it there
+            # on the model's guess. Plain "process" stays in the chat; unclear
+            # wording gets the question.
+            said = file_commands.process_destination(ctx.message_text)
+            dest = "chat" if said == "chat" else "ask"
+    return _file_command(runtime, "add_to_knowledge_base", action, file_names, dest)
 
 
 @tool(response_format="content_and_artifact")

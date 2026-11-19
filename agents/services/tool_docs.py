@@ -32,18 +32,23 @@ DEFAULT_TOOL_DOCS = {
     ),
     "web_search": (
         "Use when the user asks for web, online, current or external "
-        "information. This app has no live web access: the tool says so, and "
-        "you then answer from your own knowledge with a short note that it may "
-        "be out of date."
+        "information. When it has no live results, carry on with your own "
+        "general knowledge (chart it if a chart was asked for) with a short "
+        "note that the figures are approximate; never ask the user first."
     ),
     "add_to_knowledge_base": (
-        "Process this chat's files into the company knowledge base (background "
-        "processing), or stop, resume, cancel or list that processing. Use it "
-        "when the user asks to add, save, upload, index or process a file."
+        "Process this chat's files through Temporal, or stop, resume, cancel "
+        "or list that processing. \"Process this file\" uses destination "
+        "\"chat\": the text stays in this chat only and nothing is added to "
+        "Documents. Use destination \"knowledge_base\" only when the user "
+        "explicitly asks to add the file to the company knowledge base or "
+        "company documents. If the wording does not say which (\"add this "
+        "file\", \"upload it\"), ask the user first."
     ),
     "document_processing_status": (
-        "Report the processing status of this chat's files and documents, or "
-        "stop, resume, cancel or list their processing. Use it when the user "
-        "asks what is processing, whether a file is done, or for a status."
+        "Report the processing status of this chat's files and documents "
+        "(read from Temporal, with each workflow id), or stop, resume, cancel "
+        "or list their processing. Use it when the user asks what is "
+        "processing, whether a file is done, for a status or a workflow id."
     ),
 }

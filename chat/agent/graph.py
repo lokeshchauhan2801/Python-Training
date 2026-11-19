@@ -90,7 +90,7 @@ def _model_node(node: dict, index: int, total: int):
         model = ctx.llm._ensure_client()
         if tools:
             model = model.bind_tools(tools)
-        prompt = system_prompt(ctx.role, ctx.llm, bool(tools))
+        prompt = system_prompt(ctx.role, ctx.llm, bool(tools), ctx.files_note)
         if total > 1:
             prompt += f'\n\nYou are running step {index + 1} of {total} ("{name}") of this agent\'s flow.'
             if index > 0:

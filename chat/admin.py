@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
 from django.urls import path
+from django.utils.html import format_html
 
 from basics.admin import BaseModelAdmin
 from basics.llm import LLMBackendError, LLMConfigurationError
@@ -26,8 +27,8 @@ class SessionTurnInline(admin.TabularInline):
     model = Conversation
     fk_name = "session"
     extra = 0
-    fields = ("question", "response", "model_name", "created_at")
-    readonly_fields = ("question", "response", "model_name", "created_at")
+    fields = ("question", "response", "media_url", "model_name", "created_at")
+    readonly_fields = ("question", "response", "media_url", "model_name", "created_at")
     # Newest turn first (most recent at the top).
     ordering = ("-created_at",)
     show_change_link = False
@@ -64,11 +65,11 @@ class ConversationSessionAdmin(BaseModelAdmin):
     # The ULID ``session_id`` is the single session identifier (shown
     # read-only). ``metadata`` is kept read-only for legacy data; it no longer
     # carries a pending file selection. ``context`` (the session's file lists)
-    # is not user-edited and only ``chat.services.session_files`` writes it.
+    # is shown read-only: only ``chat.services.session_files`` writes it.
     # The whole chat shows in the SessionTurnInline at the bottom.
     fieldsets = (
         (None, {"fields": ("session_id", "title", "user", "company")}),
-        ("Content", {"fields": ("summary", "metadata")}),
+        ("Content", {"fields": ("summary", "files_context", "metadata")}),
         (
             "Audit",
             {
@@ -84,7 +85,15 @@ class ConversationSessionAdmin(BaseModelAdmin):
         ),
     )
 
-    readonly_fields = ("session_id", "metadata")
+    readonly_fields = ("session_id", "files_context", "metadata")
+
+    @admin.display(description="Context (files)")
+    def files_context(self, obj):
+        """The session's ``context`` (its file lists) as indented JSON."""
+        return format_html(
+            '<pre style="white-space: pre-wrap; margin: 0;">{}</pre>',
+            json.dumps(obj.context or {}, indent=2, ensure_ascii=False),
+        )
 
     def get_readonly_fields(self, request, obj=None):
         """A session's owner (``user``) and ``company`` are fixed once created.

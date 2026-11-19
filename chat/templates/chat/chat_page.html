@@ -1339,7 +1339,7 @@
           const chip = document.createElement("button");
           chip.type = "button";
           chip.className = "border border-base-200 bg-base-100 cursor-pointer px-2 py-0.5 rounded-full text-xs dark:border-base-700 dark:bg-base-800 chat-ui-chip chat-ui-cite";
-          const label = cite.reference_id || ("[" + (idx + 1) + "]");
+          const label = cite.filename || ("[" + (idx + 1) + "]");
           chip.textContent = label;
           const excerpt = cite.excerpt || cite.filename || "";
           if (excerpt) { chip.title = excerpt; }
@@ -2130,6 +2130,14 @@
             line.appendChild(sizeEl);
           }
 
+          if (r.destination) {
+            const dest = document.createElement("span");
+            dest.className = "shrink-0 text-xs opacity-70 chat-ui-file-dest";
+            dest.textContent = r.destination === "kb" ? "Knowledge base" : "This chat only";
+            if (r.workflow_id) { dest.title = "Workflow " + r.workflow_id; }
+            line.appendChild(dest);
+          }
+
           const status = document.createElement("span");
           status.className = "shrink-0 chat-ui-file-status chat-ui-file-status--" + (r.state || "unknown");
           status.textContent = isPicker && r.state === "processed"
@@ -2174,7 +2182,7 @@
           processBtn = document.createElement("button");
           processBtn.type = "button";
           processBtn.className = "border border-transparent bg-primary-600 cursor-pointer font-medium px-3 py-1 rounded-default text-xs text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50 chat-ui-file-process";
-          processBtn.textContent = "Process";
+          processBtn.textContent = spec.destination === "kb" ? "Add to knowledge base" : "Process";
           processBtn.disabled = true;
           processBtn.addEventListener("click", function () {
             const selectedIds = panel.checkedIds();
@@ -2184,6 +2192,7 @@
             processBtn.disabled = true;
             const body = new URLSearchParams();
             selectedIds.forEach(function (id) { body.append("entry_ids", id); });
+            body.append("destination", spec.destination === "kb" ? "kb" : "chat");
             fetch(panelProcessUrlFor(sid), {
               method: "POST",
               headers: jsonHeaders({

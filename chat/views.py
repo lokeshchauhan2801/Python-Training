@@ -206,16 +206,11 @@ def _turn_payload(turn):
     The synthetic ``<ulid>:u``/``<ulid>:a`` ids are display-only (the client
     never posts a message id back).
 
-    Chips come from ``turn.context["attachments"]``; turns written before
-    that key existed fall back to the ``documents`` M2M.
+    Chips come from ``turn.media_url`` (matched to the session's file
+    entries); older turns without one fall back to the ``documents`` M2M.
     """
-    chips = (turn.context or {}).get("attachments")
-    if isinstance(chips, list):
-        attachments = [
-            {"id": str(chip.get("id", "")), "title": str(chip.get("title", ""))}
-            for chip in chips
-            if isinstance(chip, dict)
-        ]
+    if turn.media_url:
+        attachments = session_files.chips_for_media(turn.session, turn.media_url)
     else:
         attachments = [
             {"id": str(doc.id), "title": doc.title}
@@ -540,8 +535,8 @@ from documents.models import Document
 _EMPTY_ATTACHMENT_REPLY = (
     "I see you've attached {names}. What would you like me to do with it? "
     "I can summarise it, pull out the key points, answer questions about it, "
-    "create a chart from its data, or add it to the company knowledge base so "
-    "it's searchable later — just tell me."
+    "create a chart from its data, process it here in this chat, or add it to "
+    "the company knowledge base so it's searchable later — just tell me."
 )
 
 
@@ -713,7 +708,7 @@ def _reply_empty_attachment(request, session, attachment_ids, *, selection_metad
 
 def _command_turn(
     request, session, question, attachment_ids, *, kind, entry_ids, consumed,
-    selection_metadata=None,
+    selection_metadata=None, destination=None,
 ):
     """Store a deterministic file-command turn (no LLM) and return it."""
     reply = file_commands.handle_file_command(
@@ -723,6 +718,7 @@ def _command_turn(
         attachment_ids=attachment_ids,
         entry_ids=entry_ids,
         actor=request.user,
+        destination=destination,
     )
     turn = _chat_service().create_turn(
         session,
@@ -778,6 +774,7 @@ def _file_command_reply(
 
     # 3. A picker selection with no text, or with a process command.
     if selected and (not question or cmd.kind == Kind.PROCESS):
+        destination = cmd.destination if question else _posted_destination(request)
         if not question:
             titles = [
                 f.title for f in session_files.files_by_ids(session, selected)
@@ -792,7 +789,32 @@ def _file_command_reply(
             entry_ids=selected,
             consumed=True,
             selection_metadata=selection_metadata,
+            destination=destination,
         )
+
+    # 3b. The answer to "process only in this chat, or add to the knowledge
+    #     base?" asked by the previous reply.
+    if question and cmd.kind in (Kind.PROCESS, Kind.NONE):
+        answer = (
+            cmd.destination
+            if cmd.kind == Kind.PROCESS and cmd.destination != file_commands.DEST_ASK
+            else None
+        )
+        short_reply = len(question.split()) <= 8
+        if file_commands.pending_ask(session) is not None and (answer or short_reply):
+            answer = answer or file_commands.answer_destination(question)
+            if answer:
+                return _command_turn(
+                    request,
+                    session,
+                    question,
+                    attachment_ids,
+                    kind=Kind.PROCESS,
+                    entry_ids=None,
+                    consumed=False,
+                    selection_metadata=selection_metadata,
+                    destination=answer,
+                )
 
     # 4. A file attached with no message: ask what to do.
     if not question and attachment_ids:
@@ -821,6 +843,14 @@ def _file_command_reply(
         consumed=bool(entry_ids),
         selection_metadata=selection_metadata,
     )
+
+
+def _posted_destination(request) -> str:
+    """The picker's destination ("chat" or "kb"); chat when not given."""
+    value = (request.POST.get("destination") or "").strip().lower()
+    if value in (file_commands.DEST_KB, file_commands.DEST_CHAT):
+        return value
+    return file_commands.DEST_CHAT
 
 
 def _pipeline_direct_reply(
@@ -1204,8 +1234,14 @@ def panel_process(request, session_id):
     except session_files.UnknownEntry:
         return JsonResponse({"error": "Some selected files are not in this chat."}, status=400)
 
+    destination = _posted_destination(request)
     try:
-        file_commands.process_entries(session, entry_ids, request.user)
+        if destination == file_commands.DEST_KB:
+            file_commands.process_entries(session, entry_ids, request.user)
+        else:
+            file_commands.process_in_chat(
+                session, session_files.files_by_ids(session, entry_ids), request.user
+            )
     except Exception:  # noqa: BLE001 - keep the picker mounted for retry
         logger.exception("Could not process panel files in session %s", session.pk)
         return JsonResponse({"error": file_commands.START_FAILED}, status=502)
@@ -1268,6 +1304,30 @@ def file_action(request, session_id, entry_id, action):
         return _conflict(f"{title} hasn't been processed yet. Select it and press Process.")
     if target.state == "removed":
         return _conflict(f"{title} was removed from Documents.")
+
+    if target.destination == file_commands.DEST_CHAT:
+        # Processed only in this chat: no Document, the run is in the session.
+        from chat.services import chat_processing
+
+        handler = {
+            "stop": chat_processing.pause,
+            "cancel": chat_processing.cancel,
+        }.get(action, chat_processing.resume)
+        try:
+            message = handler(session, entry_id, request.user)
+        except controls.ControlError as exc:
+            return _conflict(exc.message, _one_file(session, entry_id) or target)
+        except Exception:  # noqa: BLE001 - report a retryable failure
+            logger.exception("Chat file %s %s failed in session %s", entry_id, action, session.pk)
+            return JsonResponse(
+                {"ok": False, "error": f"Couldn't {action} {title}. Please try again."},
+                status=502,
+            )
+        current = _one_file(session, entry_id) or target
+        return JsonResponse(
+            {"ok": True, "message": message, "file": session_files.file_row(current)},
+            status=202 if action == "resume" else 200,
+        )
 
     try:
         if action == "stop":

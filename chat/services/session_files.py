@@ -1,9 +1,13 @@
 """Files attached to a chat session, before and after processing.
 
 An attached file is an entry in ``ConversationSession.context``:
-``"unprocessed_docs"`` until its Document is READY, then ``"processed_docs"``.
-No ``Document`` row exists until the user processes the file; the bytes live
-under ``media/unsettled/<session_id>/<entry_id>/`` until then.
+``"unprocessed_docs"`` until it is processed, then ``"processed_docs"``.
+A file processed only in this chat never gets a ``Document``: its run state
+is the entry's ``processing`` dict (``chat_processing``). A ``Document`` row
+exists only once the user adds the file to the knowledge base; the bytes live
+under ``media/unsettled/<session_id>/<entry_id>/``. Each entry carries its
+``media_url``; a turn records the files attached to it as those URLs in
+``Conversation.media_url`` (never in the turn's ``context``).
 
 This module is the only writer of those two context keys. Every write goes
 through ``locked_files``, which locks the session row and replaces only the two
@@ -30,7 +34,7 @@ from django.utils.text import get_valid_filename
 
 from basics.ulid import new_ulid
 from chat.models import ConversationSession
-from chat.services import kb
+from chat.services import chat_processing, kb
 from documents import controls
 from documents.models import Document
 from documents.services import SUPPORTED_FILE_TYPES
@@ -240,6 +244,23 @@ def safe_name(raw_name: str, ext: str) -> str:
     return f"{stem}.{ext}"
 
 
+def media_url_for_key(key: str) -> str:
+    """The site URL a stored file is served at (always rooted with ``/``)."""
+    url = default_storage.url(key)
+    if not url.startswith(("http://", "https://", "/")):
+        url = "/" + url
+    return url
+
+
+def entry_media_url(entry: dict) -> str:
+    """An entry's ``media_url`` (derived from its storage key when missing)."""
+    url = entry.get("media_url")
+    if url:
+        return str(url)
+    key = entry.get("storage_key")
+    return media_url_for_key(key) if key else ""
+
+
 def _delete_quietly(key: str) -> None:
     try:
         default_storage.delete(key)
@@ -271,6 +292,7 @@ def store_upload(session, upload, actor) -> dict:
             "id": entry_id,
             "title": title,
             "storage_key": key,
+            "media_url": media_url_for_key(key),
             "file_type": ext,
             "content_type": str(getattr(upload, "content_type", "") or "")[
                 :_CONTENT_TYPE_MAX
@@ -318,6 +340,27 @@ class SessionFile:
     @property
     def is_csv(self) -> bool:
         return self.file_type == "csv"
+
+    @property
+    def destination(self) -> str:
+        """``"kb"`` (has a Document), ``"chat"`` (chat-only run) or ``""``."""
+        if self.document_id:
+            return chat_processing.DEST_KB
+        if chat_processing.is_chat_run(self.entry):
+            return chat_processing.DEST_CHAT
+        return ""
+
+    @property
+    def workflow_id(self) -> str:
+        """The Temporal workflow id of this file's processing ("" when none)."""
+        if self.document_id:
+            document = self.document
+            if document is not None and document.processing_backend == "temporal":
+                return kb.workflow_id_for(document.pk)
+            return ""
+        if chat_processing.is_chat_run(self.entry):
+            return chat_processing.workflow_id_for(self.id)
+        return ""
 
     @property
     def state(self) -> str:
@@ -430,14 +473,98 @@ def files_by_ids(session, ids) -> list[SessionFile]:
 
 
 def attachment_chips(session, ids) -> list[dict]:
-    """``[{"id", "title"}]`` for the known ids, in order (unknown ids skipped)."""
+    """``[{"id", "title", "url"}]`` for the known ids, in order (unknown skipped)."""
     state = FilesState.from_context(getattr(session, "context", None))
     chips = []
     for entry_id in _dedupe(str(i) for i in (ids or [])):
         found = state.find(entry_id)
         if found is not None:
-            chips.append({"id": entry_id, "title": str(found[1].get("title") or "")})
+            entry = found[1]
+            chips.append(
+                {
+                    "id": entry_id,
+                    "title": str(entry.get("title") or ""),
+                    "url": entry_media_url(entry),
+                }
+            )
     return chips
+
+
+def media_for(session, ids) -> str:
+    """``media_url`` of the first known attachment id, for ``Conversation.media_url``.
+
+    ``""`` when nothing known was attached.
+    """
+    state = FilesState.from_context(getattr(session, "context", None))
+    for entry_id in _dedupe(str(i) for i in (ids or [])):
+        found = state.find(entry_id)
+        if found is not None:
+            url = entry_media_url(found[1])
+            if url:
+                return url
+    return ""
+
+
+def chips_for_media(session, url) -> list[dict]:
+    """``[{"id", "title", "url"}]`` for a turn's ``media_url``.
+
+    A URL that is one of this session's files maps to that entry; any other
+    URL (a direct link) keeps an empty id and is titled by its last segment.
+    """
+    url = str(url or "")
+    if not url:
+        return []
+    state = FilesState.from_context(getattr(session, "context", None))
+    for entry in state.all_entries():
+        if entry_media_url(entry) == url:
+            return [
+                {
+                    "id": str(entry.get("id") or ""),
+                    "title": str(entry.get("title") or ""),
+                    "url": url,
+                }
+            ]
+    return [{"id": "", "title": url.rstrip("/").rsplit("/", 1)[-1] or url, "url": url}]
+
+
+def files_overview(session, attachment_ids=None) -> str:
+    """This chat's files as prompt text, one line each, read from the session row.
+
+    Lists title, type, state and media URL, and marks the files attached to
+    the current message, so the model knows which files exist and which one
+    the user means without a tool call.
+    """
+    state = FilesState.from_context(getattr(session, "context", None))
+    attached = {str(i) for i in (attachment_ids or [])}
+    lines = []
+    for list_name, entries in (
+        (PROCESSED_KEY, state.processed),
+        (UNPROCESSED_KEY, state.unprocessed),
+    ):
+        for entry in entries:
+            if entry.get("document_id"):
+                status = (
+                    "in the company knowledge base"
+                    if list_name == PROCESSED_KEY
+                    else "being added to the company knowledge base"
+                )
+            elif chat_processing.is_chat_run(entry):
+                status = "processed in this chat only" if list_name == PROCESSED_KEY else (
+                    f"{chat_processing.entry_state(entry)} (this chat only)"
+                )
+            else:
+                status = "not processed"
+            mark = " [attached to this message]" if str(entry.get("id")) in attached else ""
+            lines.append(
+                f"- {entry.get('title') or ''} ({entry.get('file_type') or ''}, "
+                f"{status}) {entry_media_url(entry)}{mark}"
+            )
+            summary = str(entry.get("summary") or "").strip()
+            if summary and not entry.get("document_id"):
+                lines.append(f"  Summary: {summary[:1500]}")
+    if not lines:
+        return ""
+    return "Files in this chat:\n" + "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -446,9 +573,13 @@ def attachment_chips(session, ids) -> list[dict]:
 
 
 def derive_state(entry, document) -> str:
-    """The file's state from its entry and live Document (design G.3)."""
+    """The file's state from its entry and live Document (design G.3).
+
+    A file processed only in this chat has no Document: its state comes from
+    the entry's ``processing`` dict (``chat_processing``).
+    """
     if not entry.get("document_id"):
-        return "not_started"
+        return chat_processing.entry_state(entry)
     if document is None or getattr(document, "is_deleted", False):
         return "removed"
     status = document.status
@@ -500,13 +631,22 @@ def file_row(session_file: SessionFile) -> dict:
     progress = 0
     error = ""
     hint = ""
-    if document is not None and state in (_IN_FLIGHT | {"paused", "stopped", "failed"}):
-        stage = controls.current_stage(document)
-    if document is not None and state != "removed":
-        progress = document.processing_progress_display
-    if state == "failed":
-        error = (document.processing_error or "").strip()[:200]
-        hint = FAILED_HINT
+    chat_run = chat_processing.is_chat_run(entry)
+    if chat_run:
+        proc = chat_processing.processing(entry)
+        stage = chat_processing.stage_label(entry)
+        progress = 100 if state == "processed" else int(proc.get("progress") or 0)
+        if state == "failed":
+            error = str(proc.get("error") or "").strip()[:200]
+            hint = FAILED_HINT
+    else:
+        if document is not None and state in (_IN_FLIGHT | {"paused", "stopped", "failed"}):
+            stage = controls.current_stage(document)
+        if document is not None and state != "removed":
+            progress = document.processing_progress_display
+        if state == "failed":
+            error = (document.processing_error or "").strip()[:200]
+            hint = FAILED_HINT
     if state in _IN_FLIGHT:
         actions = ["stop"]
     elif state in ("paused", "stopped", "failed"):
@@ -535,10 +675,13 @@ def file_row(session_file: SessionFile) -> dict:
         "actions": actions,
         "terminal": state not in _IN_FLIGHT,
         "document_id": session_file.document_id,
+        # "chat": processed only in this chat; "kb": in the knowledge base.
+        "destination": session_file.destination,
+        "workflow_id": session_file.workflow_id,
         # Staff-only proxy link; the page shows it only to staff users.
         "temporal_url": (
-            kb.temporal_ui_url(kb.workflow_id_for(document.pk))
-            if document is not None and document.processing_backend == "temporal"
+            kb.temporal_ui_url(session_file.workflow_id)
+            if session_file.workflow_id
             else ""
         ),
     }
@@ -563,6 +706,10 @@ def _moves(state: FilesState, documents: dict) -> list:
     for entry in state.processed:
         doc = documents.get(str(entry.get("document_id") or ""))
         if doc is not None and doc.status != Document.STATUS_READY:
+            moves.append(("unprocessed", entry["id"]))
+        elif chat_processing.is_chat_run(entry) and (
+            chat_processing.entry_state(entry) != "processed"
+        ):
             moves.append(("unprocessed", entry["id"]))
     return moves
 

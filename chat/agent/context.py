@@ -15,6 +15,8 @@ class AgentContext:
     agent: object
     llm: object  # basics.llm.LLMClient built from the agent's config
     role: str = ""
+    # This chat's files (one line each, from the session row) for the prompt.
+    files_note: str = ""
     message_text: str = ""
     attachment_ids: list = field(default_factory=list)
     # Picker selection (validated SessionFile entry ids) for a process request.

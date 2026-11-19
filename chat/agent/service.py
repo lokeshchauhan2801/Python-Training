@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 from chat.agent.context import AgentContext
 from chat.agent.tools import enabled_tool_rows
+from chat.services import session_files
 from chat.services.agent_capabilities import SUMMARY_RE
 from chat.services.plain_text import normalize_llm_response
 from chat.services.timing import timed, with_timing
@@ -118,6 +119,7 @@ class AgentChatService:
             agent=self._agent,
             llm=llm,
             role=role,
+            files_note=session_files.files_overview(conversation, attachment_ids),
             message_text=message_text or "",
             attachment_ids=list(attachment_ids or []),
             selected_entry_ids=list(selected_entry_ids or []),
@@ -328,7 +330,13 @@ class AgentChatService:
 
         citations, chart, tool_metadata, summary = [], None, {}, False
         for artifact in artifacts:
-            citations.extend(artifact.get("citations") or [])
+            # Keep only the passages the answer cites by their [n] number, so
+            # a search the answer did not use adds no source chips.
+            citations.extend(
+                cite
+                for n, cite in enumerate(artifact.get("citations") or [], start=1)
+                if f"[{n}]" in content
+            )
             chart = artifact.get("chart") or chart
             tool_metadata.update(artifact.get("metadata") or {})
             summary = summary or bool(artifact.get("summary"))
