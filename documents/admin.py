@@ -281,6 +281,8 @@ class DocumentAdmin(BaseModelAdmin):
             (
                 (str(obj.pk), value, label)
                 for value, label in _SCHEDULE_CHOICES
+                # A chat-started Temporal document stays on Temporal.
+                if not obj.is_chat_managed or value == "temporal"
             ),
         )
 
@@ -774,6 +776,21 @@ class DocumentAdmin(BaseModelAdmin):
                 {"detail": "Pick a valid option (now, celery, kafka, temporal)."},
                 status=400,
             )
+
+        if document.is_chat_managed and choice != "temporal":
+            return JsonResponse(
+                {"detail": Document.CHAT_MANAGED_MESSAGE}, status=409
+            )
+
+        # A paused/running Temporal run stays open under ``doc-<id>``: close it
+        # so it can neither block the new run's start nor resume over it later.
+        if document.processing_backend == "temporal" and document.status in (
+            Document.STATUS_QUEUED,
+            Document.STATUS_PROCESSING,
+            Document.STATUS_PAUSED,
+            Document.STATUS_FAILED,
+        ):
+            TemporalProcessingBackend().terminate(f"doc-{document.pk}")
 
         # No reprocess restriction: a document in ANY state (including an
         # already-processed ready document with chunks) may be reprocessed

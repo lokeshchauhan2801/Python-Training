@@ -44,6 +44,11 @@ class DocumentViewSet(ScopedModelViewSet):
                 {"detail": "Only library documents can be processed."},
                 status=status.HTTP_409_CONFLICT,
             )
+        if document.is_chat_managed:
+            return Response(
+                {"detail": Document.CHAT_MANAGED_MESSAGE},
+                status=status.HTTP_409_CONFLICT,
+            )
         try:
             process_document(document)
         except (DocumentValidationError, DocumentIndexError):

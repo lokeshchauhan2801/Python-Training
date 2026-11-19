@@ -104,6 +104,24 @@ class Document(BaseModel, SoftDeleteModel):
                 "A library document needs a file upload or a media URL."
             )
 
+    CHAT_MANAGED_MESSAGE = (
+        "This document was started from chat via Temporal, so it can only be "
+        "processed through Temporal."
+    )
+
+    @property
+    def is_chat_managed(self) -> bool:
+        """Started from a chat through Temporal: Temporal is its only medium.
+
+        A Cancel in chat makes the row UPLOADED again (no run, no work left),
+        so from there the documents page may process it like any other file.
+        """
+        return (
+            self.session_id is not None
+            and self.processing_backend == "temporal"
+            and self.status != self.STATUS_UPLOADED
+        )
+
     @property
     def processing_duration_display(self) -> str:
         """Human-readable "time taken to convert" (e.g. "1.8 s", "420 ms")."""
