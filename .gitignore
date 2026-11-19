@@ -27,3 +27,5 @@ build/
 *.swp
 *.swo
 *~
+# LangGraph dev server local state
+.langgraph_api/
