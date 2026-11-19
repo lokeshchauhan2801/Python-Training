@@ -111,6 +111,7 @@ class AgentSerializer(
             "config",
             "company",
             "graph",
+            "layout",
             "created_at",
             "updated_at",
             "created_by",
@@ -154,6 +155,21 @@ class AgentSerializer(
                     {"slug": "an agent with this slug already exists"}
                 )
         return attrs
+
+    def validate_layout(self, value):
+        """``{"start"|"end": {"x": number, "y": number}}``; merged over the stored one."""
+        if not isinstance(value, dict) or set(value) - {"start", "end"}:
+            raise serializers.ValidationError('expected {"start": {x, y}, "end": {x, y}}')
+        for key, point in value.items():
+            if not (
+                isinstance(point, dict)
+                and set(point) == {"x", "y"}
+                and all(isinstance(point[k], (int, float)) and not isinstance(point[k], bool) for k in ("x", "y"))
+            ):
+                raise serializers.ValidationError({key: "expected {x: number, y: number}"})
+        base = dict(self.instance.layout or {}) if self.instance is not None else {}
+        base.update(value)
+        return base
 
     def validate_config(self, value):
         from agents.services import agent_config
@@ -358,3 +374,52 @@ class StepSerializer(
                     {"slug": "a step with this slug already exists for the agent"}
                 )
         return attrs
+
+    # The flow is one straight line: START -> step -> ... -> END. So an agent
+    # has at most one entry step and one final step, and a new step is added
+    # after the current last one.
+    @staticmethod
+    def _flow_tail(agent):
+        from agents.services.graph_json import step_dicts, walk_chain
+
+        chain = walk_chain(step_dicts(Step.objects.filter(agent=agent).prefetch_related("tools")))
+        return Step.objects.filter(pk=chain[-1]["pk"]).first() if chain else None
+
+    @staticmethod
+    def _claim_flags(agent, attrs, exclude_pk=None):
+        """Only one step may be the entry and one the final step."""
+        others = Step.objects.filter(agent=agent)
+        if exclude_pk is not None:
+            others = others.exclude(pk=exclude_pk)
+        if attrs.get("connected_from_start"):
+            others.filter(connected_from_start=True).update(connected_from_start=False)
+        if attrs.get("connected_to_end"):
+            others.filter(connected_to_end=True).update(connected_to_end=False)
+
+    def create(self, validated_data):
+        agent = validated_data["agent"]
+        wired = (
+            validated_data.get("connected_from_start")
+            or validated_data.get("connected_to_end")
+            or validated_data.get("next_step") is not None
+        )
+        with transaction.atomic():
+            tail = None
+            if not wired:
+                # Not wired by the caller: append it to the flow.
+                tail = self._flow_tail(agent)
+                if tail is None and not Step.objects.filter(agent=agent).exists():
+                    validated_data["connected_from_start"] = True
+                validated_data["connected_to_end"] = True
+            self._claim_flags(agent, validated_data)
+            step = super().create(validated_data)
+            if tail is not None:
+                tail.next_step = step
+                tail.connected_to_end = False
+                tail.save(update_fields=["next_step", "connected_to_end", "updated_at"])
+        return step
+
+    def update(self, instance, validated_data):
+        with transaction.atomic():
+            self._claim_flags(instance.agent, validated_data, exclude_pk=instance.pk)
+            return super().update(instance, validated_data)

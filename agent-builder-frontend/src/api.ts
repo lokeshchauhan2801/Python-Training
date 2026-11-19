@@ -38,6 +38,12 @@ export interface ConfigOptions {
 }
 
 /** A flow CONTAINER. Its ordered Steps are the canvas nodes. */
+/** Where the canvas draws START and END (canvas-only; the runtime ignores it). */
+export interface AgentLayout {
+  start?: { x: number; y: number };
+  end?: { x: number; y: number };
+}
+
 export interface Agent {
   id: string; // ULID string
   slug: string;
@@ -45,6 +51,7 @@ export interface Agent {
   prompt: string; // the agent's role + tasks; stored in Langfuse, leads every step's prompt
   config: AgentConfig; // model, temperature, max tokens, retrieval; stored in Langfuse
   company: string | number | null; // null = global: every company can use it
+  layout?: AgentLayout;
   created_at: string;
   updated_at: string;
   created_by: string | number | null;

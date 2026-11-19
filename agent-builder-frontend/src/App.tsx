@@ -15,6 +15,7 @@ import {
   api,
   Agent,
   AgentConfig,
+  AgentLayout,
   AvailableFunction,
   ConfigOptions,
   Step,
@@ -84,7 +85,6 @@ function anchorNode(id: string, label: string, x: number, y: number, cls: string
     sourcePosition: Position.Right,
     targetPosition: Position.Left,
     className: `ab-node ${cls}`,
-    draggable: false,
   };
 }
 
@@ -120,16 +120,34 @@ export default function App() {
     setTimeout(() => setSuccessMessage(""), 3000);
   }, []);
 
-  // Rebuild the React Flow canvas (step nodes + synthetic START/END anchors +
-  // derived edges) from the selected agent's steps.
+  // Drag state: the latest unsaved position per node, its debounce timer, and
+  // the position saves still in flight (a reload waits for them, so it never
+  // reads a position older than the one on screen).
+  const posTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const posLatest = React.useRef<Record<string, { x: number; y: number }>>({});
+  const pendingSaves = React.useRef<Set<Promise<unknown>>>(new Set());
+  const flushRef = React.useRef<(id: string) => Promise<unknown>>(() => Promise.resolve());
+  const track = useCallback((p: Promise<unknown>) => {
+    pendingSaves.current.add(p);
+    void p.finally(() => pendingSaves.current.delete(p));
+    return p;
+  }, []);
+
+  // Rebuild the React Flow canvas (step nodes + START/END anchors + derived
+  // edges) from the selected agent's steps and its saved START/END layout.
   const renderFlow = useCallback(
-    (flowSteps: Step[], flowTools: Tool[]) => {
+    (flowSteps: Step[], flowTools: Tool[], layout?: AgentLayout | null) => {
       const names: Record<string, string> = {};
       flowTools.forEach((t) => {
         names[String(t.id)] = t.name || t.slug;
       });
 
-      const stepNodes = flowSteps.map((s) => toStepNode(s, names));
+      // A node still being dragged or saved keeps its on-screen position.
+      const stepNodes = flowSteps.map((s) => {
+        const node = toStepNode(s, names);
+        const local = posLatest.current[node.id];
+        return local ? { ...node, position: { ...local } } : node;
+      });
 
       // Place the START/END anchors relative to the spread of step nodes so
       // every node (including unwired, freshly created ones) is on screen.
@@ -139,10 +157,20 @@ export default function App() {
       const maxX = xs.length ? Math.max(...xs) : 300;
       const midY = ys.length ? ys.reduce((s, y) => s + y, 0) / ys.length : 200;
 
+      const startAt = posLatest.current[START_ID] || layout?.start;
+      const endAt = posLatest.current[END_ID] || layout?.end;
       const canvasNodes: CanvasNode[] = [
-        anchorNode(START_ID, "START", minX - 240, midY, "ab-node-start"),
+        anchorNode(
+          START_ID, "START",
+          startAt?.x ?? minX - 240, startAt?.y ?? midY,
+          "ab-node-start"
+        ),
         ...stepNodes,
-        anchorNode(END_ID, "END", maxX + 240, midY, "ab-node-end"),
+        anchorNode(
+          END_ID, "END",
+          endAt?.x ?? maxX + 240, endAt?.y ?? midY,
+          "ab-node-end"
+        ),
       ];
 
       // Edges are derived from EVERY step's flags/next_step (scoped to the one
@@ -184,6 +212,15 @@ export default function App() {
   // Fetch the full bootstrap and render the selected agent's steps.
   const refresh = useCallback(
     async (agentId?: string | null) => {
+      // Flush pending drags, then wait for every position save to land.
+      Object.keys(posTimers.current).forEach((id) => {
+        clearTimeout(posTimers.current[id]);
+        delete posTimers.current[id];
+      });
+      await Promise.allSettled([
+        ...Object.keys(posLatest.current).map((id) => flushRef.current(id)),
+        ...pendingSaves.current,
+      ]);
       const payload = await api.loadFlow(company, agentId || undefined);
       const allAgents = payload.agents || [];
       const flowTools = payload.tools || [];
@@ -194,7 +231,8 @@ export default function App() {
       setConfigDefaults(payload.config_defaults || null);
       setConfigOptions(payload.config_options || null);
       setSelectedAgentId(payload.selected_agent_id);
-      renderFlow(flowSteps, flowTools);
+      const selected = allAgents.find((a) => String(a.id) === String(payload.selected_agent_id));
+      renderFlow(flowSteps, flowTools, selected?.layout);
     },
     [company, renderFlow]
   );
@@ -339,34 +377,50 @@ export default function App() {
   // moves and PATCH its position ~1s after the last movement. flushPosition
   // updates the LOCAL steps state immediately so a subsequent renderFlow()
   // keeps the dragged position (the position-reset fix).
-  const posTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const posLatest = React.useRef<Record<string, { x: number; y: number }>>({});
   const POSITION_DEBOUNCE_MS = 1000;
 
+  // Save a node's latest dragged position: a step's own position_x/y, or
+  // START/END in the agent's layout. The local position is kept until the
+  // save lands, so a reload in between cannot snap the node back.
   const flushPosition = useCallback(
-    async (id: string) => {
+    (id: string): Promise<unknown> => {
       const pos = posLatest.current[id];
-      if (!pos) return;
-      delete posLatest.current[id];
-      setSteps((prev) =>
-        prev.map((s) =>
-          String(s.id) === id
-            ? { ...s, position_x: pos.x, position_y: pos.y }
-            : s
-        )
-      );
-      try {
-        await api.updateStep(id, { position_x: pos.x, position_y: pos.y });
-      } catch (e) {
-        showError(e);
+      if (!pos) return Promise.resolve();
+      const done = () => {
+        if (posLatest.current[id] === pos) delete posLatest.current[id];
+      };
+      let save: Promise<unknown>;
+      if (id === START_ID || id === END_ID) {
+        if (!selectedAgentId) return Promise.resolve(done());
+        const key = id === START_ID ? "start" : "end";
+        const point = { x: pos.x, y: pos.y };
+        setAgents((prev) =>
+          prev.map((a) =>
+            String(a.id) === selectedAgentId
+              ? { ...a, layout: { ...(a.layout || {}), [key]: point } }
+              : a
+          )
+        );
+        save = api.updateAgent(selectedAgentId, { layout: { [key]: point } });
+      } else {
+        setSteps((prev) =>
+          prev.map((s) =>
+            String(s.id) === id ? { ...s, position_x: pos.x, position_y: pos.y } : s
+          )
+        );
+        save = api.updateStep(id, { position_x: pos.x, position_y: pos.y });
       }
+      return track(save.then(done, (e) => {
+        done();
+        showError(e);
+      }));
     },
-    [showError]
+    [selectedAgentId, showError, track]
   );
+  flushRef.current = flushPosition;
 
   const schedulePosition = useCallback(
     (node: CanvasNode) => {
-      if (node.id === START_ID || node.id === END_ID) return;
       const id = node.id;
       posLatest.current[id] = { x: node.position.x, y: node.position.y };
       if (posTimers.current[id]) clearTimeout(posTimers.current[id]);
@@ -381,7 +435,6 @@ export default function App() {
   // On drag stop, flush immediately (cancel the pending debounce).
   const persistPosition = useCallback(
     (node: CanvasNode) => {
-      if (node.id === START_ID || node.id === END_ID) return;
       const id = node.id;
       posLatest.current[id] = { x: node.position.x, y: node.position.y };
       if (posTimers.current[id]) {
@@ -1235,8 +1288,6 @@ function CreateStepDialog({
   const [slug, setSlug] = useState<string>(`step-${Date.now().toString(36)}`);
   const [slugEdited, setSlugEdited] = useState<boolean>(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [fromStart, setFromStart] = useState<boolean>(false);
-  const [toEnd, setToEnd] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string>("");
 
   const onNameChange = (value: string) => {
@@ -1275,8 +1326,9 @@ function CreateStepDialog({
       name: name.trim(),
       slug: finalSlug,
       tools: Array.from(picked),
-      connected_from_start: fromStart,
-      connected_to_end: toEnd,
+      // Left unwired: the server adds the step after the flow's last step.
+      connected_from_start: false,
+      connected_to_end: false,
     });
   };
 
@@ -1314,26 +1366,6 @@ function CreateStepDialog({
             placeholder="e.g. research"
           />
         </label>
-
-        <div className="ab-section-title" style={{ marginTop: "8px" }}>
-          Flow position
-        </div>
-        <div className="ab-tool-row">
-          <input
-            type="checkbox"
-            checked={fromStart}
-            onChange={(e) => setFromStart(e.target.checked)}
-          />
-          <span>Connected from START (entry)</span>
-        </div>
-        <div className="ab-tool-row">
-          <input
-            type="checkbox"
-            checked={toEnd}
-            onChange={(e) => setToEnd(e.target.checked)}
-          />
-          <span>Connected to END (final)</span>
-        </div>
 
         <div className="ab-section-title" style={{ marginTop: "8px" }}>
           Tools (optional)

@@ -84,6 +84,9 @@ class Agent(BaseModel, SoftDeleteModel):
     slug = models.CharField(max_length=64)
     name = models.CharField(max_length=120, blank=True)
     graph = models.JSONField(default=dict, blank=True)
+    # Canvas-only: where the builder draws START and END,
+    # ``{"start": {"x": .., "y": ..}, "end": {"x": .., "y": ..}}``.
+    layout = models.JSONField(default=dict, blank=True)
 
     objects = SoftDeleteManager()
     all_objects = AllObjectsManager()
