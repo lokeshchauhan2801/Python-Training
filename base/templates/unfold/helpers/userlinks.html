@@ -33,7 +33,7 @@ It also adds the "Temporal workflows" link (/temporal/, the staff-only proxy).
     {% endif %}
 
     {% if request.user.is_active and request.user.is_staff %}
-        <a href="/temporal/" target="_blank" rel="noopener"
+        <a href="http://localhost:8080/" target="_blank" rel="noopener"
            class="font-medium text-sm text-primary-600 hover:underline dark:text-primary-500">
             {% translate 'Temporal workflows' %}
         </a>

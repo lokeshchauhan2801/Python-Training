@@ -112,18 +112,18 @@ services:
       - keycloak-data:/opt/keycloak/data
 
   temporal-ui-sso:
-    # Opened directly by the browser; Temporal UI's own OIDC login (Keycloak).
-    # Used by documents admin workflow links. Chat keeps the proxy + gate.
+    # The one Temporal UI for chat and documents workflow links, opened
+    # directly at http://localhost:8080. Login is off for now
+    # (TEMPORAL_AUTH_ENABLED); set it to "true" to require Keycloak again.
     image: temporalio/ui:2.34.0
     restart: unless-stopped
     depends_on:
       - temporal
-      - keycloak
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_AUTH_ENABLED: "true"
+      TEMPORAL_AUTH_ENABLED: "false"
       TEMPORAL_AUTH_PROVIDER_URL: http://keycloak:8180/realms/agentic-flow
       TEMPORAL_AUTH_CLIENT_ID: temporal-ui
       TEMPORAL_AUTH_CLIENT_SECRET: ${TEMPORAL_UI_CLIENT_SECRET:?set TEMPORAL_UI_CLIENT_SECRET in .env}

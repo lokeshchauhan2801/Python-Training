@@ -77,12 +77,8 @@ def temporal_ui_url(workflow_id: str) -> str:
     reachable directly. The default namespace is ``default``; the workflows
     view accepts the workflow id path segment.
     """
-    from django.conf import settings
-
-    base = (getattr(settings, "TEMPORAL_UI_PUBLIC_PATH", "") or "").rstrip("/")
-    if not base:
-        return ""
-    return f"{base}/namespaces/default/workflows/{workflow_id}"
+    # For now chat uses the same (login-free) UI as the documents admin.
+    return temporal_sso_ui_url(workflow_id)
 
 
 def temporal_sso_ui_url(workflow_id: str) -> str:

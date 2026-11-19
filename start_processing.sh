@@ -146,20 +146,16 @@ wait_for_keycloak() {
   return 1
 }
 
-ensure_keycloak_host
-
-"${COMPOSE[@]}" up -d kafka temporal-postgresql temporal \
-  temporal-ui temporal-ui-gate keycloak temporal-ui-sso
+# Temporal UI login (Keycloak) is off for now: one UI, no keycloak service.
+# To bring it back, add keycloak (and ensure_keycloak_host/wait_for_keycloak).
+"${COMPOSE[@]}" up -d kafka temporal-postgresql temporal temporal-ui-sso
 wait_for_service_health kafka
 wait_for_service_health temporal-postgresql
 wait_for_temporal_port
-wait_for_keycloak
 start_worker kafka_worker
 start_worker temporal_worker
 
 printf '\nKafka:       localhost:9093\n'
 printf 'Temporal:    localhost:7234\n'
-printf 'Temporal UI: http://localhost:8000/temporal/ (chat links; Django staff)\n'
-printf 'Temporal UI: http://localhost:8080/ (documents admin links; Keycloak login)\n'
-printf 'Keycloak:    http://keycloak:8180/ (realm agentic-flow)\n'
+printf 'Temporal UI: http://localhost:8080/ (chat and documents links; no login)\n'
 printf 'Worker logs: %s\n' "$STATE_DIR"
