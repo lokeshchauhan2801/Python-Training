@@ -88,6 +88,29 @@ function anchorNode(id: string, label: string, x: number, y: number, cls: string
   };
 }
 
+// The selected agent survives a page reload: the canvas is an iframe whose
+// src never carries it, so it is kept per company in this browser. A stale id
+// is harmless: the server falls back to its default agent.
+function agentStorageKey(company: string | null | undefined): string {
+  return `agentBuilder.selectedAgent.${company || "global"}`;
+}
+
+function rememberedAgent(company: string | null | undefined): string | null {
+  try {
+    return window.localStorage.getItem(agentStorageKey(company));
+  } catch {
+    return null;
+  }
+}
+
+function rememberAgent(company: string | null | undefined, agentId: string | null): void {
+  try {
+    if (agentId) window.localStorage.setItem(agentStorageKey(company), String(agentId));
+  } catch {
+    /* storage blocked: the default agent loads next time */
+  }
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -231,6 +254,7 @@ export default function App() {
       setConfigDefaults(payload.config_defaults || null);
       setConfigOptions(payload.config_options || null);
       setSelectedAgentId(payload.selected_agent_id);
+      rememberAgent(company, payload.selected_agent_id);
       const selected = allAgents.find((a) => String(a.id) === String(payload.selected_agent_id));
       renderFlow(flowSteps, flowTools, selected?.layout);
     },
@@ -241,7 +265,8 @@ export default function App() {
     (async () => {
       try {
         setLoading(true);
-        await refresh();
+        // Reopen the agent picked last time (the page reload resets the iframe).
+        await refresh(rememberedAgent(company));
       } catch (e) {
         showError(e);
       } finally {
