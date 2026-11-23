@@ -1,10 +1,10 @@
 """Pick which service answers a chat message.
 
-The send URL names the agent:
+The send URL names the agent by its route (``Agent.route``, saved per agent):
 
-* ``POST /chat/<session>/send/``              -> no agent: ``ChatService`` (normal RAG)
-* ``POST /chat/<session>/send/<agent_slug>/`` -> that Agent: ``AgentChatService``
-  (its LangGraph graph from ``Agent.graph``)
+* ``POST /chat/<session>/send/``         -> no agent: ``ChatService`` (normal RAG)
+* ``POST /chat/<session>/send/<route>/`` -> the Agent with that route:
+  ``AgentChatService`` (its LangGraph graph from ``Agent.graph``)
 
 ``ChatService`` (``chat_service.py``) is the one chat service. The agent
 runtime (``agent/``) sits on top of it and uses it to save turns and for RAG.
@@ -22,17 +22,17 @@ logger = logging.getLogger(__name__)
 NORMAL_RAG = "normal-rag"
 
 
-def find_agent(company, slug):
-    """The Agent called ``slug`` for ``company``, or ``None``.
+def find_agent(company, route):
+    """The Agent whose ``route`` is ``route`` for ``company``, or ``None``.
 
-    A company's own Agent wins over a global one (no company) with the same slug.
+    A company's own Agent wins over a global one (no company) with the same route.
     """
     from agents.models import Agent
 
-    if not slug:
+    if not route:
         return None
     return (
-        Agent.objects.filter(Q(company=company) | Q(company__isnull=True), slug=slug)
+        Agent.objects.filter(Q(company=company) | Q(company__isnull=True), route=route)
         .order_by("company_id", "created_at")  # NULLs (global) sort last
         .first()
     )
@@ -62,5 +62,5 @@ def service_for(agent=None, llm_client=None):
             agent=agent,
         )
     except Exception as exc:
-        logger.exception("Could not build the runtime for agent %s", agent.slug)
+        logger.exception("Could not build the runtime for agent %s", agent.route)
         raise ChatProviderError("The selected agent runtime could not be constructed.") from exc

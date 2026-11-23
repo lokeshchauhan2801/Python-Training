@@ -292,6 +292,7 @@ export default function App() {
     async (values: {
       name: string;
       slug: string;
+      route: string;
       prompt: string;
       global: boolean;
       config: AgentConfig;
@@ -301,6 +302,7 @@ export default function App() {
       try {
         const created = await api.createAgent({
           slug: values.slug,
+          route: values.route,
           name: values.name,
           prompt: values.prompt,
           config: values.config,
@@ -327,6 +329,22 @@ export default function App() {
         await api.updateAgent(agentId, { prompt: prompt.trim() });
         await refresh(selectedAgentId);
         showSuccess("Role saved to Langfuse");
+        return true;
+      } catch (e) {
+        showError(e);
+        return false;
+      }
+    },
+    [refresh, selectedAgentId, showError, showSuccess]
+  );
+
+  // Save the agent's chat route (/chat/<session>/send/<route>/).
+  const saveAgentRoute = useCallback(
+    async (agentId: string, route: string) => {
+      try {
+        await api.updateAgent(agentId, { route: route.trim() });
+        await refresh(selectedAgentId);
+        showSuccess("Route saved");
         return true;
       } catch (e) {
         showError(e);
@@ -724,6 +742,14 @@ export default function App() {
         </div>
 
         {selectedAgent && (
+          <RouteEditor
+            key={`agent-route-${selectedAgent.id}-${selectedAgent.route}`}
+            value={selectedAgent.route || ""}
+            onSave={(route) => saveAgentRoute(String(selectedAgent.id), route)}
+          />
+        )}
+
+        {selectedAgent && (
           <RoleEditor
             key={`agent-role-${selectedAgent.id}-${selectedAgent.prompt}`}
             value={selectedAgent.prompt || ""}
@@ -771,6 +797,7 @@ export default function App() {
           options={configOptions}
           busy={busy}
           existingSlugs={agents.map((a) => a.slug)}
+          existingRoutes={agents.map((a) => a.route)}
           onCancel={() => setShowAddAgent(false)}
           onCreate={createAgent}
         />
@@ -925,6 +952,52 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
+}
+
+/** A chat route: lowercase letters, digits, "-" and "_" (one URL segment). */
+function routify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+/, "")
+    .slice(0, 64);
+}
+
+interface RouteEditorProps {
+  value: string;
+  onSave: (route: string) => Promise<boolean>;
+}
+
+/** The agent's chat endpoint; chat sends its messages to /send/<route>/. */
+function RouteEditor({ value, onSave }: RouteEditorProps) {
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const clean = draft.replace(/[-_]+$/, "");
+
+  return (
+    <label className="ab-field">
+      <span>Chat route</span>
+      <input
+        className="ab-input"
+        value={draft}
+        onChange={(e) => setDraft(routify(e.target.value))}
+        placeholder="e.g. chat2"
+      />
+      <div className="ab-node-kind">/chat/&lt;session&gt;/send/{clean || "…"}/</div>
+      <button
+        className="ab-btn ab-btn-primary"
+        style={{ marginTop: "6px" }}
+        disabled={saving || !clean || clean === value}
+        onClick={async () => {
+          setSaving(true);
+          await onSave(clean);
+          setSaving(false);
+        }}
+      >
+        {saving ? "Saving…" : "Save route"}
+      </button>
+    </label>
+  );
 }
 
 interface RoleEditorProps {
@@ -1144,10 +1217,12 @@ interface CreateAgentDialogProps {
   options: ConfigOptions;
   busy: boolean;
   existingSlugs: string[];
+  existingRoutes: string[];
   onCancel: () => void;
   onCreate: (values: {
     name: string;
     slug: string;
+    route: string;
     prompt: string;
     global: boolean;
     config: AgentConfig;
@@ -1159,12 +1234,17 @@ function CreateAgentDialog({
   options,
   busy,
   existingSlugs,
+  existingRoutes,
   onCancel,
   onCreate,
 }: CreateAgentDialogProps) {
   const [name, setName] = useState<string>("New agent");
   const [slug, setSlug] = useState<string>(`agent-${Date.now().toString(36)}`);
   const [slugEdited, setSlugEdited] = useState<boolean>(false);
+  // The chat route follows the slug until it is edited.
+  const [route, setRoute] = useState<string>("");
+  const [routeEdited, setRouteEdited] = useState<boolean>(false);
+  const finalRoute = (routeEdited ? route : routify(slug)).replace(/[-_]+$/, "");
   const [prompt, setPrompt] = useState<string>("");
   const [isGlobal, setIsGlobal] = useState<boolean>(false);
   // Prefilled with the defaults: the model, temperature, max tokens and
@@ -1194,6 +1274,14 @@ function CreateAgentDialog({
       setLocalError(`An agent with slug "${finalSlug}" already exists.`);
       return;
     }
+    if (!finalRoute) {
+      setLocalError("Route is required.");
+      return;
+    }
+    if (existingRoutes.includes(finalRoute)) {
+      setLocalError(`Another agent already uses the route "${finalRoute}".`);
+      return;
+    }
     const parsed = fromDraft(configDraft, options);
     if (typeof parsed === "string") {
       setLocalError(parsed);
@@ -1203,6 +1291,7 @@ function CreateAgentDialog({
     onCreate({
       name: name.trim(),
       slug: finalSlug,
+      route: finalRoute,
       prompt: prompt.trim(),
       global: isGlobal,
       config: parsed,
@@ -1242,6 +1331,20 @@ function CreateAgentDialog({
             }}
             placeholder="e.g. chat-agent"
           />
+        </label>
+
+        <label className="ab-field">
+          <span>Chat route</span>
+          <input
+            className="ab-input"
+            value={routeEdited ? route : routify(slug)}
+            onChange={(e) => {
+              setRouteEdited(true);
+              setRoute(routify(e.target.value));
+            }}
+            placeholder="e.g. chat2"
+          />
+          <div className="ab-node-kind">/chat/&lt;session&gt;/send/{finalRoute || "…"}/</div>
         </label>
 
         <label className="ab-field">

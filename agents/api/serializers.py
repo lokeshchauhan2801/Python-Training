@@ -6,7 +6,7 @@ from rest_framework import serializers
 from basics.api.serializers import AuditReadOnlySerializerMixin
 from chat.api.serializers import RequiredCompanyResolutionMixin
 
-from ..models import Agent, Step, Tool
+from ..models import ROUTE_RE, Agent, Step, Tool, route_from_slug
 
 
 class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
@@ -106,6 +106,7 @@ class AgentSerializer(
         fields = [
             "id",
             "slug",
+            "route",
             "name",
             "prompt",
             "config",
@@ -154,6 +155,28 @@ class AgentSerializer(
                 raise serializers.ValidationError(
                     {"slug": "an agent with this slug already exists"}
                 )
+
+        # The chat route (/chat/<session>/send/<route>/); defaults to the slug.
+        route = attrs.get("route")
+        if route is None and self.instance is not None:
+            route = self.instance.route
+        route = (route or "").strip().lower() or route_from_slug(slug or "")
+        if not ROUTE_RE.match(route):
+            raise serializers.ValidationError(
+                {"route": "use lowercase letters, digits, '-' and '_' (max 64)"}
+            )
+        clash = (
+            Agent.objects.filter(company=company, route=route)
+            if company is not None
+            else Agent.objects.filter(company__isnull=True, route=route)
+        )
+        if self.instance is not None:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError(
+                {"route": "another agent already uses this route"}
+            )
+        attrs["route"] = route
         return attrs
 
     def validate_layout(self, value):

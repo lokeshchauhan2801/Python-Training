@@ -71,6 +71,7 @@ class AgentAdmin(GlobalRowsAdminMixin, BaseModelAdmin):
     list_display = (
         "id_short",
         "slug",
+        "route",
         "name",
         "company_or_global",
         "created_at",
@@ -80,7 +81,7 @@ class AgentAdmin(GlobalRowsAdminMixin, BaseModelAdmin):
         "is_deleted",
         "created_at",
     )
-    search_fields = ("slug", "name")
+    search_fields = ("slug", "route", "name")
     date_hierarchy = "created_at"
 
     @admin.display(description="ID")

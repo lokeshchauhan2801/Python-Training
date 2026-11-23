@@ -1247,14 +1247,15 @@
       }
 
       function messagesUrlFor(id) { return baseUrl + id + "/messages-json/"; }
-      // The URL picks who answers: /send/ = Normal RAG, /send/<agent_slug>/ = that agent.
-      function selectedAgentSlug() {
+      // The URL picks who answers: /send/ = Normal RAG, /send/<route>/ = the
+      // agent with that route (each agent has its own, saved on the agent).
+      function selectedAgentRoute() {
         const opt = agentSel.options[agentSel.selectedIndex];
-        return (opt && opt.dataset.slug) || "";
+        return (opt && opt.dataset.route) || "";
       }
       function sendUrlFor(id) {
-        const slug = selectedAgentSlug();
-        return baseUrl + id + "/send/" + (slug ? encodeURIComponent(slug) + "/" : "");
+        const route = selectedAgentRoute();
+        return baseUrl + id + "/send/" + (route ? encodeURIComponent(route) + "/" : "");
       }
       function attachUrlFor(id) { return baseUrl + id + "/attach/"; }
       function reprocessUrlFor(id) { return baseUrl + id + "/reprocess/"; }
@@ -2574,7 +2575,7 @@
           agents.forEach(function (a) {
             const opt = document.createElement("option");
             opt.value = a.id;
-            opt.dataset.slug = a.slug;
+            opt.dataset.route = a.route || "";
             opt.textContent = a.name || a.slug;
             agentSel.appendChild(opt);
           });
@@ -2861,7 +2862,7 @@
         const live = { el: null };
 
         const sendUrl = sendUrlFor(sessionId);
-        console.info("[chat] send -> agent=%s url=%s", selectedAgentSlug() || "normal-rag", sendUrl);
+        console.info("[chat] send -> agent=%s url=%s", selectedAgentRoute() || "normal-rag", sendUrl);
         return fetch(sendUrl, {
           method: "POST",
           headers: jsonHeaders({

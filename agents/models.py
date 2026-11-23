@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -57,6 +59,16 @@ class Tool(BaseModel, SoftDeleteModel):
         return self.slug not in available_slugs()
 
 
+# An agent's chat route: one URL path segment (lowercase letters, digits, - and _).
+ROUTE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def route_from_slug(slug: str) -> str:
+    """The default route for a slug: lowercase, other characters become "-"."""
+    route = re.sub(r"[^a-z0-9_-]+", "-", (slug or "").lower()).strip("-_")
+    return route[:64]
+
+
 class Agent(BaseModel, SoftDeleteModel):
     """A named, independently-usable chat flow (container).
 
@@ -82,6 +94,9 @@ class Agent(BaseModel, SoftDeleteModel):
         db_index=True,
     )
     slug = models.CharField(max_length=64)
+    # The agent's chat endpoint: messages to /chat/<session>/send/<route>/ are
+    # answered by this agent (chat.services.router). Defaults to the slug.
+    route = models.CharField(max_length=64, blank=True, db_index=True)
     name = models.CharField(max_length=120, blank=True)
     graph = models.JSONField(default=dict, blank=True)
     # Canvas-only: where the builder draws START and END,
@@ -100,10 +115,22 @@ class Agent(BaseModel, SoftDeleteModel):
                 condition=Q(is_deleted=False),
                 name="agents_agent_slug_per_company",
             ),
+            models.UniqueConstraint(
+                fields=["company", "route"],
+                condition=Q(is_deleted=False) & ~Q(route=""),
+                name="agents_agent_route_per_company",
+            ),
         ]
 
     def __str__(self) -> str:
         return self.name or self.slug
+
+    def save(self, *args, **kwargs):
+        if not self.route:
+            self.route = route_from_slug(self.slug)
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = {*kwargs["update_fields"], "route"}
+        super().save(*args, **kwargs)
 
     def clean(self):
         super().clean()
@@ -111,6 +138,10 @@ class Agent(BaseModel, SoftDeleteModel):
         # folder there.
         if "/" in (self.slug or ""):
             raise ValidationError({"slug": "an agent slug cannot contain '/'"})
+        if self.route and not ROUTE_RE.match(self.route):
+            raise ValidationError(
+                {"route": "use lowercase letters, digits, '-' and '_' (max 64)"}
+            )
 
 
 class Step(BaseModel, SoftDeleteModel):

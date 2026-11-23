@@ -393,7 +393,12 @@ def agents_json(request):
             return JsonResponse({"error": "Select a company first."}, status=400)
 
     agents = [
-        {"id": str(agent.pk), "name": agent.name, "slug": agent.slug}
+        {
+            "id": str(agent.pk),
+            "name": agent.name,
+            "slug": agent.slug,
+            "route": agent.route,
+        }
         for agent in Agent.objects.filter(
             Q(company=company) | Q(company__isnull=True)
         ).order_by("created_at")
@@ -869,21 +874,22 @@ def _policy_turn(request, session, question, attachment_ids, *, agent, decision)
 
 @login_required
 @require_http_methods(["POST"])
-def send(request, session_id, agent_slug=None):
+def send(request, session_id, agent_route=None):
     """Answer one message; the URL picks who answers.
 
     ``/chat/<session>/send/`` is normal RAG (``ChatService``);
-    ``/chat/<session>/send/<agent_slug>/`` is that Agent (its LangGraph graph).
+    ``/chat/<session>/send/<route>/`` is the Agent with that ``Agent.route``
+    (its LangGraph graph).
     The ``X-Chat-Agent`` / ``X-Chat-Route`` headers say who answered, so the
     browser console can show it.
     """
-    response = _send(request, session_id, agent_slug)
-    response["X-Chat-Agent"] = agent_slug or router.NORMAL_RAG
+    response = _send(request, session_id, agent_route)
+    response["X-Chat-Agent"] = agent_route or router.NORMAL_RAG
     response["X-Chat-Route"] = getattr(request, "chat_route", "rag")
     return response
 
 
-def _send(request, session_id, agent_slug):
+def _send(request, session_id, agent_route):
     from chat.services.timing import TurnTimer
 
     # Started at view entry so the saved total covers the whole request.
@@ -929,13 +935,13 @@ def _send(request, session_id, agent_slug):
             {"error": "Type a message or attach a file."}, status=400
         )
 
-    # The URL picks the agent: no slug = normal RAG.
+    # The URL picks the agent by its route: no route = normal RAG.
     selected_agent = None
-    if agent_slug:
-        selected_agent = router.find_agent(session.company, agent_slug)
+    if agent_route:
+        selected_agent = router.find_agent(session.company, agent_route)
         if selected_agent is None:
             return JsonResponse(
-                {"error": f"Agent '{agent_slug}' not found for this company."},
+                {"error": f"No agent with route '{agent_route}' for this company."},
                 status=404,
             )
     # Remember the choice so the dropdown shows it when the chat is reopened.

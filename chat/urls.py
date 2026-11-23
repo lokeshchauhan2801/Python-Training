@@ -14,9 +14,9 @@ urlpatterns = [
     path("new/", views.new_session, name="new_session"),
     path("<str:session_id>/messages-json/", views.messages_json, name="messages_json"),
     path("<str:session_id>/send/", views.send, name="send"),
-    # The agent named in the URL answers (see chat.services.router).
+    # The agent with this route (Agent.route) answers; see chat.services.router.
     path(
-        "<str:session_id>/send/<str:agent_slug>/",
+        "<str:session_id>/send/<str:agent_route>/",
         views.send,
         name="send_agent",
     ),

@@ -47,6 +47,7 @@ export interface AgentLayout {
 export interface Agent {
   id: string; // ULID string
   slug: string;
+  route: string; // chat endpoint: /chat/<session>/send/<route>/ (defaults to the slug)
   name: string;
   prompt: string; // the agent's role + tasks; stored in Langfuse, leads every step's prompt
   config: AgentConfig; // model, temperature, max tokens, retrieval; stored in Langfuse
