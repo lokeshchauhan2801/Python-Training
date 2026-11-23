@@ -63,7 +63,8 @@ class Document(BaseModel, SoftDeleteModel):
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_UPLOADED
     )
-    processing_backend = models.CharField(max_length=50, default="celery")
+    # Empty until the user picks a backend; there is no default.
+    processing_backend = models.CharField(max_length=50, blank=True, default="")
     processing_stage = models.CharField(max_length=40, blank=True)
     processing_progress = models.PositiveSmallIntegerField(default=0)
     processing_task_id = models.CharField(max_length=255, blank=True)

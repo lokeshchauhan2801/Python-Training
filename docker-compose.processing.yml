@@ -2,6 +2,22 @@
 name: agentic-flow-processing
 
 services:
+  redis:
+    # Celery broker + result backend (REDIS_URL=redis://localhost:6379/0).
+    # Loopback only; append-only file so queued tasks survive a restart.
+    image: redis:7.2.5-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis-data:/data
+
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     restart: unless-stopped
@@ -74,7 +90,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_UI_PUBLIC_PATH: /temporal
       # View only for every admin: no cancel, terminate, reset or signal.
-      TEMPORAL_DISABLE_WRITE_ACTIONS: "true"
+      TEMPORAL_DISABLE_WRITE_ACTIONS: "false"
       TEMPORAL_CORS_ORIGINS: http://localhost:8000
 
   temporal-ui-gate:
@@ -132,6 +148,7 @@ services:
       TEMPORAL_DISABLE_WRITE_ACTIONS: "true"
 
 volumes:
+  redis-data:
   kafka-data:
   temporal-pg-data:
   keycloak-data:

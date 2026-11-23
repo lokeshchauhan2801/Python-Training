@@ -1,4 +1,9 @@
-"""Start / stop / resume / cancel / reprocess a library Document via Temporal.
+"""Start / stop / resume / cancel / reprocess a library Document.
+
+Documents run on Temporal (``doc-<id>``) or as a Celery workflow
+(``infrastructure/processing/celery_workflow.py``); each control acts on the
+document's own ``processing_backend``. The Celery run has no signals: it
+parks when it sees the PAUSED row and continues from there on resume.
 
 Stop pauses: the document becomes PAUSED and its workflow gets a ``pause``
 signal, so it stays open in Temporal and waits (see
@@ -100,6 +105,16 @@ def _workflow_id(document: Document) -> str:
     return f"doc-{document.pk}"
 
 
+def _is_celery(document: Document) -> bool:
+    return document.processing_backend == "celery"
+
+
+def _resume_backend(document: Document) -> str:
+    """A new run uses the document's own backend (chat documents: Temporal)."""
+    backend = document.processing_backend
+    return backend if backend in ("celery", "kafka", "temporal") else "temporal"
+
+
 def pause_document(document: Document) -> ControlResult:
     """Stop a queued or running document so it can be resumed or cancelled.
 
@@ -123,8 +138,13 @@ def pause_document(document: Document) -> ControlResult:
     )
 
 
-def _resume_or_restart(document_id: str) -> None:
+def _resume_or_restart(document_id: str, backend: str = "temporal") -> None:
     """After commit: wake the open run, or start a new one when none is open."""
+    if backend == "celery":
+        from infrastructure.processing import celery_workflow
+
+        celery_workflow.resume(document_id)
+        return
     if TemporalProcessingBackend().signal(f"doc-{document_id}", "resume"):
         return
     enqueue_document_processing(document_id, backend="temporal")
@@ -142,11 +162,14 @@ def resume_document(document: Document) -> ControlResult:
                 updated_at=timezone.now(),
             )
             document_id = str(document.pk)
+            backend = _resume_backend(document)
             # Signal only once PROCESSING is committed: a stage that read
             # PAUSED would pause the run again.
-            transaction.on_commit(lambda: _resume_or_restart(document_id))
+            transaction.on_commit(lambda: _resume_or_restart(document_id, backend))
         elif document.status == Document.STATUS_FAILED:
-            enqueue_document_processing(str(document.pk), backend="temporal")
+            enqueue_document_processing(
+                str(document.pk), backend=_resume_backend(document)
+            )
         else:
             raise ControlError("Only a paused, stopped or failed document can be resumed.")
     return ControlResult(
@@ -176,9 +199,14 @@ def cancel_document(document: Document) -> ControlResult:
     document.refresh_from_db()
     if document.status not in _CANCELLABLE:
         raise ControlError("Only a stopped, failed or running document can be cancelled.")
+    run_id = document.processing_task_id
     discard_processing(document)
     if document.processing_backend == "temporal":
         TemporalProcessingBackend().cancel(_workflow_id(document))
+    elif _is_celery(document):
+        from infrastructure.processing import celery_workflow
+
+        celery_workflow.revoke_run(run_id)
     return ControlResult(
         True,
         Document.STATUS_UPLOADED,

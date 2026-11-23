@@ -1,32 +1,10 @@
-"""Admin registration for the Documents app.
-
-``DocumentAdmin`` / ``DocumentChunkAdmin`` use the reusable ``BaseModelAdmin``
-(Unfold ``ModelAdmin`` subclass → the Unfold shell/left sidebar/company switcher
-are preserved on every page, plus soft-delete visibility, owner scoping, and
-audit stamping).
-
-HOUSE STYLE (the STANDARD changelist pattern to reuse for every app admin —
-scrapper, chat, company — so the admin looks uniform across services):
-  * ``date_hierarchy = "created_at"`` → the date drill bar across the top.
-  * ``search_fields`` → the "Type to search" bar.
-  * ``list_filter`` → the "Filters" button (top-right).
-  * a short ID column, then the domain columns, a colored status badge via a
-    display method, and ``created_by`` / ``created_at`` trailing columns.
-  * Unfold ``actions_row`` PILL buttons (purple = ``ActionVariant.PRIMARY``) for
-    per-row operations, each ``@action``-decorated and operating ONLY on the
-    scoped ``self.get_queryset(request)``, with POST paths CSRF-validated.
-
-A library ``Document`` added in the admin is NOT processed on save: it lands in
-the ``uploaded`` state and waits. The user then chooses a backend from the in-row
-``Schedule`` dropdown (Process now / Celery / Kafka / Temporal) to start it.
-"""
-
 from django.contrib import admin, messages
 from django.http import HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.html import format_html, format_html_join
 from unfold.decorators import action
 from unfold.enums import ActionVariant
@@ -709,8 +687,44 @@ class DocumentAdmin(BaseModelAdmin):
             "result": None,
             "degraded": False,
         }
+        stages_source = "database"
+        celery = None
+        if backend == "celery":
+            from infrastructure.processing import celery_workflow
+
+            celery = celery_workflow.describe(document.processing_task_id)
+            celery["workers"] = celery_workflow.workers_online()
         if backend == "temporal":
-            temporal.update(TemporalProcessingBackend().get_status(workflow_id))
+            # Everything in the Temporal panel and the stage table comes from
+            # the Temporal API (describe + get_state query + event history).
+            from infrastructure.temporal.document_workflow import _STAGE_SEQUENCE
+
+            info = TemporalProcessingBackend().inspect(
+                workflow_id, tuple(slug for slug, _fn in _STAGE_SEQUENCE)
+            )
+            if not info.get("reachable"):
+                temporal.update({"status": "unknown", "degraded": True})
+            elif not info.get("found"):
+                temporal.update({"status": "NOT_FOUND"})
+            else:
+                temporal.update(
+                    {k: v for k, v in info.items() if k not in ("stages", "reachable", "found")}
+                )
+                stages = []
+                for row in info["stages"]:
+                    started = parse_datetime(row["started_at"]) if row["started_at"] else None
+                    finished = parse_datetime(row["finished_at"]) if row["finished_at"] else None
+                    stages.append(
+                        {
+                            **row,
+                            "elapsed_ms": (
+                                int(((finished or now) - started).total_seconds() * 1000)
+                                if started
+                                else None
+                            ),
+                        }
+                    )
+                stages_source = "temporal"
 
         db = {
             "status": document.status,
@@ -728,31 +742,38 @@ class DocumentAdmin(BaseModelAdmin):
         db_active = document.status in (Document.STATUS_QUEUED, Document.STATUS_PROCESSING)
         temporal_status = temporal["status"]
         temporal_active = temporal_status == "RUNNING"
-        temporal_terminal = temporal_status in {
-            "COMPLETED", "FAILED", "CANCELED", "TERMINATED", "TIMED_OUT"
-        }
-        if document.status == Document.STATUS_READY and any(
-            stage["status"] != DocumentStage.STATUS_COMPLETED for stage in stages
-        ):
-            warnings.append("Document is completed but one or more DB stages are stale.")
+        if temporal.get("status") == "RUNNING" and not temporal.get("query_ok"):
+            warnings.append("No Temporal worker answered the state query (is the worker running?).")
         if temporal["degraded"]:
             warnings.append("Temporal is unreachable; its workflow state may be stale.")
         elif backend == "temporal" and temporal_status in (None, "unknown"):
             warnings.append("Temporal did not return a current workflow state.")
-        if backend == "temporal" and ((db_active and temporal_terminal) or (
-            not db_active and temporal_active
-        )):
-            warnings.append("Document and Temporal workflow states do not agree.")
+
+        if celery is not None:
+            if not celery.get("reachable"):
+                warnings.append("Redis is unreachable; the Celery run state is unknown.")
+            elif not celery.get("workers"):
+                warnings.append(
+                    "No Celery worker answered (start it with ./start_processing.sh "
+                    "or `python manage.py celery_worker`)."
+                )
+            elif celery.get("status") == "PAUSED":
+                warnings.append(
+                    f"Celery run is paused before '{celery.get('parked')}' and "
+                    "continues from there on resume."
+                )
 
         polling = db_active or temporal_active or bool(warnings)
         return JsonResponse(
             {
                 "db": db,
                 "temporal": temporal,
+                "celery": celery,
                 "processing_backend": backend,
                 "workflow_id": workflow_id,
                 "temporal_url": temporal_ui_url(workflow_id) if backend == "temporal" else None,
                 "stages": stages,
+                "stages_source": stages_source,
                 "warnings": warnings,
                 "polling": polling,
             }
@@ -791,6 +812,12 @@ class DocumentAdmin(BaseModelAdmin):
             Document.STATUS_FAILED,
         ):
             TemporalProcessingBackend().terminate(f"doc-{document.pk}")
+        elif document.processing_backend == "celery" and document.processing_task_id:
+            # The old Celery run stops at its next stage (its run id is
+            # replaced below); drop its queued tasks now.
+            from infrastructure.processing import celery_workflow
+
+            celery_workflow.revoke_run(document.processing_task_id, "replaced")
 
         # No reprocess restriction: a document in ANY state (including an
         # already-processed ready document with chunks) may be reprocessed
@@ -895,7 +922,15 @@ class DocumentAdmin(BaseModelAdmin):
                 {"detail": "Only a failed document can be retried."},
                 status=400,
             )
-        enqueue_document_processing(str(document.pk), backend="temporal")
+        # Retry on the backend the document was processed with; there is no
+        # fallback backend.
+        backend = document.processing_backend
+        if backend not in ("celery", "kafka", "temporal"):
+            return JsonResponse(
+                {"detail": "Choose a backend from the Schedule column to process it again."},
+                status=400,
+            )
+        enqueue_document_processing(str(document.pk), backend=backend)
         from chat.services.kb import temporal_sso_ui_url as temporal_ui_url, workflow_id_for
 
         return JsonResponse(
@@ -904,12 +939,16 @@ class DocumentAdmin(BaseModelAdmin):
                 "status_display": dict(Document.STATUS_CHOICES)[
                     Document.STATUS_QUEUED
                 ],
-                "backend": "temporal",
-                "temporal_url": temporal_ui_url(workflow_id_for(document.pk)),
+                "backend": backend,
+                "temporal_url": (
+                    temporal_ui_url(workflow_id_for(document.pk))
+                    if backend == "temporal"
+                    else None
+                ),
                 "document_id": str(document.pk),
                 "title": document.title,
                 "message": (
-                    "Resuming processing via Temporal from the failed stage."
+                    f"Resuming processing via {backend.title()} from the failed stage."
                 ),
             },
             status=202,
@@ -947,6 +986,14 @@ class DocumentAdmin(BaseModelAdmin):
         if document.processing_backend == "temporal":
             TemporalProcessingBackend().terminate(f"doc-{document.pk}")
             message = "Workflow terminated and document marked stopped."
+        elif document.processing_backend == "celery":
+            from infrastructure.processing import celery_workflow
+
+            celery_workflow.revoke_run(document.processing_task_id, "stopped")
+            message = (
+                "Celery run stopped: its queued stages were revoked and the "
+                "running stage ends the run when it finishes."
+            )
         else:
             message = (
                 "Marked stopped; the worker cannot be force-killed for this "

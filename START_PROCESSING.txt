@@ -13,9 +13,9 @@ prefix (shown inline below):
       POSTGRES_HOST=localhost POSTGRES_PORT=5432 \
       /home/auriga/learnings/agentic-flow/venv/bin/python manage.py <command>
 
-The default backend is DOCUMENT_PROCESSING_BACKEND in .env (defaults to celery).
-Per-document selection in the admin ("Process with…") overrides the default for
-that document.
+There is no default backend. In the Documents admin you pick Process now,
+Celery, Kafka or Temporal for each document from the Schedule column. Chat
+always processes through Temporal.
 
 -------------------------------------------------------------------------------
  ONE-TIME PREREQUISITES
@@ -29,11 +29,11 @@ that document.
 2. The virtualenv exists at /home/auriga/learnings/agentic-flow/venv.
 
 3. .env exists at the project root (gitignored). It already carries the Phase-4
-   keys (DOCUMENT_PROCESSING_BACKEND / REDIS_URL / KAFKA_BOOTSTRAP_SERVERS /
+   keys (REDIS_URL / KAFKA_BOOTSTRAP_SERVERS /
    TEMPORAL_HOST / TEMPORAL_UI_URL).
 
-Docker is only needed for Kafka and Temporal. The CELERY backend works with
-ZERO setup in local DEBUG (see OPTION C).
+Docker runs Redis (Celery), Kafka and Temporal. ./start_processing.sh starts
+all three plus their workers (see OPTION C for Celery).
 
 ===============================================================================
  ONE-COMMAND START — KAFKA, TEMPORAL, AND BOTH WORKERS
@@ -108,17 +108,20 @@ Keycloak users (realm agentic-flow; any user there sees every workflow):
     http://keycloak:8180/             admin / KEYCLOAK_ADMIN_PASSWORD from .env
 
 ===============================================================================
- OPTION C — PROCESS WITH CELERY (default)
+ OPTION C — PROCESS WITH CELERY
 ===============================================================================
 
-Local development (DEBUG=True): nothing to start. Celery documents are
-processed INLINE automatically on a background thread — no Redis, no worker, no
-Docker needed. Just add/select a library document and leave the default backend
-as celery (or pick "Process with…" → Celery).
+Celery always runs through Redis and a Celery worker (no inline thread any
+more). ./start_processing.sh starts both. By hand:
+    docker compose -f docker-compose.processing.yml up -d redis
+    /home/auriga/learnings/agentic-flow/venv/bin/python manage.py celery_worker
+(same as: celery -A base.celery worker -Q document-processing,celery)
 
-Production-style (DEBUG=False): run Redis plus a Celery worker:
-    /home/auriga/learnings/agentic-flow/venv/bin/celery -A base.celery worker \
-      --loglevel=info --concurrency=4
+The workflow (infrastructure/processing/celery_workflow.py) runs the seven
+stages as a Celery chain, one task per stage, 3 attempts each. Stop pauses
+before the next stage, Resume continues from there, Cancel discards the work.
+The admin Info modal shows the run read from Redis: status, paused stage,
+and each stage task's Celery state.
 
 ===============================================================================
  START BOTH KAFKA AND TEMPORAL AT ONCE
@@ -144,12 +147,12 @@ Also delete the data volumes (full reset):
 
 * Document stays "Queued" forever on kafka/temporal:
     The broker/server is up but the WORKER is not running (or vice versa).
-    Both the container AND the worker must run for that backend. For celery in
-    DEBUG this cannot happen — it runs inline.
+    Both the container AND the worker must run for that backend (celery:
+    the redis container and manage.py celery_worker).
 
-* Port already in use (9093 / 7234 / 8080 / 8081 / 8180):
+* Port already in use (6379 / 9093 / 7234 / 8080 / 8081 / 8180):
     Stop the other process, or tear the stack down first.
 
 * Which backend is the default?
-    DOCUMENT_PROCESSING_BACKEND in .env (defaults to celery). Per-document
-    "Process with…" overrides it for that document.
+    None. Each document is processed with the backend picked in the
+    Schedule column (chat always uses Temporal).

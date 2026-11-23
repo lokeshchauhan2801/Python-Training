@@ -148,14 +148,17 @@ wait_for_keycloak() {
 
 # Temporal UI login (Keycloak) is off for now: one UI, no keycloak service.
 # To bring it back, add keycloak (and ensure_keycloak_host/wait_for_keycloak).
-"${COMPOSE[@]}" up -d kafka temporal-postgresql temporal temporal-ui-sso
+"${COMPOSE[@]}" up -d redis kafka temporal-postgresql temporal temporal-ui-sso
+wait_for_service_health redis
 wait_for_service_health kafka
 wait_for_service_health temporal-postgresql
 wait_for_temporal_port
 start_worker kafka_worker
 start_worker temporal_worker
+start_worker celery_worker
 
-printf '\nKafka:       localhost:9093\n'
+printf '\nRedis:       localhost:6379 (Celery broker + results)\n'
+printf 'Kafka:       localhost:9093\n'
 printf 'Temporal:    localhost:7234\n'
 printf 'Temporal UI: http://localhost:8080/ (chat and documents links; no login)\n'
 printf 'Worker logs: %s\n' "$STATE_DIR"

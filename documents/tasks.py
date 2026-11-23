@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from celery import shared_task
-from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import close_old_connections
 from django.db import transaction
@@ -83,12 +82,23 @@ def _mark_download_failed(document: Document, message: str) -> None:
     )
 
 
+BACKENDS = ("celery", "kafka", "temporal", "local-background")
+
+
+def _requested_backend(backend: str | None) -> str:
+    """The backend the user picked. There is no default: every run names one."""
+    requested = (backend or "").strip().lower()
+    if requested not in BACKENDS:
+        raise ValueError(
+            f"Choose a processing backend ({', '.join(BACKENDS[:3])}); got {backend!r}."
+        )
+    return requested
+
+
 def dispatch_document_processing(
-    document_id: str, backend: str | None = None
+    document_id: str, backend: str
 ) -> tuple[str, str]:
-    requested = (
-        backend or getattr(settings, "DOCUMENT_PROCESSING_BACKEND", "celery")
-    ).lower()
+    requested = _requested_backend(backend)
 
     document = Document.objects.filter(pk=document_id).first()
     task_id = str(uuid4())
@@ -113,9 +123,8 @@ def dispatch_document_processing(
             ]
         )
 
-    if requested in {"celery", "local-background"} and settings.DEBUG:
-
-
+    if requested == "local-background":
+        # Explicit in-process run on a background thread (no broker).
         transaction.on_commit(
             lambda: _local_executor.submit(
                 process_document_task.run,
@@ -126,8 +135,15 @@ def dispatch_document_processing(
         return task_id, "local-background"
 
     if requested == "celery":
-        task = process_document_task.apply_async(args=[document_id], retry=False)
-        return task.id, "celery"
+        # The Celery workflow: one task per stage, chained through Redis and
+        # run by ``celery -A base.celery worker`` (``manage.py celery_worker``).
+        # The run starts once the QUEUED row above is committed.
+        from infrastructure.processing import celery_workflow
+
+        transaction.on_commit(
+            lambda: celery_workflow.start(str(document_id), task_id)
+        )
+        return task_id, "celery"
 
 
     from infrastructure.processing.dispatcher import ProcessingDispatcher
@@ -148,12 +164,10 @@ def dispatch_document_processing(
 
 
 def enqueue_document_processing(
-    document_id: str, backend: str | None = None
+    document_id: str, backend: str
 ) -> tuple[str, str]:
 
-    requested = (
-        backend or getattr(settings, "DOCUMENT_PROCESSING_BACKEND", "celery")
-    ).lower()
+    requested = _requested_backend(backend)
     task_id = str(uuid4())
 
     with transaction.atomic():

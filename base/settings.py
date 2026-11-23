@@ -255,10 +255,34 @@ CHROMA_HOST = os.getenv("CHROMA_HOST", "")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-DOCUMENT_PROCESSING_BACKEND = os.getenv("DOCUMENT_PROCESSING_BACKEND", "celery")
+# No default processing backend: the user picks Process now / Celery / Kafka /
+# Temporal for each document (Documents admin "Schedule"). Chat always uses
+# Temporal.
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
+# Celery document workflow (infrastructure/processing/celery_workflow.py): one
+# task per stage on the "document-processing" queue. Run Redis and the worker
+# with ./start_processing.sh (or `python manage.py celery_worker`).
+CELERY_IMPORTS = ("infrastructure.processing.celery_workflow",)
+CELERY_TASK_ROUTES = {
+    "documents.workflow.*": {"queue": "document-processing"},
+    "apps.documents.process_document": {"queue": "document-processing"},
+}
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_TRACK_STARTED = True
+CELERY_RESULT_EXTENDED = True
+CELERY_RESULT_EXPIRES = 7 * 24 * 3600
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_CONNECTION_TIMEOUT = 3
+# Long OCR/embedding stages: a task is re-delivered only after this long
+# without an ack (acks_late), so it must exceed the slowest stage.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 2 * 3600}
+CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {"visibility_timeout": 2 * 3600}
+CELERY_WORKER_CONCURRENCY = int(os.getenv("CELERY_WORKER_CONCURRENCY", "2"))
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 # Temporal Web UI is never opened directly: Django proxies /temporal/ to it for

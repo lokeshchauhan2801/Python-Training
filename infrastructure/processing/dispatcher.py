@@ -15,17 +15,6 @@ class ProcessingDispatcher:
         self._backend = backend
 
     @classmethod
-    def from_settings(cls) -> "ProcessingDispatcher":
-        """Create dispatcher using the DOCUMENT_PROCESSING_BACKEND setting."""
-        from django.conf import settings
-
-        backend_name = getattr(
-            settings, "DOCUMENT_PROCESSING_BACKEND", "celery"
-        ).lower()
-        backend = _load_backend(backend_name)
-        return cls(backend)
-
-    @classmethod
     def from_name(cls, name: str) -> "ProcessingDispatcher":
         """Create dispatcher for an explicitly named backend (celery/kafka/temporal)."""
         return cls(_load_backend(name.lower()))

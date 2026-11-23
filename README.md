@@ -157,9 +157,9 @@ retitle the session from the first message.
 is the **single routing seam**. It flips the row to `queued` so the UI observes the
 transition, then routes by backend:
 
-- **Celery (DEBUG)** — runs inline on a managed background `ThreadPoolExecutor`
-  (no Redis/worker needed); this is the default local path.
-- **Celery (prod)** — `process_document_task.apply_async` to a real worker.
+- **Celery** — a Celery chain of one task per stage
+  (`infrastructure/processing/celery_workflow.py`) through Redis to
+  `manage.py celery_worker`, with retries, pause/resume and cancel.
 - **Kafka / Temporal** — `ProcessingDispatcher.from_name(...)` publishes a request
   that a worker consumes; every path converges on the same `process_document`.
 
@@ -195,7 +195,7 @@ venv/bin/pip install -r requirements.txt
 
 # 2. Configure the single .env (already present). It holds DJANGO_SECRET_KEY,
 #    DEBUG, the POSTGRES_* connection, the LLM_* provider settings, CHROMA_*,
-#    DOCUMENT_PROCESSING_BACKEND, and the Kafka/Temporal addresses. There is
+#    REDIS_URL, and the Kafka/Temporal addresses. There is
 #    intentionally NO .env.example / sample / template file.
 
 # 3. Create the database once (run by a Postgres superuser):
@@ -673,20 +673,19 @@ venv/bin/python manage.py runserver
 
 ### 2. Processing backends
 
-`DOCUMENT_PROCESSING_BACKEND` (default `celery`) sets the default; each document
-can override it from the **Schedule** dropdown. What each path needs:
+There is no default backend: each document is processed with the backend picked
+from the **Schedule** dropdown (chat always uses Temporal). What each path needs:
 
 | Backend              | Infra needed to run                               |
 |----------------------|---------------------------------------------------|
-| **Celery (DEBUG)**   | **Nothing** — runs inline on a background thread (deferred until the DB commit). This is the zero-setup default. |
-| **Celery (non-DEBUG)** | Redis + a Celery worker (`celery -A base.celery worker`) |
+| **Celery**           | Redis (Docker, `localhost:6379`) **and** `manage.py celery_worker` |
 | **Kafka**            | Kafka broker (Docker) **and** `manage.py kafka_worker` |
 | **Temporal**         | Temporal server (Docker) **and** `manage.py temporal_worker` |
 
 > Documents only process into chunks when a worker for the chosen backend is
 > running. If you pick Kafka/Temporal without starting its broker **and** worker,
-> the document stays at **Queued**. Use **Process now** (celery/DEBUG inline) for
-> zero-setup processing.
+> the document stays at **Queued**. Use **Process now** for zero-setup
+> processing.
 
 #### Kafka — start before using the Kafka backend
 
