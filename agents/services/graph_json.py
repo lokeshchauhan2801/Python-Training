@@ -3,7 +3,7 @@
 The builder canvas still edits Steps. Whenever a Step, a Step's tools or a
 Tool changes, ``sync_agent_graph`` rewrites the Agent's ``graph`` column from
 the steps reachable from START. Chat never reads Steps: it loads
-``Agent.graph`` and compiles it (``chat.agent.graph.build_graph``).
+``Agent.graph`` and compiles it (``chat.services.agent.graph.build_graph``).
 
 Shape (version 1)::
 

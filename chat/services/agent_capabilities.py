@@ -185,7 +185,7 @@ def _reachable_enabled_slugs(agent) -> set:
     Uses the same helper the runtime binds tools with, so policy can never
     allow an action the agent's model could not call.
     """
-    from chat.agent.tools import enabled_tool_rows
+    from chat.services.agent.tools import enabled_tool_rows
 
     return set(enabled_tool_rows(agent)) & _BUILTIN_SLUGS
 
@@ -240,7 +240,7 @@ def _policy_for_intent(intent, available):
 # Preflight entry points
 # --------------------------------------------------------------------------- #
 def _no_runnable_flow(agent) -> bool:
-    from chat.agent.graph import model_nodes
+    from chat.services.agent.graph import model_nodes
 
     return not model_nodes(agent.graph)
 

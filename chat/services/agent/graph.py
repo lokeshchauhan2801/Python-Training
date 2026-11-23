@@ -24,9 +24,9 @@ from django.conf import settings
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from chat.agent.context import AgentContext
-from chat.agent.prompts import system_prompt
-from chat.agent.tools import tools_for
+from chat.services.agent.context import AgentContext
+from chat.services.agent.prompts import system_prompt
+from chat.services.agent.tools import tools_for
 
 _CACHE_SIZE = 64
 _lock = threading.Lock()
@@ -157,7 +157,7 @@ def build_graph(graph: dict, checkpointer=None):
 def get_checkpointer():
     global _checkpointer
     if _checkpointer is None:
-        from chat.agent.checkpointer import get_checkpointer as make
+        from chat.services.agent.checkpointer import get_checkpointer as make
 
         _checkpointer = make()
     return _checkpointer

@@ -24,7 +24,7 @@ def _function_catalog():
     Sourced from the live registry (``available_slugs``) minus internal slugs;
     ``description`` is the tool's default docs (``DEFAULT_TOOL_DOCS``).
     """
-    from chat.agent.tools import available_slugs
+    from chat.services.agent.tools import available_slugs
 
     catalog = []
     for slug in sorted(available_slugs()):

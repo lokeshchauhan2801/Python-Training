@@ -59,7 +59,7 @@ def _orchestrator_for(company, selected_agent=None, llm_client=None):
         return _rag_service(llm_client)
 
     try:
-        from chat.agent.service import AgentChatService
+        from chat.services.agent.service import AgentChatService
         from basics.langfuse import get_langfuse_client
 
         return AgentChatService(

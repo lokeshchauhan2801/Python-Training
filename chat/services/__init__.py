@@ -2,7 +2,7 @@
 
 The chat orchestration service used to live in a single chat/services.py
 module. It is now a package; the Agent (LangGraph) runtime lives in
-``chat.agent``. This __init__ re-exports the full public surface, including the
+``chat.services.agent``. This __init__ re-exports the full public surface, including the
 ``document_services`` binding, so ``chat.services.document_services is
 documents.services`` stays true and every existing import keeps working.
 """

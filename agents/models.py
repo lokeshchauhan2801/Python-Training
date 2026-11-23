@@ -52,7 +52,7 @@ class Tool(BaseModel, SoftDeleteModel):
     def is_prompt_only(self) -> bool:
         """True when no built-in handler has this slug (it runs on its docs)."""
         # Lazy import avoids a module-scope chat<-agents cycle.
-        from chat.agent.tools import available_slugs
+        from chat.services.agent.tools import available_slugs
 
         return self.slug not in available_slugs()
 

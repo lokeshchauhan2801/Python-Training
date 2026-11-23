@@ -2,7 +2,7 @@
 
 ``AgentChatService`` is what ``chat.views.send`` builds for a selected Agent.
 The graph is the Agent's stored graph JSON (``Agent.graph``), loaded by
-``chat.agent.graph``; Steps are never read here. A chat session is a LangGraph thread (``thread_id`` = the session id) kept by
+``chat.services.agent.graph``; Steps are never read here. A chat session is a LangGraph thread (``thread_id`` = the session id) kept by
 the Postgres checkpointer, so the agent remembers earlier turns, tool calls
 included.
 
@@ -24,8 +24,8 @@ from django.conf import settings
 from django.db import transaction
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from chat.agent.context import AgentContext
-from chat.agent.tools import enabled_tool_rows
+from chat.services.agent.context import AgentContext
+from chat.services.agent.tools import enabled_tool_rows
 from chat.services import session_files
 from chat.services.agent_capabilities import SUMMARY_RE
 from chat.services.plain_text import normalize_llm_response
@@ -127,7 +127,7 @@ class AgentChatService:
             tools=enabled_tool_rows(self._agent),
             timing=timing,
         )
-        from chat.agent.graph import get_graph
+        from chat.services.agent.graph import get_graph
 
         self._graph_json = self._agent.graph or {}
         graph = get_graph(self._graph_json)  # ValueError for an empty graph
@@ -248,7 +248,7 @@ class AgentChatService:
     # Stream events
     # ------------------------------------------------------------------ #
     def _events(self, mode, chunk, trace, artifacts, timing):
-        from chat.agent.graph import answer_node, model_nodes, node_step
+        from chat.services.agent.graph import answer_node, model_nodes, node_step
 
         last_step = answer_node(self._graph_json)
         step_names = {n["id"]: n.get("name") or n["id"] for n in model_nodes(self._graph_json)}
@@ -315,7 +315,7 @@ class AgentChatService:
     def _persist(
         self, graph, thread, ctx, *, user, message_text, attachment_ids, trace, artifacts, timing
     ):
-        from chat.agent.graph import model_nodes
+        from chat.services.agent.graph import model_nodes
         from chat.retitle import retitle_if_default
         from chat.services import ChatProviderError
 

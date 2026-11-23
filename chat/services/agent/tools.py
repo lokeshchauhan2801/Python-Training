@@ -316,7 +316,7 @@ def _prompt_tool(row) -> StructuredTool:
     slug = row.slug
 
     def run(request: str, runtime: ToolRuntime) -> tuple[str, dict]:
-        from chat.agent.prompts import PLAIN_TEXT_GUIDANCE
+        from chat.services.agent.prompts import PLAIN_TEXT_GUIDANCE
 
         ctx = _context(runtime)
         if slug not in (ctx.tools or {}):
@@ -365,7 +365,7 @@ def enabled_tool_rows(agent) -> dict:
     (a global agent uses the global tools) and must still be enabled.
     """
     from agents.models import Tool
-    from chat.agent.graph import tool_slugs
+    from chat.services.agent.graph import tool_slugs
 
     slugs = tool_slugs(agent.graph)
     if not slugs:
