@@ -1,8 +1,12 @@
-"""chat.services package — public surface re-exported from chat_service.
+"""chat.services: the one chat service and what sits on top of it.
 
-The chat orchestration service used to live in a single chat/services.py
-module. It is now a package; the Agent (LangGraph) runtime lives in
-``chat.services.agent``. This __init__ re-exports the full public surface, including the
+* ``chat_service.ChatService`` - normal RAG chat (saves every turn).
+* ``agent/`` - the Agent runtime (LangGraph): ``AgentChatService`` runs an
+  Agent's graph JSON and uses ``ChatService`` underneath.
+* ``router`` - picks one of the two from the send URL
+  (``/send/`` = RAG, ``/send/<agent_slug>/`` = that Agent).
+
+This __init__ re-exports the public surface of ``chat_service``, including the
 ``document_services`` binding, so ``chat.services.document_services is
 documents.services`` stays true and every existing import keeps working.
 """

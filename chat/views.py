@@ -20,7 +20,7 @@ from basics.llm import (
 )
 from .scope import active_or_none, allowed_companies, scoped_sessions
 from .services import ChatProviderError, ChatRetrievalError, ChatService
-from .services import session_files
+from .services import router, session_files
 
 logger = logging.getLogger(__name__)
 
@@ -28,50 +28,8 @@ _ULID_LEN = 26
 
 
 def _chat_service():
-    """Build the chat service (lazy, no key at construct). Tests patch this."""
-    return ChatService()
-
-
-def _rag_service(llm_client=None):
-    """The sole factory for the normal (non-LangGraph) Chat service.
-
-    Both unselected sessions and selected-Agent read-only fallbacks construct
-    their service here, so there is exactly one non-LangGraph path. It imports
-    or queries no Agent model.
-    """
-    if llm_client is not None:
-        return ChatService(llm_client=llm_client)
-    return _chat_service()
-
-
-def _orchestrator_for(company, selected_agent=None, llm_client=None):
-    """Return the service that runs a turn.
-
-    ``selected_agent is None`` -> Normal RAG (``_rag_service``). An explicit
-    resolved Agent -> an ``AgentChatService`` (the LangGraph tool-calling
-    graph) bound to that Agent. ``send`` has already preflighted it, so this
-    never re-resolves the selection or downgrades an explicit Agent to Normal
-    RAG. A construction /
-    import failure is logged and raised as ``ChatProviderError`` so the
-    existing 502 mapping applies.
-    """
-    if selected_agent is None:
-        return _rag_service(llm_client)
-
-    try:
-        from chat.services.agent.service import AgentChatService
-        from basics.langfuse import get_langfuse_client
-
-        return AgentChatService(
-            chat_service=_rag_service(llm_client),
-            langfuse=get_langfuse_client(),
-            agent=selected_agent,
-        )
-    except Exception as exc:
-        logger.exception("Could not construct the selected-agent runtime")
-        raise ChatProviderError(
-            "The selected agent runtime could not be constructed."
-        ) from exc
+    """The normal RAG service (``chat.services.router``)."""
+    return router.chat_service()
 
 
 def _resolve_selected_agent(session, *, actor=None, repair=False):
@@ -911,8 +869,21 @@ def _policy_turn(request, session, question, attachment_ids, *, agent, decision)
 
 @login_required
 @require_http_methods(["POST"])
-def send(request, session_id):
-    """Run the RAG pipeline for one message; return the user+assistant pair."""
+def send(request, session_id, agent_slug=None):
+    """Answer one message; the URL picks who answers.
+
+    ``/chat/<session>/send/`` is normal RAG (``ChatService``);
+    ``/chat/<session>/send/<agent_slug>/`` is that Agent (its LangGraph graph).
+    The ``X-Chat-Agent`` / ``X-Chat-Route`` headers say who answered, so the
+    browser console can show it.
+    """
+    response = _send(request, session_id, agent_slug)
+    response["X-Chat-Agent"] = agent_slug or router.NORMAL_RAG
+    response["X-Chat-Route"] = getattr(request, "chat_route", "rag")
+    return response
+
+
+def _send(request, session_id, agent_slug):
     from chat.services.timing import TurnTimer
 
     # Started at view entry so the saved total covers the whole request.
@@ -958,11 +929,22 @@ def send(request, session_id):
             {"error": "Type a message or attach a file."}, status=400
         )
 
-    # Resolve the session's selected Agent (repairing a stale FK, carrying its
-    # provenance so a repaired selection still records a fallback turn).
-    selected_agent, stale_selection_metadata = _resolve_selected_agent(
-        session, actor=request.user, repair=True
-    )
+    # The URL picks the agent: no slug = normal RAG.
+    selected_agent = None
+    if agent_slug:
+        selected_agent = router.find_agent(session.company, agent_slug)
+        if selected_agent is None:
+            return JsonResponse(
+                {"error": f"Agent '{agent_slug}' not found for this company."},
+                status=404,
+            )
+    # Remember the choice so the dropdown shows it when the chat is reopened.
+    if session.selected_agent_id != getattr(selected_agent, "pk", None):
+        session.selected_agent = selected_agent
+        session.save(
+            actor=request.user,
+            update_fields=["selected_agent", "updated_at", "updated_by"],
+        )
 
     resolved_provider, resolved_model = resolve_provider_model(model_name, provider)
     provider_supplied = bool(model_name or provider)
@@ -988,6 +970,7 @@ def send(request, session_id):
             attachment_ids,
             selected_entry_ids=selected_entry_ids,
         )
+        request.chat_route = policy_decision.outcome  # blocked/fallback/pipeline
         if policy_decision.outcome == "blocked":
             return _policy_turn(
                 request,
@@ -1020,9 +1003,7 @@ def send(request, session_id):
                 "reason": policy_decision.reason,
             }
         }
-    # A repaired stale selection on an otherwise Normal-RAG turn carries its own
-    # fallback provenance.
-    selection_metadata = fallback_metadata or stale_selection_metadata
+    selection_metadata = fallback_metadata
 
     if run_pipeline:
         # Only the side-effect-free clarifications run ahead of the graph: they
@@ -1048,11 +1029,7 @@ def send(request, session_id):
     def _run_turn(stream):
         """Run the turn (``process_message``), or start ``stream_message``."""
         if run_pipeline:
-            service = _orchestrator_for(
-                session.company,
-                selected_agent=selected_agent,
-                llm_client=llm_client,
-            )
+            service = router.service_for(selected_agent, llm_client)
             run = service.stream_message if stream else service.process_message
             return run(
                 user=chat_user,
@@ -1064,7 +1041,7 @@ def send(request, session_id):
                 selected_entry_ids=pipeline_entry_ids,
                 timing=timing,
             )
-        service = _rag_service(llm_client)
+        service = router.chat_service(llm_client)
         run = service.stream_message if stream else service.process_message
         return run(
             user=chat_user,

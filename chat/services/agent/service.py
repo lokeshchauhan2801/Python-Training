@@ -1,6 +1,7 @@
 """Run one chat turn through the Agent graph and save it.
 
-``AgentChatService`` is what ``chat.views.send`` builds for a selected Agent.
+``AgentChatService`` is what ``chat.services.router.service_for`` builds when the
+send URL names an Agent (``/chat/<session>/send/<agent_slug>/``).
 The graph is the Agent's stored graph JSON (``Agent.graph``), loaded by
 ``chat.services.agent.graph``; Steps are never read here. A chat session is a LangGraph thread (``thread_id`` = the session id) kept by
 the Postgres checkpointer, so the agent remembers earlier turns, tool calls
