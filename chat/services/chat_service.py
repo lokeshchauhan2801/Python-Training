@@ -1029,8 +1029,14 @@ class ChatService:
         return sections
 
     def _build_csv_distribution_chart(
-        self, conversation, question, attachment_ids=None
+        self, conversation, question, attachment_ids=None, attached_only=False
     ):
+        """``(text, chart)`` from a CSV, or ``None``.
+
+        ``attached_only`` charts only the CSVs attached to this message: no
+        knowledge-base CSV and no other chat file is considered, whatever the
+        question names (the agent tool uses it when the user attached a file).
+        """
         if not self._is_chart_request(question):
             return None
 
@@ -1042,11 +1048,19 @@ class ChatService:
             or re.search(r"over\s+time", question, re.I)
         )
 
-        csv_files = self._named_library_csvs(conversation, question) + (
-            self._chat_csv_documents(
-                conversation, attachment_ids=attachment_ids, question=question
+        if attached_only:
+            wanted = {str(i) for i in attachment_ids or []}
+            csv_files = [
+                f
+                for f in reversed(session_files.list_files(conversation))
+                if f.id in wanted and f.is_csv and f.readable
+            ]
+        else:
+            csv_files = self._named_library_csvs(conversation, question) + (
+                self._chat_csv_documents(
+                    conversation, attachment_ids=attachment_ids, question=question
+                )
             )
-        )
         for csv_file in csv_files:
             parsed = self._read_csv(csv_file)
             if parsed is None:

@@ -147,21 +147,54 @@ def chart_from_file(
 ) -> tuple[str, dict]:
     """Chart a CSV file from this chat or the knowledge base by counting its values.
 
+    A CSV attached to the user's current message is always the one charted,
+    unless the user's message names a different file.
+
     Args:
-        file_name: The CSV file or dataset name the user mentioned.
+        file_name: The CSV file or dataset name the user mentioned; empty for
+            the file attached to this message.
         chart_type: pie, bar or line.
     """
     if not _enabled(runtime, "chart_from_file"):
         return NOT_ENABLED, {}
     ctx = _context(runtime)
-    local = ChatService()._build_csv_distribution_chart(
-        ctx.session,
-        f"{chart_type} chart of {file_name}",
-        attachment_ids=list(ctx.attachment_ids) or None,
-    )
+    service = ChatService()
+    user_text = (ctx.message_text or "").strip()
+    attached = [str(i) for i in ctx.attachment_ids or []]
+    name = (file_name or "").strip()
+    # The user, not the model, decides the file: a file attached to this
+    # message wins over a file name the model picked from the chat's history.
+    user_named_other = bool(name) and name.casefold() in user_text.casefold()
+    local = None
+    if attached and not user_named_other:
+        local = service._build_csv_distribution_chart(
+            ctx.session,
+            f"{chart_type} chart {user_text}",
+            attachment_ids=attached,
+            attached_only=True,
+        )
+    if local is None and (not attached or user_named_other):
+        local = service._build_csv_distribution_chart(
+            ctx.session,
+            f"{chart_type} chart of {name} {user_text}",
+            attachment_ids=attached or None,
+        )
     if local is None:
-        return f"No CSV file matching '{file_name}' was found to chart.", {}
+        if attached and not user_named_other:
+            return (
+                "The file attached to this message could not be charted: it is "
+                "not a readable CSV with chartable values. Tell the user that; "
+                "do not chart a different file.",
+                {},
+            )
+        return f"No CSV file matching '{name}' was found to chart.", {}
     text, chart = local
+    counts = [p.values[0] for p in chart.data if p.values]
+    if counts and len(counts) > 1 and len(set(counts)) == 1:
+        text += (
+            f" Every value appears {counts[0]:g} time(s), so all slices/bars are "
+            "equal; mention that briefly."
+        )
     return (
         f"{text}\nThe chart is shown to the user. Reply with a short caption only.",
         {"chart": chart.model_dump(mode="json")},
