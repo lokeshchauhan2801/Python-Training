@@ -2553,8 +2553,8 @@
           .catch(function () { setStatus("Could not load companies."); });
       }
 
-      // Agent selector: "Normal RAG" (empty value) or one of the company's
-      // Agents. With an open chat the choice is saved on the session; before
+      // Agent selector: one of the company's Agents (Normal RAG is hidden for
+      // now). With an open chat the choice is saved on the session; before
       // the first message it is kept here and sent when the chat is created.
       let agentLoadSeq = 0;
 
@@ -2568,10 +2568,14 @@
         function fill(agents) {
           if (seq !== agentLoadSeq) { return; }
           clear(agentSel);
-          const none = document.createElement("option");
-          none.value = "";
-          none.textContent = "Normal RAG";
-          agentSel.appendChild(none);
+          // Normal RAG is hidden for now: every chat is answered by an agent.
+          if (!agents.length) {
+            const none = document.createElement("option");
+            none.value = "";
+            none.textContent = "No agent available";
+            none.disabled = true;
+            agentSel.appendChild(none);
+          }
           agents.forEach(function (a) {
             const opt = document.createElement("option");
             opt.value = a.id;
@@ -2580,7 +2584,8 @@
             agentSel.appendChild(opt);
           });
           const present = agents.some(function (a) { return a.id === keep; });
-          agentSel.value = present ? keep : "";
+          // A chat with no saved agent (or one now gone) starts on the first agent.
+          agentSel.value = present ? keep : (agents.length ? agents[0].id : "");
           agentSel.dataset.current = agentSel.value;
         }
         if (!agentsUrl || !companyId) { fill([]); return; }
@@ -2927,6 +2932,11 @@
         // can be sent without a message) or files checked in the latest
         // picker. Block only when there is none of them.
         if (!question && pendingAttachmentIds.length === 0 && selectedIds.length === 0) { return; }
+        // Only agents answer (Normal RAG is hidden): no agent, no send.
+        if (!selectedAgentSlug()) {
+          setStatus("No agent is available for this company. Create one in the agent builder.");
+          return;
+        }
 
         inputEl.disabled = true;
         sendBtn.disabled = true;

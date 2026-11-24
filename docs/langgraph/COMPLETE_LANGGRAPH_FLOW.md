@@ -30,6 +30,10 @@ chat/views.py  send() ───┼──►               uses ChatService      
 | `POST /chat/chat2/` | The agent whose slug is `/chat/chat2/` |
 | `POST /chat/<unknown>/` | `404 No agent at '/chat/<unknown>/' for this company.` |
 
+**Normal RAG is hidden in the chat page for now:** the agent dropdown lists
+only agents and starts on the first one, so every message goes to an agent.
+`POST /chat/` still works on the server.
+
 Which chat the message belongs to is sent in the request body as `session_id`
 (with the `question`). A request without `session_id` gets
 `400 session_id is required.`
