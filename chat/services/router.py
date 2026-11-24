@@ -27,12 +27,6 @@ NORMAL_RAG = "normal-rag"
 
 
 def find_agent(company, slug):
-    """The Agent whose slug (complete route, e.g. ``/chat/chat_agent/``) is
-    ``slug`` and that ``company`` may use, or ``None``.
-
-    Slugs are unique across all agents, so a slug names one agent; it must be
-    ``company``'s own or a global one (no company).
-    """
     from agents.models import Agent
 
     if not slug:
