@@ -1,17 +1,19 @@
 """Run one chat turn through the Agent graph and save it.
 
 ``AgentChatService`` is what ``chat.services.router.service_for`` builds when the
-send URL names an Agent (``/chat/<session>/send/<agent_slug>/``).
+send URL is an Agent's slug (``POST /chat/<name>/``).
 The graph is the Agent's stored graph JSON (``Agent.graph``), loaded by
-``chat.services.agent.graph``; Steps are never read here. A chat session is a LangGraph thread (``thread_id`` = the session id) kept by
-the Postgres checkpointer, so the agent remembers earlier turns, tool calls
-included.
+``chat.services.agent.graph``; Steps are never read here. Each (chat session,
+agent) pair is one LangGraph thread (``thread_id`` = ``<session id>:<agent id>``)
+kept by the Postgres checkpointer, so the agent remembers its own earlier turns,
+tool calls included, but never sees another agent's tool calls.
 
-Each saved turn records the checkpoint it ended on (``metadata.checkpoint_id``)
-and the next run forks from it. A run that failed part-way still leaves its
-messages in the thread; forking from the last saved turn means they are never
-reused. Turns saved without the agent since then (Normal RAG, policy replies)
-are replayed into the run's input.
+Each saved turn records the checkpoint and thread it ended on
+(``metadata.checkpoint_id`` / ``metadata.thread_id``) and the agent's next run
+forks from it. A run that failed part-way still leaves its messages in the
+thread; forking from the last saved turn means they are never reused. Turns
+saved without this agent since then (Normal RAG, policy replies, other agents)
+are replayed into the run's input as plain text.
 
 ``stream_message`` yields ``("trace", step)`` as the agent calls tools,
 ``("delta", text)`` for answer tokens, and finally ``("done", turn)``.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from django.conf import settings
 from django.db import transaction
@@ -44,15 +47,62 @@ def _preview(text, limit):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _turn_messages(turns):
-    """Saved turns as chat messages (an attachment-only turn has no question)."""
-    messages = []
+def _attached_line(names) -> str:
+    names = [n for n in names if n]
+    return f"[Attached to this message: {', '.join(names)}]" if names else ""
+
+
+def _turn_messages(turns, session):
+    """Turns saved outside this agent's thread, as ONE context message.
+
+    They were answered by Normal RAG, a policy reply or another agent, whose
+    charts and tool calls are not in the text. Replayed as the model's own
+    messages, the model copies them (replies that only describe a chart);
+    as one quoted block it reads them as background. Each question notes the
+    files attached to it.
+    """
+    lines = []
     for turn in turns:
-        if turn.question:
-            messages.append(HumanMessage(turn.question))
+        attached = _attached_line(
+            chip.get("title") for chip in session_files.chips_for_media(session, turn.media_url)
+        ) if turn.media_url else ""
+        question = " ".join(p for p in (turn.question, attached) if p)
+        if question:
+            lines.append(f"User: {question}")
         if turn.response:
-            messages.append(AIMessage(turn.response))
-    return messages
+            lines.append(f"Assistant: {turn.response}")
+    if not lines:
+        return []
+    return [
+        HumanMessage(
+            "Earlier messages in this chat, for context only. Other assistants "
+            "answered them; their charts and tool calls are not shown here, so "
+            "do not copy how they replied:\n\n" + "\n\n".join(lines)
+        ),
+        AIMessage("Understood."),
+    ]
+
+_CHART_BLOCK_RE = re.compile(r"```[ \t]*(?:chart|json)?[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+
+def chart_from_reply(text: str):
+    """``(chart dict or None, text without the chart block)``.
+
+    Reads the first fenced ```chart (or ```json) block that is a valid chart
+    (``ChartData``). Other fenced blocks stay in the text.
+    """
+    from pydantic import ValidationError
+
+    from chat.services.chat_service import ChartData
+
+    for match in _CHART_BLOCK_RE.finditer(text or ""):
+        try:
+            chart = ChartData.model_validate(json.loads(match.group(1)))
+        except (ValueError, TypeError, ValidationError):
+            continue
+        rest = (text[: match.start()] + text[match.end():]).strip()
+        return chart.model_dump(mode="json"), re.sub(r"\n{3,}", "\n\n", rest)
+    return None, text
 
 
 class AgentChatService:
@@ -121,6 +171,7 @@ class AgentChatService:
             llm=llm,
             role=role,
             files_note=session_files.files_overview(conversation, attachment_ids),
+            attached_files=self._message_files(conversation, attachment_ids, message_text),
             message_text=message_text or "",
             attachment_ids=list(attachment_ids or []),
             selected_entry_ids=list(selected_entry_ids or []),
@@ -132,13 +183,22 @@ class AgentChatService:
 
         self._graph_json = self._agent.graph or {}
         graph = get_graph(self._graph_json)  # ValueError for an empty graph
-        thread = {"configurable": {"thread_id": str(conversation.session_id)}}
+        # One LangGraph thread per (chat, agent): an agent never sees another
+        # agent's tool calls, so it cannot copy a tool it does not have.
+        thread = {"configurable": {"thread_id": self._thread_id(conversation)}}
         with timed(timing, "history"):
             config, history = self._resume_point(graph, thread, conversation)
         text = message_text or (_PICKER_ONLY_MESSAGE if selected_entry_ids else "")
+        # Name this message's files so "create a pie chart" is about them.
+        attached = _attached_line(
+            title for title, _ in ctx.attached_files
+        ) if attachment_ids else ""
+        text = "\n".join(p for p in (text, attached) if p)
         run_input = {"messages": history + [HumanMessage(text)]}
 
         trace, artifacts = [], []
+        # Answer text seen / already streamed (a ```chart block is not streamed).
+        self._answer_seen, self._answer_sent = "", 0
         disconnected = False
         try:
             with timed(timing, "llm"):
@@ -217,6 +277,9 @@ class AgentChatService:
         )
         return role, llm
 
+    def _thread_id(self, conversation) -> str:
+        return f"{conversation.session_id}:{self._agent.pk}"
+
     def _resume_point(self, graph, thread, conversation):
         """``(config, history)``: where this run starts in the thread.
 
@@ -229,8 +292,13 @@ class AgentChatService:
             "recursion_limit": int(getattr(settings, "AGENT_RECURSION_LIMIT", 12)),
         }
         turns = conversation.turns.order_by("created_at")
+        # The last turn THIS agent saved in this thread (other agents' turns
+        # and Normal RAG turns are replayed below as plain text).
         last = (
-            turns.filter(metadata__has_key="checkpoint_id")
+            turns.filter(
+                metadata__has_key="checkpoint_id",
+                metadata__thread_id=thread["configurable"]["thread_id"],
+            )
             .order_by("-created_at")
             .first()
         )
@@ -239,11 +307,11 @@ class AgentChatService:
                 **thread["configurable"],
                 "checkpoint_id": last.metadata["checkpoint_id"],
             }
-            return config, _turn_messages(turns.filter(created_at__gt=last.created_at))
+            return config, _turn_messages(turns.filter(created_at__gt=last.created_at), conversation)
         # No saved agent turn: drop leftovers of failed runs, if any.
         graph.checkpointer.delete_thread(thread["configurable"]["thread_id"])
         recent = int(getattr(settings, "CHAT_RECENT_TURNS", 12))
-        return config, _turn_messages(list(turns)[-recent:] if recent > 0 else [])
+        return config, _turn_messages(list(turns)[-recent:] if recent > 0 else [], conversation)
 
     # ------------------------------------------------------------------ #
     # Stream events
@@ -267,7 +335,9 @@ class AgentChatService:
             ):
                 if timing is not None:
                     timing.mark_first_token()
-                yield ("delta", message.content)
+                visible = self._visible_delta(message.content)
+                if visible:
+                    yield ("delta", visible)
             return
         for node, update in (chunk or {}).items():
             step = owner.get(node)
@@ -325,11 +395,16 @@ class AgentChatService:
             (m for m in reversed(state.values.get("messages", [])) if isinstance(m, AIMessage)),
             None,
         )
-        content = normalize_llm_response(str(getattr(final, "content", "") or "").strip())
+        # A chart written as a ```chart JSON block (no chart tool) is drawn
+        # by the app like a create_chart result; the JSON leaves the text.
+        reply_chart, raw = chart_from_reply(str(getattr(final, "content", "") or "").strip())
+        content = normalize_llm_response(raw)
+        if not content and reply_chart is not None:
+            content = reply_chart["title"]
         if not content:
             raise ChatProviderError("The LLM provider returned an empty response.")
 
-        citations, chart, tool_metadata, summary = [], None, {}, False
+        citations, chart, tool_metadata, summary = [], reply_chart, {}, False
         for artifact in artifacts:
             # Keep only the passages the answer cites by their [n] number, so
             # a search the answer did not use adds no source chips.
@@ -362,6 +437,7 @@ class AgentChatService:
                     "trace": trace,
                     "flow": [n["id"] for n in model_nodes(self._graph_json)],
                     "checkpoint_id": state.config["configurable"]["checkpoint_id"],
+                    "thread_id": thread["configurable"]["thread_id"],
                     "agent_selection": {
                         "agent_id": str(self._agent.pk),
                         "agent_slug": self._agent.slug,
@@ -380,6 +456,61 @@ class AgentChatService:
                 ctx.session, llm_title=None, fallback_text=message_text, actor=user
             )
         return turn
+
+    @staticmethod
+    def _message_files(conversation, attachment_ids, message_text):
+        """``(title, text)`` of the files this message is about, so the model
+        reads them without a tool (a CSV comes with exact value counts).
+
+        The files attached to it; else, when it refers to a chat file ("this
+        country file", "the education csv"), the file that matches its name,
+        or the matching candidates, or (no name matches) the newest file:
+        "this file" means the latest one. The model also gets the full file
+        list, so it can say when a named file is not there.
+        """
+        from chat.services import file_matching
+        from chat.services.chat_service import ChatService
+
+        ids = [str(i) for i in attachment_ids or []]
+        if not ids:
+            files = session_files.list_files(conversation)
+            if not file_matching.references_file(message_text, files):
+                return []
+            target = file_matching.select_chart_file(files, message_text)
+            if target.kind == "file":
+                chosen = [target.file]
+            elif target.kind == "ambiguous":
+                chosen = list(target.candidates)[:3]
+            else:
+                readable = [f for f in files if f.readable]
+                chosen = readable[-1:]
+            ids = [f.id for f in chosen]
+        if not ids:
+            return []
+        try:
+            # question=None: read exactly these files (no re-matching).
+            return ChatService()._chat_attachment_texts(
+                conversation, attachment_ids=ids, question=None
+            ) or []
+        except Exception:
+            logger.exception("Could not read the message's files for the agent")
+            return []
+
+    def _visible_delta(self, piece: str) -> str:
+        """The part of ``piece`` to stream: everything before a ``` fence
+        (a chart JSON block is drawn as a chart, never shown as text)."""
+        self._answer_seen += piece
+        fence = self._answer_seen.find("```")
+        if fence != -1:
+            visible_end = fence
+        else:
+            # Hold back trailing backticks that may start a fence.
+            visible_end = len(self._answer_seen.rstrip("`"))
+        if visible_end <= self._answer_sent:
+            return ""
+        out = self._answer_seen[self._answer_sent:visible_end]
+        self._answer_sent = visible_end
+        return out
 
     @staticmethod
     def _map_error(exc):

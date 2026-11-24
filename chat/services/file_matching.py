@@ -297,6 +297,19 @@ def references_file(message: str | None, files=()) -> bool:
     return match.kind in ("exact", "prefix") and bool(match.files)
 
 
+def is_bare_chart_request(message: str | None) -> bool:
+    """A chart request that says nothing about its data: "create a pie chart".
+
+    Every word is a chart/filler word. A reference word ("it", "that",
+    "same") makes it a follow-up, and any other word is a topic ("of the top
+    5 economies"), so neither is bare.
+    """
+    words = _words((message or "").lower())
+    if not words or any(w in REFERENCE_WORDS for w in words):
+        return False
+    return all(w in CHART_STOPWORDS for w in words)
+
+
 def select_chart_file(files, message: str | None) -> ChartTarget:
     """Pick the file a chart request should use (D7, H.2)."""
     readable = _readable(files)
@@ -312,6 +325,11 @@ def select_chart_file(files, message: str | None) -> ChartTarget:
         )
         return ChartTarget("ambiguous", None, m.files, hit_tokens or m.name_tokens)
     if m.explicit_name:
+        if re.search(r"\b(?:this|that)\b", (message or "").lower()):
+            # "this country file": no file has that name, but "this" points
+            # at the newest file (the user describes it, they don't name it).
+            newest = _newest(readable)
+            return ChartTarget("file", newest, (newest,), ())
         return ChartTarget("not_found", None, (), m.explicit_tokens)
     if m.ext_filter:
         typed = [f for f in readable if _file_ext(f) in m.ext_filter]
@@ -325,6 +343,14 @@ def select_chart_file(files, message: str | None) -> ChartTarget:
 
 def _titles(files) -> str:
     return ", ".join(f.title for f in files)
+
+
+def which_file_reply(files) -> str:
+    """The question for a bare chart request in a chat that has files."""
+    return (
+        f"Which file should I chart? Files here: {_titles(_collapse_same_title(_readable(files)))}. "
+        "Or tell me what data to show."
+    )
 
 
 def chart_target_reply(target: ChartTarget, files) -> str:

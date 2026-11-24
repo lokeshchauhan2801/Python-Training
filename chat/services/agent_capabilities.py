@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from chat.services import file_commands, session_files
+from chat.services import file_commands, file_matching, session_files
 
 _I = re.IGNORECASE
 
@@ -260,6 +260,14 @@ def preflight(agent, session, message_text, attachment_ids, selected_entry_ids=(
         )
     available = _reachable_enabled_slugs(agent)
     outcome, required, reason, reply = _policy_for_intent(intent, available)
+    if intent == Intent.READ_DOCUMENT and outcome == "fallback" and (
+        attachment_ids
+        or file_matching.references_file(message_text, session_files.list_files(session))
+    ):
+        # The files attached to this message, or the chat file it refers to,
+        # are given to the agent's model directly (AgentChatService), so it
+        # needs no document tool for them.
+        outcome, reason = "pipeline", ""
     return PolicyDecision(
         outcome=outcome,
         intent=intent,

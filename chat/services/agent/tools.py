@@ -20,6 +20,7 @@ from typing import Literal
 from langchain_core.tools import StructuredTool, tool
 from langgraph.prebuilt import ToolRuntime
 
+from chat.services import session_files
 from chat.services.chat_service import ChartData, ChartPoint, ChatService
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,21 @@ def create_chart(
     )
 
 
+def _user_chose_file(session, user_text: str) -> bool:
+    """Whether the user picked a file: the message refers to one ("this
+    country file", "education.csv"), or it follows a turn about a file
+    ("make it a bar chart" after a file chart)."""
+    from chat.services import file_matching
+
+    if file_matching.references_file(user_text, session_files.list_files(session)):
+        return True
+    latest = session.turns.order_by("-created_at").values("media_url", "metadata").first()
+    if latest is None:
+        return False
+    used = (latest["metadata"] or {}).get("tools_used") or []
+    return bool(latest["media_url"]) or "chart_from_file" in used
+
+
 @tool(response_format="content_and_artifact")
 def chart_from_file(
     file_name: str,
@@ -165,6 +181,14 @@ def chart_from_file(
     # The user, not the model, decides the file: a file attached to this
     # message wins over a file name the model picked from the chat's history.
     user_named_other = bool(name) and name.casefold() in user_text.casefold()
+    if not attached and not _user_chose_file(ctx.session, user_text):
+        files = [f.title for f in session_files.list_files(ctx.session) if f.is_csv]
+        return (
+            "The user did not say which file to chart (nothing is attached and "
+            "the message names no file). Do not chart anything: ask them which "
+            f"file to chart. CSV files in this chat: {', '.join(dict.fromkeys(files)) or 'none'}.",
+            {},
+        )
     local = None
     if attached and not user_named_other:
         local = service._build_csv_distribution_chart(

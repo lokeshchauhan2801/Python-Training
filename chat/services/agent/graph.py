@@ -90,7 +90,13 @@ def _model_node(node: dict, index: int, total: int):
         model = ctx.llm._ensure_client()
         if tools:
             model = model.bind_tools(tools)
-        prompt = system_prompt(ctx.role, ctx.llm, bool(tools), ctx.files_note)
+        prompt = system_prompt(
+            ctx.role,
+            ctx.llm,
+            [t.name for t in tools],
+            ctx.files_note,
+            ctx.attached_files,
+        )
         if total > 1:
             prompt += f'\n\nYou are running step {index + 1} of {total} ("{name}") of this agent\'s flow.'
             if index > 0:
@@ -110,7 +116,11 @@ def _tool_node(slugs: list[str]):
     slugs = list(slugs)
 
     def run_tools(state: MessagesState, config, runtime):
-        return ToolNode(tools_for(runtime.context, slugs)).invoke(state, config)
+        # handle_tool_errors=True: a bad call returns the real error (e.g. "Each
+        # chart point must have one value per series.") so the model fixes it.
+        return ToolNode(
+            tools_for(runtime.context, slugs), handle_tool_errors=True
+        ).invoke(state, config)
 
     return run_tools
 

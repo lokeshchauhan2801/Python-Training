@@ -709,22 +709,32 @@ def _command_turn(
 
 
 def _chart_target_reply(request, session, question, attachment_ids, *, selection_metadata=None):
-    """``send`` step 6: an ambiguous / not-found chart target, or None.
+    """``send`` step 6: a bare chart request ("create a pie chart" in a chat
+    with files: ask which file), an ambiguous / not-found chart target, or None.
 
     The reply is deterministic (no LLM, no file panel, no state), so the next
     message routes normally (D8). A ``file`` or ``no_files`` target returns
     None and the orchestrator charts it.
     """
-    target = ChatService._chart_target(session, question)
-    if target is None or target.kind not in ("ambiguous", "not_found"):
-        return None
+    files = session_files.list_files(session)
+    if (
+        not attachment_ids
+        and ChatService._is_chart_request(question or "")
+        and file_matching.is_bare_chart_request(question)
+        and any(f.readable for f in files)
+    ):
+        # "create a pie chart" in a chat with files: ask which one.
+        response = file_matching.which_file_reply(files)
+    else:
+        target = ChatService._chart_target(session, question)
+        if target is None or target.kind not in ("ambiguous", "not_found"):
+            return None
+        response = file_matching.chart_target_reply(target, files)
     turn = _chat_service().create_turn(
         session,
         user=session.user,
         question=question,
-        response=file_matching.chart_target_reply(
-            target, session_files.list_files(session)
-        ),
+        response=response,
         model_name="knowledge_base",
         metadata={**(selection_metadata or {})},
         attachment_ids=attachment_ids,
@@ -832,9 +842,10 @@ def _pipeline_direct_reply(
 ):
     """A selected-Agent pipeline's deterministic clarification turn, or None.
 
-    The empty-attachment question and the ambiguous / not-found chart-target
-    reply stay ahead of the graph (as in Normal RAG) because they only ask the
-    user to clarify. File commands are NOT handled here: they run inside the
+    Only a file sent with no message is answered ahead of the graph (it asks
+    what to do with the file). Which file a message means ("this country
+    file") is left to the agent's model, which gets the file list and the
+    likely file's content (AgentChatService). File commands run inside the
     Agent's own Step so its tool constraints apply.
     """
     pipeline_metadata = {
@@ -848,12 +859,7 @@ def _pipeline_direct_reply(
         return _reply_empty_attachment(
             request, session, attachment_ids, selection_metadata=pipeline_metadata
         )
-    if file_commands.classify(question).kind != file_commands.Kind.NONE:
-        return None
-    return _chart_target_reply(
-        request, session, question, attachment_ids,
-        selection_metadata=pipeline_metadata,
-    )
+    return None
 
 
 def _policy_turn(request, session, question, attachment_ids, *, agent, decision):

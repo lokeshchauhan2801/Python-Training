@@ -17,6 +17,9 @@ class AgentContext:
     role: str = ""
     # This chat's files (one line each, from the session row) for the prompt.
     files_note: str = ""
+    # Full text of the files attached to THIS message ((title, text) pairs),
+    # given to the model directly so it needs no tool to read them.
+    attached_files: list = field(default_factory=list)
     message_text: str = ""
     attachment_ids: list = field(default_factory=list)
     # Picker selection (validated SessionFile entry ids) for a process request.

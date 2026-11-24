@@ -978,7 +978,7 @@ class ChatService:
 
     def _csv_prompt_text(self, csv_file):
         """Prompt text for one CSV: exact row/column counts, then its rows."""
-        key = f"chatcsv1:{csv_file.id}:{self._MAX_CSV_PROMPT_CHARS}"
+        key = f"chatcsv2:{csv_file.id}:{self._MAX_CSV_PROMPT_CHARS}"
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -1012,10 +1012,38 @@ class ChatService:
             f"CSV with exactly {len(rows):,} data rows (header excluded) and "
             f"{len(headers)} columns: {', '.join(headers)}. Rows are in file "
             f"order, so 'top N rows' means the first N below. {coverage}\n"
+            + self._csv_value_counts(headers, rows)
             + buffer.getvalue()
         )
         cache.set(key, text, self._CHAT_FILE_CACHE_TIMEOUT)
         return text
+
+    _MAX_COUNTED_VALUES = 20
+
+    @classmethod
+    def _csv_value_counts(cls, headers, rows):
+        """Exact counts per value over EVERY row, for columns with few
+        distinct values (``Country: England 47, Scotland 32``).
+
+        A model counting rows by eye gets totals wrong, so counts by value
+        (what a pie or bar chart of a category column needs) come precomputed.
+        """
+        lines = []
+        for index, header in enumerate(headers):
+            counts = Counter(
+                (row[index].strip() if index < len(row) else "") for row in rows
+            )
+            counts.pop("", None)
+            if not counts or len(counts) > cls._MAX_COUNTED_VALUES or len(counts) == len(rows):
+                continue
+            pairs = ", ".join(f"{value} {n}" for value, n in counts.most_common())
+            lines.append(f"- {header}: {pairs}")
+        if not lines:
+            return ""
+        return (
+            "Exact counts of each value over all rows (use these for counts, "
+            "pie or bar charts by a column):\n" + "\n".join(lines) + "\n"
+        )
 
     def csv_sections(self, conversation, question):
         """``(title, text)`` for the knowledge-base CSVs the question names."""
