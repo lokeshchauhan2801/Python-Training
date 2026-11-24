@@ -199,6 +199,29 @@ class LangfuseClient:
             _PROMPT_MISSES.pop(name, None)
         return created
 
+    def delete_prompt(self, name: str) -> bool:
+        """Delete every version of ``name`` in Langfuse. True when deleted.
+
+        A prompt that does not exist counts as deleted. Any other error
+        (Langfuse down, bad keys) returns False and deletes nothing.
+        """
+        client = self._ensure_client()
+        if client is None:
+            return False
+        try:
+            from langfuse.api import NotFoundError
+        except Exception:
+            NotFoundError = ()
+        try:
+            client.api.prompts.delete(name)
+        except NotFoundError:
+            pass
+        except Exception:
+            logger.debug("langfuse delete_prompt(%s) failed", name)
+            return False
+        _PROMPT_MISSES.pop(name, None)
+        return True
+
     @contextlib.contextmanager
     def trace(self, name: str, **kw):
         """Context manager wrapping an observable unit of work.

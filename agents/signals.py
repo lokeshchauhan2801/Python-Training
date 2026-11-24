@@ -56,6 +56,37 @@ def create_agent_prompt(sender, instance, created, **kwargs):
     transaction.on_commit(_push)
 
 
+@receiver(post_delete, sender=Agent)
+def delete_agent_prompt(sender, instance, **kwargs):
+    """A deleted Agent (Django admin delete, ``hard_delete``) takes its
+    Langfuse prompt with it, unless another live agent uses that prompt name.
+
+    A soft delete (``is_deleted=True``) keeps the prompt so the agent can be
+    restored. Runs after commit and never raises, so Langfuse being down
+    cannot fail the delete.
+    """
+    from agents.services import agent_prompts
+
+    name = agent_prompts.prompt_name(instance)
+    if not name:
+        return
+
+    def _delete():
+        try:
+            in_use = any(
+                agent_prompts.prompt_name(a) == name
+                for a in Agent.all_objects.exclude(pk=instance.pk)
+            )
+            if in_use:
+                return
+            if not agent_prompts._client().delete_prompt(name):
+                logger.warning("could not delete Langfuse prompt %s", name)
+        except Exception:
+            logger.exception("could not delete Langfuse prompt for agent %s", instance.pk)
+
+    transaction.on_commit(_delete)
+
+
 # --------------------------------------------------------------------------- #
 # Agent.graph sync
 # --------------------------------------------------------------------------- #
