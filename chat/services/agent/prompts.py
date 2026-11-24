@@ -27,8 +27,8 @@ _TOOL_GUIDANCE = (
 
 # With a create_chart tool the tool draws the chart.
 _CHART_TOOL_GUIDANCE = (
-    "To show a chart, call create_chart with the numbers (from a file attached "
-    "below, a tool result, or general knowledge). Every chart request needs "
+    "To show a chart, call create_chart with the numbers (from the file content "
+    "in the message, a tool result, or general knowledge). Every chart request needs "
     "its own create_chart call in this turn, even when an earlier reply showed "
     "the same chart; text alone never shows a chart. Never put chart data or "
     "JSON in your reply; the tool shows the chart, so reply with a short caption."
@@ -40,7 +40,7 @@ _CHART_TOOL_GUIDANCE = (
 _CHART_DATA_GUIDANCE = (
     "Before drawing a chart, know what data it shows. If the request names no "
     "topic and no file (\"create a pie chart\"), nothing is attached to it, "
-    "no file content is given below, and it is not a follow-up to a chart you "
+    "no file content is included in the message, and it is not a follow-up to a chart you "
     "just made, do not draw anything: ask one short question, which file to "
     "chart (list this chat's files by name) or what data to show. Never use "
     "made-up, sample or placeholder values, and never state numbers from a "
@@ -86,8 +86,9 @@ def identity_line(llm) -> str:
 
 _FILES_GUIDANCE = (
     "When the user refers to a file, use the file names listed here. The "
-    "content of files attached to this message is given below; for any other "
-    "file, call a tool to read it rather than guessing."
+    "content of the file a message is about is included in that message; for "
+    "any other file, call a tool to read it rather than guessing. If the user "
+    "names a file that is not in this list, say so and ask which file they mean."
 )
 
 # Used when the step has no create_chart tool: the model writes the chart as
@@ -128,10 +129,9 @@ def attached_files_text(attached_files) -> str:
     if not blocks:
         return ""
     return (
-        "Files this message is about: attached to it, or the chat file it "
-        "refers to (\"this file\" is the newest). Use this content; no tool is "
-        "needed to read them. If the user names a file that is not in the "
-        "chat's file list, say so in one line and use the closest match:\n\n"
+        "[File content for this message, read by the app: you have it now, "
+        "no tool is needed. Use it even if an earlier reply said the file "
+        "could not be read.]\n\n"
         + "\n\n".join(blocks)
     )
 
@@ -141,8 +141,9 @@ def system_prompt(
     llm,
     tool_names=(),
     files_note: str = "",
-    attached_files=(),
 ) -> str:
+    """The system prompt. The content of this message's files is not here:
+    it is added to the user's message (``graph._with_files``)."""
     tool_names = set(tool_names or ())
     parts = [(role or "").strip(), identity_line(llm), PLAIN_TEXT_GUIDANCE]
     if tool_names:
@@ -154,7 +155,4 @@ def system_prompt(
     parts.append(_TASK_GUIDANCE)
     if files_note:
         parts.append(f"{files_note}\n{_FILES_GUIDANCE}")
-    attached = attached_files_text(attached_files)
-    if attached:
-        parts.append(attached)
     return "\n\n".join(p for p in parts if p)

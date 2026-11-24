@@ -463,10 +463,10 @@ class AgentChatService:
         reads them without a tool (a CSV comes with exact value counts).
 
         The files attached to it; else, when it refers to a chat file ("this
-        country file", "the education csv"), the file that matches its name,
-        or the matching candidates, or (no name matches) the newest file:
-        "this file" means the latest one. The model also gets the full file
-        list, so it can say when a named file is not there.
+        country file", "the education csv"), the file that matches its name
+        ("this"/"that" with no matching name = the newest file), or the
+        matching candidates. A name that matches no file gives nothing: the
+        model has the file list and says the file is not there.
         """
         from chat.services import file_matching
         from chat.services.chat_service import ChatService
@@ -477,13 +477,12 @@ class AgentChatService:
             if not file_matching.references_file(message_text, files):
                 return []
             target = file_matching.select_chart_file(files, message_text)
-            if target.kind == "file":
+            if target.kind == "file":  # named, or "this file" = newest
                 chosen = [target.file]
             elif target.kind == "ambiguous":
                 chosen = list(target.candidates)[:3]
-            else:
-                readable = [f for f in files if f.readable]
-                chosen = readable[-1:]
+            else:  # names a file that is not here: the model says so and asks
+                chosen = []
             ids = [f.id for f in chosen]
         if not ids:
             return []

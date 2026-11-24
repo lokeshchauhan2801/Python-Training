@@ -25,7 +25,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from chat.services.agent.context import AgentContext
-from chat.services.agent.prompts import system_prompt
+from chat.services.agent.prompts import attached_files_text, system_prompt
 from chat.services.agent.tools import tools_for
 
 _CACHE_SIZE = 64
@@ -80,6 +80,25 @@ def node_step(graph: dict) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Nodes
 # --------------------------------------------------------------------------- #
+def _with_files(messages, files_text: str):
+    """``messages`` with this turn's file content added to the user's latest
+    message, for this model call only (never saved in the thread).
+
+    In the user's own message the model trusts it over earlier replies that
+    said the file could not be read; the system prompt alone was ignored.
+    """
+    if not files_text:
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last = messages[i]
+            text = last.content if isinstance(last.content, str) else str(last.content)
+            out = list(messages)
+            out[i] = HumanMessage(f"{text}\n\n{files_text}")
+            return out
+    return messages
+
+
 def _model_node(node: dict, index: int, total: int):
     slugs = list(node.get("tools", []))
     name = node.get("name") or node["id"]
@@ -95,14 +114,16 @@ def _model_node(node: dict, index: int, total: int):
             ctx.llm,
             [t.name for t in tools],
             ctx.files_note,
-            ctx.attached_files,
         )
         if total > 1:
             prompt += f'\n\nYou are running step {index + 1} of {total} ("{name}") of this agent\'s flow.'
             if index > 0:
                 prompt += " Earlier steps already replied above; build on their output and do not repeat it."
         messages = [SystemMessage(prompt)]
-        messages += _recent(state["messages"], int(getattr(settings, "CHAT_RECENT_TURNS", 12)))
+        messages += _with_files(
+            _recent(state["messages"], int(getattr(settings, "CHAT_RECENT_TURNS", 12))),
+            attached_files_text(ctx.attached_files),
+        )
         # ``config`` is passed on so stream_mode="messages" sees the tokens
         # (Python 3.10 has no async context propagation).
         return {"messages": [model.invoke(messages, config)]}
