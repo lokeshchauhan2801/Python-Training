@@ -3,6 +3,7 @@
 This is the current flow of the chat page: how an agent is chosen, how a
 message reaches it, and what the agent does with it. The same flow as
 diagrams: [CHAT_AND_AGENT_FLOW_DIAGRAMS.md](CHAT_AND_AGENT_FLOW_DIAGRAMS.md).
+A short plain-language version: [SIMPLE_FLOW.md](SIMPLE_FLOW.md).
 
 > **Normal RAG is hidden in the chat page for now.** The agent dropdown lists
 > only agents, so every message is answered by an agent. The Normal RAG
