@@ -62,7 +62,9 @@ class LangfuseClient:
         if _PROMPT_MISSES.get(name, 0) > time.monotonic():
             return None
         try:
-            prompt = client.get_prompt(name)
+            # No retries: the SDK retries every error twice with backoff, a
+            # missing prompt (404) included, which made each fetch take ~3 s.
+            prompt = client.get_prompt(name, max_retries=0)
         except Exception:
             logger.debug("langfuse get_prompt(%s) failed; using fallback", name)
             _PROMPT_MISSES[name] = time.monotonic() + getattr(
