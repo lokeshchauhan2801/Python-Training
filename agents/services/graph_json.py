@@ -126,7 +126,7 @@ def build_agent_graph(agent) -> dict:
     from agents.models import Step
 
     steps = step_dicts(Step.objects.filter(agent=agent).prefetch_related("tools"))
-    return graph_from_chain(agent.slug, walk_chain(steps))
+    return graph_from_chain(agent.slug_name, walk_chain(steps))
 
 
 def sync_agent_graph(agent) -> dict:

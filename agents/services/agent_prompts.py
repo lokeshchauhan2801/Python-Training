@@ -1,31 +1,15 @@
-"""Each Agent's role prompt, kept only in Langfuse.
-
-The prompt says what the agent is for and which tasks it can do. Every step of
-the agent's flow answers in that role (``ToolContext.persona``), followed by the
-chosen tool's docs. It is named after the agent's slug alone (no folders, no
-company: company scoping lives in the database), so agents sharing a slug share
-one role. It is created in Langfuse only when an Agent is created
-(``agents.signals``: canvas, API, admin, seeds); nothing is stored in the
-database.
-
-The prompt's Langfuse ``config`` is the agent's runtime config (model,
-temperature, max tokens, retrieval: ``agent_config``). Langfuse versions the
-role and config together, so saving one always carries the other forward.
-
-Everything else an agent is given (router prompt and rules, identity,
-response format) is code, next to the functions that use it.
-"""
-
 from __future__ import annotations
 
 
 def prompt_name(agent) -> str:
-    return agent.slug
+    # The slug is the full chat route ("/chat/chat_agent/"); Langfuse uses
+    # its name part ("chat_agent"): a "/" would make folders there.
+    return agent.slug_name
 
 
 def starter_text(agent) -> str:
     """A new agent's prompt until its role is written in Langfuse/the canvas."""
-    return f"You are the '{agent.name or agent.slug}' agent."
+    return f"You are the '{agent.name or agent.slug_name}' agent."
 
 
 def _client(langfuse=None):

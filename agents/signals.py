@@ -71,7 +71,7 @@ def sync_graph_on_agent_save(sender, instance, created, raw=False, **kwargs):
     if raw:
         return
     # A renamed agent keeps its graph's "agent" in step.
-    if (instance.graph or {}).get("agent") not in (None, instance.slug):
+    if (instance.graph or {}).get("agent") not in (None, instance.slug_name):
         _sync([instance.pk])
 
 

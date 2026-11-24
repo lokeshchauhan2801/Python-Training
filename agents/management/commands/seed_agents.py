@@ -27,7 +27,7 @@ _TOOL_SPECS = [
     ("document_processing_status", "Document processing status"),
 ]
 
-_AGENT_SLUG = "chat_agent"
+_AGENT_SLUG = "/chat/chat_agent/"
 _STEP_SLUG = "main"
 
 

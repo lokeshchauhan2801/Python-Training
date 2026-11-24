@@ -290,6 +290,22 @@ def chat_home(request):
     return render(request, "chat/chat_page.html", context)
 
 
+def chat_root(request):
+    """``/chat/``: GET shows the chat page, POST sends a Normal RAG message."""
+    if request.method == "POST":
+        return send(request)
+    return chat_home(request)
+
+
+def session_or_agent(request, key):
+    """``/chat/<key>/``: GET opens chat ``key`` (a session id); POST sends a
+    message to the agent whose slug is this complete path, e.g.
+    ``/chat/chat_agent/`` (``session_id`` in the body)."""
+    if request.method == "POST":
+        return send(request, agent_slug=request.path_info)
+    return chat_session(request, session_id=key)
+
+
 @login_required
 def chat_session(request, session_id):
     """GET /chat/<ulid>/ — same page, auto-opening the given session.
@@ -393,12 +409,7 @@ def agents_json(request):
             return JsonResponse({"error": "Select a company first."}, status=400)
 
     agents = [
-        {
-            "id": str(agent.pk),
-            "name": agent.name,
-            "slug": agent.slug,
-            "route": agent.route,
-        }
+        {"id": str(agent.pk), "name": agent.name, "slug": agent.slug}
         for agent in Agent.objects.filter(
             Q(company=company) | Q(company__isnull=True)
         ).order_by("created_at")
@@ -874,22 +885,35 @@ def _policy_turn(request, session, question, attachment_ids, *, agent, decision)
 
 @login_required
 @require_http_methods(["POST"])
-def send(request, session_id, agent_route=None):
+def send(request, agent_slug=None):
     """Answer one message; the URL picks who answers.
 
-    ``/chat/<session>/send/`` is normal RAG (``ChatService``);
-    ``/chat/<session>/send/<route>/`` is the Agent with that ``Agent.route``
-    (its LangGraph graph).
-    The ``X-Chat-Agent`` / ``X-Chat-Route`` headers say who answered, so the
-    browser console can show it.
+    ``POST /chat/`` is normal RAG (``ChatService``); ``POST /chat/chat_agent/``
+    is the Agent whose slug is that path (its LangGraph graph). The chat is the ``session_id`` in the
+    request body. The ``X-Chat-Agent`` / ``X-Chat-Route`` headers say who
+    answered, so the browser console can show it.
     """
-    response = _send(request, session_id, agent_route)
-    response["X-Chat-Agent"] = agent_route or router.NORMAL_RAG
+    session_id = (_posted_value(request, "session_id") or "").strip()
+    if not session_id:
+        return JsonResponse({"error": "session_id is required."}, status=400)
+    response = _send(request, session_id, agent_slug)
+    response["X-Chat-Agent"] = agent_slug or router.NORMAL_RAG
     response["X-Chat-Route"] = getattr(request, "chat_route", "rag")
     return response
 
 
-def _send(request, session_id, agent_route):
+def _posted_value(request, key):
+    """``key`` from the POST form, or from the JSON body."""
+    value = request.POST.get(key)
+    if value is None and request.content_type == "application/json" and request.body:
+        try:
+            value = (json.loads(request.body) or {}).get(key)
+        except (ValueError, TypeError, AttributeError):
+            value = None
+    return value if isinstance(value, str) else None
+
+
+def _send(request, session_id, agent_slug):
     from chat.services.timing import TurnTimer
 
     # Started at view entry so the saved total covers the whole request.
@@ -935,13 +959,13 @@ def _send(request, session_id, agent_route):
             {"error": "Type a message or attach a file."}, status=400
         )
 
-    # The URL picks the agent by its route: no route = normal RAG.
+    # The URL picks the agent: no slug = normal RAG.
     selected_agent = None
-    if agent_route:
-        selected_agent = router.find_agent(session.company, agent_route)
+    if agent_slug:
+        selected_agent = router.find_agent(session.company, agent_slug)
         if selected_agent is None:
             return JsonResponse(
-                {"error": f"No agent with route '{agent_route}' for this company."},
+                {"error": f"No agent at '{agent_slug}' for this company."},
                 status=404,
             )
     # Remember the choice so the dropdown shows it when the chat is reopened.

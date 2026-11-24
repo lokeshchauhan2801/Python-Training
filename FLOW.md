@@ -158,7 +158,7 @@ flow, else "Document reference" when citations exist, else "General purpose".
 | Route | Entry | Purpose |
 |-------|-------|---------|
 | `/chat/`, `/chat/<id>/` | `chat/views.py` | the chat page (Unfold shell) |
-| `/chat/<id>/send/` | `chat/views.py::send` | run one turn (graph or RAG) |
+| `POST /chat/`, `POST /chat/<agent_slug>/` | `chat/views.py::send` | run one turn: Normal RAG, or that agent's graph (`session_id` in the body) |
 | `/agent-builder/` | `agents/views.py` | the flow builder canvas (iframe) |
 | `/company/set-active-company/` | `company/views.py` | switch active company |
 | `api/v1/agents/graph|node|edge|tool/` | `agents/api/views.py` | canvas CRUD + `graph/<id>/load/` + `graph/<id>/activate/` |

@@ -59,14 +59,43 @@ class Tool(BaseModel, SoftDeleteModel):
         return self.slug not in available_slugs()
 
 
-# An agent's chat route: one URL path segment (lowercase letters, digits, - and _).
-ROUTE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# An agent's slug is its complete chat route, e.g. "/chat/chat_agent/": a POST
+# to that path is answered by the agent (chat.services.router). The name part
+# is lowercase letters, digits, "-" and "_".
+CHAT_PREFIX = "/chat/"
+SLUG_RE = re.compile(r"^/chat/[a-z0-9][a-z0-9_-]{0,63}/$")
+SLUG_HELP = (
+    "use /chat/<name>/ where the name is lowercase letters, digits, '-' and '_' "
+    "(max 64), starting with a letter or digit"
+)
+# Chat URLs that already exist under /chat/ (chat/urls.py); an agent route
+# would be shadowed by them.
+RESERVED_NAMES = frozenset(
+    {"new", "companies-json", "models-json", "sessions-json", "agents-json"}
+)
 
 
-def route_from_slug(slug: str) -> str:
-    """The default route for a slug: lowercase, other characters become "-"."""
-    route = re.sub(r"[^a-z0-9_-]+", "-", (slug or "").lower()).strip("-_")
-    return route[:64]
+def slug_name(slug: str) -> str:
+    """The name part of a slug: "/chat/chat_agent/" -> "chat_agent"."""
+    value = (slug or "").strip()
+    if value.startswith(CHAT_PREFIX):
+        value = value[len(CHAT_PREFIX):]
+    return value.strip("/")
+
+
+def full_slug(value: str) -> str:
+    """The complete route for a name or route: "chat2" -> "/chat/chat2/"."""
+    name = slug_name(value)
+    return f"{CHAT_PREFIX}{name}/" if name else ""
+
+
+def slug_error(slug: str) -> str | None:
+    """Why ``slug`` is not a valid agent route, or ``None``."""
+    if not SLUG_RE.match(slug or ""):
+        return SLUG_HELP
+    if slug_name(slug) in RESERVED_NAMES:
+        return f"'{slug}' is a reserved chat URL"
+    return None
 
 
 class Agent(BaseModel, SoftDeleteModel):
@@ -93,10 +122,9 @@ class Agent(BaseModel, SoftDeleteModel):
         blank=True,
         db_index=True,
     )
-    slug = models.CharField(max_length=64)
-    # The agent's chat endpoint: messages to /chat/<session>/send/<route>/ are
-    # answered by this agent (chat.services.router). Defaults to the slug.
-    route = models.CharField(max_length=64, blank=True, db_index=True)
+    # The agent's complete chat route, e.g. "/chat/chat_agent/"; unique across
+    # all agents (every company and global). See chat.services.router.
+    slug = models.CharField(max_length=80)
     name = models.CharField(max_length=120, blank=True)
     graph = models.JSONField(default=dict, blank=True)
     # Canvas-only: where the builder draws START and END,
@@ -111,37 +139,27 @@ class Agent(BaseModel, SoftDeleteModel):
         ordering = ["-created_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["company", "slug"],
+                fields=["slug"],
                 condition=Q(is_deleted=False),
-                name="agents_agent_slug_per_company",
-            ),
-            models.UniqueConstraint(
-                fields=["company", "route"],
-                condition=Q(is_deleted=False) & ~Q(route=""),
-                name="agents_agent_route_per_company",
+                name="agents_agent_slug_unique",
             ),
         ]
 
     def __str__(self) -> str:
         return self.name or self.slug
 
-    def save(self, *args, **kwargs):
-        if not self.route:
-            self.route = route_from_slug(self.slug)
-            if kwargs.get("update_fields") is not None:
-                kwargs["update_fields"] = {*kwargs["update_fields"], "route"}
-        super().save(*args, **kwargs)
+    @property
+    def slug_name(self) -> str:
+        """The route's name part ("chat_agent"): the Langfuse prompt name."""
+        return slug_name(self.slug)
 
     def clean(self):
         super().clean()
-        # The slug is the agent's Langfuse prompt name: a "/" would make a
-        # folder there.
-        if "/" in (self.slug or ""):
-            raise ValidationError({"slug": "an agent slug cannot contain '/'"})
-        if self.route and not ROUTE_RE.match(self.route):
-            raise ValidationError(
-                {"route": "use lowercase letters, digits, '-' and '_' (max 64)"}
-            )
+        # "chat2" or "/chat/chat2" is saved as the complete route "/chat/chat2/".
+        self.slug = full_slug(self.slug)
+        error = slug_error(self.slug)
+        if error:
+            raise ValidationError({"slug": error})
 
 
 class Step(BaseModel, SoftDeleteModel):

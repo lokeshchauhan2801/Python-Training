@@ -16,4 +16,4 @@ django.setup()
 from agents.models import Agent  # noqa: E402
 from chat.services.agent.graph import build_graph  # noqa: E402
 
-graph = build_graph(Agent.objects.get(company__isnull=True, slug="chat_agent").graph)
+graph = build_graph(Agent.objects.get(company__isnull=True, slug="/chat/chat_agent/").graph)

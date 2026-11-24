@@ -9,9 +9,9 @@ names the file and function behind each step.
                          ┌──────────── chat/services/ ────────────┐
 Browser                  │                                        │
  dropdown = "chatting"   │  router.py                             │
-   │                     │   ├─ no route  ─► ChatService          │  normal RAG
+   │                     │   ├─ no slug   ─► ChatService          │  normal RAG
    ▼                     │   │              (chat_service.py)     │
-POST /chat/<id>/send/chatting/                                    │
+POST /chat/chatting/   (body: session_id, question)               │
    │                     │   └─ "chatting" ─► AgentChatService    │  LangGraph
    ▼                     │                  (agent/service.py)    │
 chat/views.py  send() ───┼──►               uses ChatService      │
@@ -25,28 +25,39 @@ chat/views.py  send() ───┼──►               uses ChatService      
 
 | URL the browser calls | Who answers |
 |---|---|
-| `POST /chat/<session_id>/send/` | Normal RAG (`ChatService`) |
-| `POST /chat/<session_id>/send/chat_agent/` | Agent `chat_agent` |
-| `POST /chat/<session_id>/send/chatting/` | Agent `chatting` |
-| `POST /chat/<session_id>/send/<unknown>/` | `404 No agent with route '<unknown>' for this company.` |
+| `POST /chat/` | Normal RAG (`ChatService`) |
+| `POST /chat/chat_agent/` | The agent whose slug is `/chat/chat_agent/` |
+| `POST /chat/chat2/` | The agent whose slug is `/chat/chat2/` |
+| `POST /chat/<unknown>/` | `404 No agent at '/chat/<unknown>/' for this company.` |
 
-The last part of the URL is the agent's **route**, a column saved on each agent
-(`agents_agent.route`). Every agent has its own route:
+Which chat the message belongs to is sent in the request body as `session_id`
+(with the `question`). A request without `session_id` gets
+`400 session_id is required.`
 
-| Agent (slug) | Route column | Chat endpoint |
+### The slug is the complete route
+
+Each agent's **slug** column (`agents_agent.slug`) stores its complete chat
+route, so the request path is matched against it directly:
+
+| Agent | `agents_agent.slug` | Chat sends to |
 |---|---|---|
-| `chat_agent` | `chat_agent` | `/chat/<session_id>/send/chat_agent/` |
-| `chatting` | `chatting` | `/chat/<session_id>/send/chatting/` |
-| a new agent | `chat2` (you choose) | `/chat/<session_id>/send/chat2/` |
+| Chat agent | `/chat/chat_agent/` | `POST /chat/chat_agent/` |
+| a new agent | `/chat/chat2/` | `POST /chat/chat2/` |
 
-- A new agent's route defaults to its slug; you can change it.
-- Routes are unique per company (two agents of one company can't share one).
-- Allowed characters: lowercase letters, digits, `-` and `_` (max 64).
-- Where to set it: the agent builder (**Chat route** in the create dialog and
-  in the sidebar of the selected agent), Django admin (Agents → Agents), or the
-  API (`PATCH /api/v1/agents/agent/{id}/` with `{"route": "chat2"}`).
-- Migration `agents/0020_agent_route` added the column and set each existing
-  agent's route to its slug.
+- **Unique across all agents**, in every company and the global ones
+  (constraint `agents_agent_slug_unique`), so one route points to one agent.
+- Format: `/chat/<name>/`, where the name is lowercase letters, digits, `-`
+  and `_` (max 64), starting with a letter or digit.
+- You can type just the name (`chat2`) or `/chat/chat2`: the API, Django admin
+  and the agent builder save it as `/chat/chat2/`.
+- Reserved names (they are other chat URLs): `new`, `agents-json`,
+  `sessions-json`, `models-json`, `companies-json`.
+- The name part (`chat_agent`) is still used where a `/` would not fit: the
+  agent's Langfuse prompt name and the graph JSON's `"agent"` value
+  (`Agent.slug_name`).
+- Migrations: `agents/0020_agent_slug_unique` (one slug per agent across all
+  companies) and `agents/0021_agent_slug_full_route` (turned `chat_agent` into
+  `/chat/chat_agent/`).
 
 ---
 
@@ -54,7 +65,7 @@ The last part of the URL is the agent's **route**, a column saved on each agent
 
 ```
 chat/
-├── urls.py                    /send/ and /send/<agent_route>/ routes
+├── urls.py                    POST /chat/ and POST /chat/<name>/ (= an agent's slug)
 ├── views.py                   send(): reads the request, picks the path, streams the reply
 ├── templates/chat/chat_page.html
 │                              dropdown, builds the send URL, logs to the browser console
@@ -74,7 +85,7 @@ chat/
         └── studio.py          only for `langgraph dev` / LangGraph Studio
 
 agents/
-├── models.py                  Agent (`route` column + `graph` JSON field), Step, Tool
+├── models.py                  Agent (has the `graph` JSON field), Step, Tool
 ├── services/graph_json.py     Steps → graph JSON
 ├── services/agent_prompts.py  agent role + model config, from Langfuse
 └── signals.py                 rewrites Agent.graph whenever steps/tools change
@@ -99,7 +110,8 @@ Agent builder (canvas)  ──save steps──►  agents/signals.py  ──► 
 
 The agent's **role text** and **model config** (provider, model, temperature,
 max tokens, retrieval top_k) live in Langfuse, in a prompt named after the
-agent's slug (`agents/services/agent_prompts.py`).
+name part of the agent's slug, e.g. `chat_agent` for `/chat/chat_agent/`
+(`agents/services/agent_prompts.py`).
 
 ### The graph JSON
 
@@ -146,39 +158,48 @@ You can see the JSON in `GET /api/v1/agents/agent/{id}/` (field `graph`) and
 ### Step 1: the browser picks the URL (`chat_page.html`)
 
 - `loadAgents()` fills the agent dropdown from `GET /chat/agents-json/`.
-  Each option keeps the agent's id (`value`) and route (`data-route`).
-  The first option, "Normal RAG", has no route.
-- When the user sends, `postMessage()` calls `sendUrlFor(sessionId)`:
-  - no agent selected → `/chat/<id>/send/`
-  - agent selected → `/chat/<id>/send/<route>/`
+  Each option keeps the agent's id (`value`) and slug, its complete route (`data-slug`).
+  The first option, "Normal RAG", has no slug.
+- When the user sends, `postMessage()` calls `sendUrl()`:
+  - no agent selected → `POST /chat/`
+  - agent selected → `POST` to the agent's slug, e.g. `/chat/chat_agent/`
+- The body carries `session_id` (the open chat), `question`, and any
+  attachments / picked files.
 - It logs the request to the browser console:
   ```
-  [chat] send -> agent=chatting url=/chat/01M7.../send/chatting/
+  [chat] send -> agent=chatting url=/chat/chatting/ chat=01M7...
   ```
 - The request asks for a stream (`Accept: text/event-stream`), so the answer arrives piece by piece.
 
 ### Step 2: Django routes it (`chat/urls.py`)
 
 ```python
-path("<str:session_id>/send/", views.send, name="send"),
-path("<str:session_id>/send/<str:agent_route>/", views.send, name="send_agent"),
+path("", views.chat_root, name="home"),                # GET page, POST = Normal RAG
+path("<str:key>/", views.session_or_agent, name="session"),
+# GET /chat/<session id>/ opens that chat; POST /chat/<name>/ sends to the agent with that slug
 ```
 
-Both routes call the same view; the second one also passes `agent_route`.
+The method decides: a **GET** shows the chat page (or opens a chat by its id), a
+**POST** sends a message, and `send()` gets the request path
+(`/chat/chat_agent/`) as `agent_slug`.
+Because `/chat/new/`, `/chat/agents-json/`, `/chat/sessions-json/`,
+`/chat/models-json/` and `/chat/companies-json/` already exist, those names
+are reserved and can't be agent names.
 
 ### Step 3: the view reads the request (`chat/views.py` → `send()` / `_send()`)
 
-`send()` is a thin wrapper: it calls `_send()` and adds two response headers
-that the browser console prints (see step 10). `_send()` does the work:
+`send()` is a thin wrapper: it reads `session_id` from the body (400 when it is
+missing), calls `_send()` and adds two response headers that the browser
+console prints (see step 10). `_send()` does the work:
 
 1. Loads the chat session (`_resolve_session`) for the signed-in user.
 2. Reads the question, attachments (`attachment_ids`) and files ticked in the
    picker (`selected_file_ids`), and checks they belong to this chat.
-3. **Finds the agent from the URL:** `router.find_agent(session.company, agent_route)`
-   looks up `Agent.route`.
-   - The company's own agent wins over a global one (no company) with the same route.
+3. **Finds the agent from the URL:** `router.find_agent(session.company, agent_slug)`
+   finds the agent whose slug equals the request path (`/chat/chat_agent/`).
+   - Slugs are unique, so this is one agent; it must belong to the chat's company or be global.
    - Not found → returns **404**.
-   - No route → `selected_agent = None` (Normal RAG).
+   - No slug → `selected_agent = None` (Normal RAG).
 4. **Remembers the choice:** if the session's saved agent is different, it saves
    `session.selected_agent`. This is only so the dropdown is pre-filled when
    the chat is reopened. **The URL decides who answers, not this field.**
@@ -293,16 +314,16 @@ Errors become `data: {"error": "...", "status": 502}`
 `send()` adds two headers to every reply, and the page logs them:
 
 ```
-[chat] send -> agent=chatting url=/chat/01M7.../send/chatting/
+[chat] send -> agent=chatting url=/chat/chatting/ chat=01M7...
 [chat] answered by agent=chatting route=pipeline (HTTP 200)
 ```
 
 | `X-Chat-Agent` | `X-Chat-Route` | Meaning |
 |---|---|---|
 | `normal-rag` | `rag` | No agent in the URL; Normal RAG answered |
-| `<route>` | `pipeline` | The agent ran its LangGraph graph |
-| `<route>` | `fallback` | The agent lacked the tool for this read request; Normal RAG answered |
-| `<route>` | `blocked` | The agent refused (missing action tool or no runnable flow) |
+| `/chat/<name>/` | `pipeline` | The agent ran its LangGraph graph |
+| `/chat/<name>/` | `fallback` | The agent lacked the tool for this read request; Normal RAG answered |
+| `/chat/<name>/` | `blocked` | The agent refused (missing action tool or no runnable flow) |
 
 You can also see both headers in DevTools → Network → the `send` request → Response Headers.
 
@@ -376,22 +397,22 @@ right away; creating a chat (`POST /chat/new/`) can save one too.
 
 ## 6. How to try it
 
-1. Open the chat, pick **chatting** in the agent dropdown, send "hello".
+1. Open the chat, pick **Chat agent** in the agent dropdown, send "hello".
 2. Open DevTools → Console. You should see:
    ```
-   [chat] send -> agent=chatting url=/chat/<id>/send/chatting/
-   [chat] answered by agent=chatting route=pipeline (HTTP 200)
+   [chat] send -> agent=/chat/chat_agent/ url=/chat/chat_agent/ chat=<id>
+   [chat] answered by agent=/chat/chat_agent/ route=pipeline (HTTP 200)
    ```
-3. Pick **Chat agent** and send again: the URL ends in `/send/chat_agent/`.
-4. Pick **Normal RAG**: the URL ends in `/send/` and the console says `agent=normal-rag route=rag`.
+3. In DevTools → Network, the request is `POST /chat/chat_agent/` and its
+   Payload has `session_id` and `question`.
+4. Pick **Normal RAG**: the URL is `POST /chat/` and the console says `agent=normal-rag route=rag`.
 5. In the database, the saved turn's `metadata.agent_selection.agent_slug` names
    the agent, and `metadata.source` is `"langgraph"` for agent answers.
 
 To add a new agent with its own endpoint (for example `chat2`): create it in
-the agent builder, set **Chat route** to `chat2`, connect START → a step → END
-and tick its tools. It appears in the dropdown, and its messages go to
-`/chat/<id>/send/chat2/`. To move an existing agent to another endpoint, change
-its route in the builder sidebar or in admin.
+the agent builder with slug `chat2` (the dialog shows the saved slug
+`/chat/chat2/`), connect START → a step → END and tick its tools. It appears in the
+dropdown, and its messages go to `POST /chat/chat2/`.
 
 ## 7. Optional: LangGraph Studio
 

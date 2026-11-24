@@ -1247,15 +1247,15 @@
       }
 
       function messagesUrlFor(id) { return baseUrl + id + "/messages-json/"; }
-      // The URL picks who answers: /send/ = Normal RAG, /send/<route>/ = the
-      // agent with that route (each agent has its own, saved on the agent).
-      function selectedAgentRoute() {
+      // The URL picks who answers: POST /chat/ = Normal RAG; an agent's slug
+      // is its complete route (e.g. /chat/chat_agent/). The chat goes in the body.
+      function selectedAgentSlug() {
         const opt = agentSel.options[agentSel.selectedIndex];
-        return (opt && opt.dataset.route) || "";
+        return (opt && opt.dataset.slug) || "";
       }
-      function sendUrlFor(id) {
-        const route = selectedAgentRoute();
-        return baseUrl + id + "/send/" + (route ? encodeURIComponent(route) + "/" : "");
+      function sendUrl() {
+        const slug = selectedAgentSlug();
+        return slug || baseUrl;
       }
       function attachUrlFor(id) { return baseUrl + id + "/attach/"; }
       function reprocessUrlFor(id) { return baseUrl + id + "/reprocess/"; }
@@ -2575,7 +2575,7 @@
           agents.forEach(function (a) {
             const opt = document.createElement("option");
             opt.value = a.id;
-            opt.dataset.route = a.route || "";
+            opt.dataset.slug = a.slug;
             opt.textContent = a.name || a.slug;
             agentSel.appendChild(opt);
           });
@@ -2834,6 +2834,7 @@
         const includePending = opts.includePending !== false;
         const picker = opts.picker || null;
         const body = new URLSearchParams();
+        body.append("session_id", sessionId);
         body.append("question", question);
         body.append("model_name", modelSel.value);
 
@@ -2861,9 +2862,9 @@
         const placeholder = renderProcessingPlaceholder();
         const live = { el: null };
 
-        const sendUrl = sendUrlFor(sessionId);
-        console.info("[chat] send -> agent=%s url=%s", selectedAgentRoute() || "normal-rag", sendUrl);
-        return fetch(sendUrl, {
+        const url = sendUrl();
+        console.info("[chat] send -> agent=%s url=%s chat=%s", selectedAgentSlug() || "normal-rag", url, sessionId);
+        return fetch(url, {
           method: "POST",
           headers: jsonHeaders({
             "X-CSRFToken": getCookie("csrftoken"),

@@ -6,7 +6,7 @@ from rest_framework import serializers
 from basics.api.serializers import AuditReadOnlySerializerMixin
 from chat.api.serializers import RequiredCompanyResolutionMixin
 
-from ..models import ROUTE_RE, Agent, Step, Tool, route_from_slug
+from ..models import Agent, Step, Tool, full_slug, slug_error
 
 
 class _CompanyScopedSerializerMixin(RequiredCompanyResolutionMixin):
@@ -106,7 +106,6 @@ class AgentSerializer(
         fields = [
             "id",
             "slug",
-            "route",
             "name",
             "prompt",
             "config",
@@ -136,48 +135,27 @@ class AgentSerializer(
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        company = self._scoped_company(attrs)
 
         slug = attrs.get("slug") or (self.instance and self.instance.slug)
-        # The slug is the agent's Langfuse prompt name: no "/" (a folder there).
-        if slug and "/" in slug:
-            raise serializers.ValidationError({"slug": "an agent slug cannot contain '/'"})
         if slug:
-            # The DB constraint cannot see global (NULL company) duplicates.
-            clash = (
-                Agent.objects.filter(company=company, slug=slug)
-                if company is not None
-                else Agent.objects.filter(company__isnull=True, slug=slug)
-            )
+            # Unique across every company and the global agents.
+            clash = Agent.objects.filter(slug=slug)
             if self.instance is not None:
                 clash = clash.exclude(pk=self.instance.pk)
             if clash.exists():
                 raise serializers.ValidationError(
-                    {"slug": "an agent with this slug already exists"}
+                    {"slug": f"the route '{slug}' is already used by another agent"}
                 )
-
-        # The chat route (/chat/<session>/send/<route>/); defaults to the slug.
-        route = attrs.get("route")
-        if route is None and self.instance is not None:
-            route = self.instance.route
-        route = (route or "").strip().lower() or route_from_slug(slug or "")
-        if not ROUTE_RE.match(route):
-            raise serializers.ValidationError(
-                {"route": "use lowercase letters, digits, '-' and '_' (max 64)"}
-            )
-        clash = (
-            Agent.objects.filter(company=company, route=route)
-            if company is not None
-            else Agent.objects.filter(company__isnull=True, route=route)
-        )
-        if self.instance is not None:
-            clash = clash.exclude(pk=self.instance.pk)
-        if clash.exists():
-            raise serializers.ValidationError(
-                {"route": "another agent already uses this route"}
-            )
-        attrs["route"] = route
         return attrs
+
+    def validate_slug(self, value):
+        """The agent's complete chat route: "chat2" or "/chat/chat2" is saved
+        as "/chat/chat2/" (a POST to that path is answered by the agent)."""
+        slug = full_slug(value)
+        error = slug_error(slug)
+        if error:
+            raise serializers.ValidationError(error)
+        return slug
 
     def validate_layout(self, value):
         """``{"start"|"end": {"x": number, "y": number}}``; merged over the stored one."""

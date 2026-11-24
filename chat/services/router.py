@@ -1,10 +1,14 @@
 """Pick which service answers a chat message.
 
-The send URL names the agent by its route (``Agent.route``, saved per agent):
+Each agent's slug is its complete chat route (``Agent.slug``, e.g.
+``/chat/chat_agent/``, unique across all agents). The request path is matched
+against it:
 
-* ``POST /chat/<session>/send/``         -> no agent: ``ChatService`` (normal RAG)
-* ``POST /chat/<session>/send/<route>/`` -> the Agent with that route:
+* ``POST /chat/``            -> no agent: ``ChatService`` (normal RAG)
+* ``POST /chat/chat_agent/`` -> the Agent whose slug is ``/chat/chat_agent/``:
   ``AgentChatService`` (its LangGraph graph from ``Agent.graph``)
+
+The chat session is the ``session_id`` in the request body.
 
 ``ChatService`` (``chat_service.py``) is the one chat service. The agent
 runtime (``agent/``) sits on top of it and uses it to save turns and for RAG.
@@ -22,20 +26,20 @@ logger = logging.getLogger(__name__)
 NORMAL_RAG = "normal-rag"
 
 
-def find_agent(company, route):
-    """The Agent whose ``route`` is ``route`` for ``company``, or ``None``.
+def find_agent(company, slug):
+    """The Agent whose slug (complete route, e.g. ``/chat/chat_agent/``) is
+    ``slug`` and that ``company`` may use, or ``None``.
 
-    A company's own Agent wins over a global one (no company) with the same route.
+    Slugs are unique across all agents, so a slug names one agent; it must be
+    ``company``'s own or a global one (no company).
     """
     from agents.models import Agent
 
-    if not route:
+    if not slug:
         return None
-    return (
-        Agent.objects.filter(Q(company=company) | Q(company__isnull=True), route=route)
-        .order_by("company_id", "created_at")  # NULLs (global) sort last
-        .first()
-    )
+    return Agent.objects.filter(
+        Q(company=company) | Q(company__isnull=True), slug=slug
+    ).first()
 
 
 def chat_service(llm_client=None) -> ChatService:
@@ -62,5 +66,5 @@ def service_for(agent=None, llm_client=None):
             agent=agent,
         )
     except Exception as exc:
-        logger.exception("Could not build the runtime for agent %s", agent.route)
+        logger.exception("Could not build the runtime for agent %s", agent.slug)
         raise ChatProviderError("The selected agent runtime could not be constructed.") from exc

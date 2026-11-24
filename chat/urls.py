@@ -6,20 +6,14 @@ from . import views
 app_name = "chat"
 
 urlpatterns = [
-    path("", views.chat_home, name="home"),
+    # GET = the chat page; POST = send a message with Normal RAG.
+    path("", views.chat_root, name="home"),
     path("companies-json/", views.companies_json, name="companies_json"),
     path("models-json/", views.models_json, name="models_json"),
     path("sessions-json/", views.sessions_json, name="sessions_json"),
     path("agents-json/", views.agents_json, name="agents_json"),
     path("new/", views.new_session, name="new_session"),
     path("<str:session_id>/messages-json/", views.messages_json, name="messages_json"),
-    path("<str:session_id>/send/", views.send, name="send"),
-    # The agent with this route (Agent.route) answers; see chat.services.router.
-    path(
-        "<str:session_id>/send/<str:agent_route>/",
-        views.send,
-        name="send_agent",
-    ),
     path(
         "<str:session_id>/selected-agent/",
         views.selected_agent,
@@ -48,5 +42,7 @@ urlpatterns = [
         name="file_action",
     ),
     path("<str:session_id>/delete/", views.delete_session, name="delete_session"),
-    path("<str:session_id>/", views.chat_session, name="session"),
+    # GET /chat/<session id>/ = open that chat;
+    # POST /chat/<agent slug>/ = send a message to that agent.
+    path("<str:key>/", views.session_or_agent, name="session"),
 ]
